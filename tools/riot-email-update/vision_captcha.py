@@ -787,11 +787,11 @@ def captcha_visible(page) -> bool:
         n = frames.count()
         for i in range(n):
             box = frames.nth(i).bounding_box(timeout=1000)
-            if box and box["width"] > 100 and box["height"] > 100 and box["y"] >= 0:
+            # Challenge widget is large; checkbox can be smaller but still > 20px
+            if box and box["width"] > 20 and box["height"] > 20 and box["y"] >= -5:
                 return True
     except Exception:
         pass
-    # Challenge prompt text in main page (sometimes mirrored)
     try:
         content = page.content().lower()
     except Exception:
@@ -971,12 +971,30 @@ def solve_visible_captcha(
     """
     backend = backend or os.getenv("VISION_BACKEND") or "auto"
     prev_instruction = ""
+    # Wait up to ~8s for the challenge iframe to appear after sign-in
+    for _ in range(16):
+        if captcha_visible(page):
+            break
+        page.wait_for_timeout(500)
     for round_i in range(1, max_rounds + 1):
         if not captcha_visible(page):
             _log("no captcha visible")
             return True
         _log(f"=== vision round {round_i}/{max_rounds} ===")
         shot = screenshot_challenge(page, tag=f"r{round_i}")
+        # If screenshot is a full login page (no challenge clip), wait and retry
+        try:
+            from PIL import Image as _PILImage
+
+            sw, sh = _PILImage.open(shot).size
+            if sw > 700 and not prev_instruction:
+                _log("screenshot looks like full page — waiting for challenge widget")
+                page.wait_for_timeout(2000)
+                if not captcha_visible(page):
+                    continue
+                shot = screenshot_challenge(page, tag=f"r{round_i}b")
+        except Exception:
+            pass
         use_backend = backend
         # If a previous drag/click didn't clear the same challenge, escalate to agent
         if (

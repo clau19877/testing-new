@@ -199,7 +199,12 @@ def main() -> int:
         # --- 03 sign-in ---
         log("03", "clicking sign-in")
         click_signin(page)
-        page.wait_for_timeout(4000)
+        page.wait_for_timeout(5000)
+        # Wait briefly for hCaptcha challenge to mount
+        for _ in range(10):
+            if captcha_visible(page):
+                break
+            page.wait_for_timeout(500)
         shot(page, "03_after_signin")
         log("03", f"url={page.url}")
         log("03", f"captcha_visible={captcha_visible(page)}")
@@ -250,14 +255,21 @@ def main() -> int:
             content_l = page.content().lower()
         except Exception:
             pass
+        mfa_input = (
+            page.locator('input[autocomplete="one-time-code"]').count() > 0
+            or page.locator('input[inputmode="numeric"]').count() > 0
+            or page.locator('input[name*="code" i]').count() > 0
+        )
         needs_mfa = (
             inbox
             and not page_logged_in(page)
             and not captcha_visible(page)
+            and mfa_input
             and (
-                "code" in content_l
-                or page.locator('input[autocomplete="one-time-code"]').count() > 0
-                or "multifactor" in content_l
+                "multifactor" in content_l
+                or "enter the code" in content_l
+                or "verification code" in content_l
+                or "check your email" in content_l
             )
         )
         if needs_mfa:
