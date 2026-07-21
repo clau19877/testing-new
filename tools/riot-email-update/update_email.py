@@ -25,7 +25,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from captcha import CapSolverError, solve_and_inject
+from captcha import CaptchaSolverError, solve_and_inject
 from imap_mail import ImapConfig, ImapInbox
 
 ACCOUNT_URL = "https://account.riotgames.com/"
@@ -47,6 +47,9 @@ def prompt(label: str, *, secret: bool = False, default: str | None = None) -> s
 
 
 def pause(message: str) -> None:
+    if os.getenv("NONINTERACTIVE", "").strip().lower() in {"1", "true", "yes"}:
+        print(f"\n>>> {message}\n    (NONINTERACTIVE: continuing)")
+        return
     input(f"\n>>> {message}\n    Press Enter to continue… ")
 
 
@@ -80,13 +83,19 @@ def parse_args() -> argparse.Namespace:
         help="Default Playwright timeout in ms (default: 180000)",
     )
     parser.add_argument(
-        "--capsolver-key",
-        help="CapSolver API key (or CAPSOLVER_API_KEY)",
+        "--captcha-provider",
+        choices=("capless", "capsolver"),
+        default=None,
+        help="Captcha provider (default: CAPTCHA_PROVIDER or capless)",
+    )
+    parser.add_argument(
+        "--captcha-key",
+        help="Captcha API key (CAPLESS_API_KEY / CAPSOLVER_API_KEY)",
     )
     parser.add_argument(
         "--no-captcha-solver",
         action="store_true",
-        help="Disable CapSolver even if an API key is configured",
+        help="Disable captcha solver even if an API key is configured",
     )
     parser.add_argument(
         "--imap-timeout",
@@ -186,17 +195,75 @@ def fill_mfa_code(page, code: str) -> bool:
     )
 
 
-def try_solve_hcaptcha(page, api_key: str | None, proxy: str | None) -> bool:
+def dismiss_cookie_banner(page) -> None:
+    click_first_matching(
+        page,
+        [
+            'button.osano-cm-dialog__close',
+            'button[aria-label="Close this dialog"]',
+            'button:has-text("Accept")',
+            'button:has-text("Agree")',
+        ],
+        "cookie dismiss",
+    )
+
+
+def click_riot_signin(page) -> bool:
+    """Riot uses a red circular arrow button, not a labeled Sign in submit."""
+    dismiss_cookie_banner(page)
+    selectors = [
+        'button[data-testid="btn-signin-submit"]',
+        'button[type="submit"]',
+        'button.mobile-button',
+        'button:has(svg)',
+        '[role="button"][data-testid*="submit" i]',
+        'button:has-text("Sign in")',
+        'button:has-text("Log in")',
+        'button:has-text("Sign In")',
+    ]
+    if click_first_matching(page, selectors, "Sign in"):
+        return True
+    # Last resort: click the largest visible circular button near the form
+    try:
+        clicked = page.evaluate(
+            """() => {
+              const buttons = [...document.querySelectorAll('button')];
+              const candidate = buttons.find(b => {
+                const r = b.getBoundingClientRect();
+                const style = getComputedStyle(b);
+                return r.width > 40 && r.width < 120 && r.height > 40 && r.height < 120
+                  && r.top > 200 && style.visibility !== 'hidden';
+              });
+              if (!candidate) return false;
+              candidate.click();
+              return true;
+            }"""
+        )
+        if clicked:
+            print("  Clicked Sign in via circular-button heuristic")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def try_solve_hcaptcha(
+    page,
+    *,
+    provider: str,
+    api_key: str | None,
+    proxy: str | None,
+) -> bool:
     if not api_key:
         return False
-    print("[captcha] Solving hCaptcha with CapSolver…")
+    print(f"[captcha] Solving hCaptcha with {provider}…")
     try:
-        return solve_and_inject(page, api_key, proxy=proxy)
-    except CapSolverError as exc:
-        print(f"  CapSolver error: {exc}")
+        return solve_and_inject(page, provider=provider, api_key=api_key, proxy=proxy)
+    except CaptchaSolverError as exc:
+        print(f"  Captcha error: {exc}")
         return False
     except Exception as exc:
-        print(f"  CapSolver unexpected error: {exc}")
+        print(f"  Captcha unexpected error: {exc}")
         return False
 
 
@@ -248,8 +315,9 @@ def run_login(
     password: str,
     timeout_ms: int,
     *,
-    capsolver_key: str | None,
-    proxy: str | None,
+    captcha_provider: str,
+    captcha_key: str | None,
+    captcha_proxy: str | None,
     current_inbox: ImapInbox | None,
     imap_timeout: float,
 ) -> None:
@@ -268,6 +336,7 @@ def run_login(
             print("  Appears already signed in.")
             return
 
+    dismiss_cookie_banner(page)
     print("[1/3] Filling login form…")
     filled_user = fill_first_matching(
         page,
@@ -295,43 +364,33 @@ def run_login(
     )
 
     page.wait_for_timeout(1_500)
-    solved = try_solve_hcaptcha(page, capsolver_key, proxy)
+    solved = try_solve_hcaptcha(
+        page,
+        provider=captcha_provider,
+        api_key=captcha_key,
+        proxy=captcha_proxy,
+    )
 
     if not (filled_user and filled_pass):
         pause(
             "Could not auto-fill the login form. Sign in manually in the browser window."
         )
     else:
-        clicked = click_first_matching(
-            page,
-            [
-                'button[type="submit"]',
-                'button:has-text("Sign in")',
-                'button:has-text("Log in")',
-                'button:has-text("Sign In")',
-                '[data-testid="btn-signin-submit"]',
-            ],
-            "Sign in",
-        )
+        clicked = click_riot_signin(page)
         if not clicked:
-            pause("Click Sign in yourself.")
+            pause("Click the red arrow Sign in button yourself.")
 
         page.wait_for_timeout(2_000)
         if not page_looks_logged_in(page):
             if not solved or page.locator('iframe[src*="hcaptcha"]').count() > 0:
-                solved = try_solve_hcaptcha(page, capsolver_key, proxy)
+                solved = try_solve_hcaptcha(
+                    page,
+                    provider=captcha_provider,
+                    api_key=captcha_key,
+                    proxy=captcha_proxy,
+                )
                 if solved:
-                    click_first_matching(
-                        page,
-                        [
-                            'button[type="submit"]',
-                            'button:has-text("Sign in")',
-                            'button:has-text("Log in")',
-                            'button:has-text("Sign In")',
-                            '[data-testid="btn-signin-submit"]',
-                        ],
-                        "Sign in (after captcha)",
-                    )
+                    click_riot_signin(page)
 
     # MFA / email code via IMAP
     page.wait_for_timeout(2_000)
@@ -351,19 +410,15 @@ def run_login(
     except Exception:
         pass
 
-    if capsolver_key and not page_looks_logged_in(page):
-        print("  Login not finished yet — retrying CapSolver once…")
-        if try_solve_hcaptcha(page, capsolver_key, proxy):
-            click_first_matching(
-                page,
-                [
-                    'button[type="submit"]',
-                    'button:has-text("Sign in")',
-                    'button:has-text("Log in")',
-                    'button:has-text("Sign In")',
-                ],
-                "Sign in (retry)",
-            )
+    if captcha_key and not page_looks_logged_in(page):
+        print("  Login not finished yet — retrying captcha once…")
+        if try_solve_hcaptcha(
+            page,
+            provider=captcha_provider,
+            api_key=captcha_key,
+            proxy=captcha_proxy,
+        ):
+            click_riot_signin(page)
             page.wait_for_timeout(2_000)
             try_fill_imap_code(
                 page,
@@ -533,12 +588,29 @@ def main() -> int:
     args = parse_args()
 
     headed = args.headed if args.headed is not None else env_bool("HEADED", True)
-    capsolver_key = None if args.no_captcha_solver else (
-        args.capsolver_key or os.getenv("CAPSOLVER_API_KEY") or None
-    )
-    if capsolver_key:
-        capsolver_key = capsolver_key.strip() or None
-    proxy = (os.getenv("CAPSOLVER_PROXY") or os.getenv("PROXY") or "").strip() or None
+    captcha_provider = (
+        args.captcha_provider
+        or os.getenv("CAPTCHA_PROVIDER")
+        or "capless"
+    ).strip().lower()
+    captcha_key = None
+    if not args.no_captcha_solver:
+        captcha_key = (
+            args.captcha_key
+            or os.getenv("CAPLESS_API_KEY")
+            or os.getenv("CAPTCHA_API_KEY")
+            or os.getenv("CAPSOLVER_API_KEY")
+            or None
+        )
+    if captcha_key:
+        captcha_key = captcha_key.strip() or None
+    captcha_proxy = (
+        os.getenv("CAPLESS_PROXY")
+        or os.getenv("CAPTCHA_PROXY")
+        or os.getenv("CAPSOLVER_PROXY")
+        or os.getenv("PROXY")
+        or ""
+    ).strip() or None
 
     current_cfg = ImapConfig.from_env(env_map(), "IMAP")
     new_cfg = ImapConfig.from_env(env_map(), "NEW_IMAP")
@@ -553,10 +625,21 @@ def main() -> int:
         "\nThis helper drives the official Riot account site for YOUR account only.\n"
         f"Browser mode: {'headed' if headed else 'headless'}\n"
         f"Target email: {new_email}\n"
-        f"hCaptcha solver: {'CapSolver' if capsolver_key else 'manual'}\n"
+        f"Captcha: {captcha_provider if captcha_key else 'manual'} "
+        f"{'(proxy set)' if captcha_proxy else '(no proxy)'}\n"
         f"IMAP current inbox: {current_cfg.user if current_cfg else 'not set'}\n"
         f"IMAP new inbox: {new_cfg.user if new_cfg else 'not set'}\n"
     )
+    if captcha_provider == "capsolver":
+        print(
+            "NOTE: CapSolver currently rejects Riot's hCaptcha sitekey.\n"
+            "      Prefer CAPTCHA_PROVIDER=capless + CAPLESS_API_KEY + CAPLESS_PROXY.\n"
+        )
+    if captcha_provider == "capless" and captcha_key and not captcha_proxy:
+        print(
+            "NOTE: Capless requires a residential proxy (CAPLESS_PROXY).\n"
+            "      Format: http://user:pass@host:port\n"
+        )
 
     if current_inbox:
         try:
@@ -599,8 +682,9 @@ def main() -> int:
                 username,
                 password,
                 args.timeout_ms,
-                capsolver_key=capsolver_key,
-                proxy=proxy,
+                captcha_provider=captcha_provider,
+                captcha_key=captcha_key,
+                captcha_proxy=captcha_proxy,
                 current_inbox=current_inbox,
                 imap_timeout=args.imap_timeout,
             )

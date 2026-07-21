@@ -20,4 +20,4 @@ tools/riot-email-update/__pycache__/
 
 # Foundry files
 /out
-/cache_forge
+/cache_forgetools/riot-email-update/debug/
