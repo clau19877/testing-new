@@ -607,9 +607,18 @@ def main() -> int:
     captcha_proxy = (
         os.getenv("CAPLESS_PROXY")
         or os.getenv("CAPTCHA_PROXY")
+        or os.getenv("BROWSER_PROXY")
         or os.getenv("CAPSOLVER_PROXY")
         or os.getenv("PROXY")
         or ""
+    ).strip() or None
+    if not captcha_proxy:
+        from proxyutil import pick_proxy
+
+        captcha_proxy = pick_proxy(None, os.getenv("PROXY_LIST") or "data/proxies.txt")
+
+    browser_proxy = (
+        os.getenv("BROWSER_PROXY") or captcha_proxy or ""
     ).strip() or None
 
     current_cfg = ImapConfig.from_env(env_map(), "IMAP")
@@ -627,6 +636,7 @@ def main() -> int:
         f"Target email: {new_email}\n"
         f"Captcha: {captcha_provider if captcha_key else 'manual'} "
         f"{'(proxy set)' if captcha_proxy else '(no proxy)'}\n"
+        f"Browser proxy: {'yes' if browser_proxy else 'no'}\n"
         f"IMAP current inbox: {current_cfg.user if current_cfg else 'not set'}\n"
         f"IMAP new inbox: {new_cfg.user if new_cfg else 'not set'}\n"
     )
@@ -668,11 +678,24 @@ def main() -> int:
         return 1
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=not headed)
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            locale="en-US",
+        browser = p.chromium.launch(
+            headless=not headed,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
         )
+        context_kwargs: dict = {
+            "viewport": {"width": 1280, "height": 900},
+            "locale": "en-US",
+            "user_agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            ),
+        }
+        if browser_proxy:
+            from proxyutil import to_playwright
+
+            context_kwargs["proxy"] = to_playwright(browser_proxy)
+            print(f"  Browser using proxy {context_kwargs['proxy']['server']}")
+        context = browser.new_context(**context_kwargs)
         page = context.new_page()
         page.set_default_timeout(args.timeout_ms)
 

@@ -180,20 +180,10 @@ def solve_capless(
     Capless (https://capless.lol) — supports Riot authenticate.riotgames.com.
     Requires a residential/mobile HTTP proxy matching the browser egress IP.
     """
-    # Capless expects the page URL to match its allowlist patterns.
-    site = website_url
-    if "authenticate.riotgames.com" in website_url:
-        # Keep full URL (query allowed by their /* wildcard)
-        site = website_url
-    elif "account.riotgames.com" in website_url:
-        site = website_url
+    from proxyutil import to_http_url
 
-    proxy_fmt = proxy
-    if proxy_fmt and "://" not in proxy_fmt and proxy_fmt.count(":") >= 3:
-        # CapSolver-style http:ip:port:user:pass → http://user:pass@ip:port
-        parts = proxy_fmt.split(":")
-        scheme, ip, port, user, password = parts[0], parts[1], parts[2], parts[3], ":".join(parts[4:])
-        proxy_fmt = f"{scheme}://{user}:{password}@{ip}:{port}"
+    site = website_url
+    proxy_fmt = to_http_url(proxy)
 
     headers = {"Content-Type": "application/json", "x-api-key": api_key}
     payload: dict[str, Any] = {
@@ -205,7 +195,7 @@ def solve_capless(
     if rqdata:
         payload["rqdata"] = rqdata
 
-    print("  Capless: submitting solve…", flush=True)
+    print(f"  Capless: submitting solve via {proxy_fmt.split('@')[-1]}…", flush=True)
     resp = requests.post(CAPLESS_SOLVE, json=payload, headers=headers, timeout=timeout)
     try:
         data = resp.json()
