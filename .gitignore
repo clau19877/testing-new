@@ -4,6 +4,7 @@ node_modules
 # Riot email helper local env / venv
 tools/riot-email-update/.venv/
 tools/riot-email-update/.env
+tools/riot-email-update/__pycache__/
 
 # Hardhat files
 /cache
