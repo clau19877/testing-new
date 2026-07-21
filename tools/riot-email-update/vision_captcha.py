@@ -1075,13 +1075,27 @@ def solve_visible_captcha(
         page.wait_for_timeout(1000)
         shot2 = screenshot_challenge(page, tag=f"r{round_i}_after")
         _log(f"after-click shot {shot2.name}")
+        try:
+            body = page.content().lower()
+            if "something went wrong" in body or "captcha attempt has timed out" in body:
+                _log("Riot error/timeout page after captcha action — fail")
+                return False
+        except Exception:
+            pass
         # If checkbox frame shows success, done
         try:
             # challenge iframe often navigates or shrinks when done
-            if not captcha_visible(page):
+            if not captcha_visible(page) and page_looks_past_login(page):
                 _log("captcha gone — success")
                 return True
+            if not captcha_visible(page):
+                _log("captcha iframe gone but still on login — treating as unresolved")
         except Exception:
             pass
     _log("max vision rounds exhausted")
     return False
+
+
+def page_looks_past_login(page) -> bool:
+    u = page.url or ""
+    return "account.riotgames.com" in u and "authenticate" not in u

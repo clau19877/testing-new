@@ -303,8 +303,12 @@ def solve_and_inject(
 ) -> bool:
     """
     Detect hCaptcha on the current page, solve, inject token.
-    provider: "capless" (recommended for Riot) or "capsolver"
+    provider: capless | capsolver | capmonster | twocaptcha | nonecap
     """
+    import os
+
+    from captcha_providers import solve_with_provider
+
     website_url = page.url
     # Capless allowlist is host/* — keep origin+path, drop huge query if needed
     if "authenticate.riotgames.com" in website_url:
@@ -315,7 +319,6 @@ def solve_and_inject(
     params = extract_hcaptcha_params(page)
     sitekey = params.get("sitekey") or known_sitekey_for_url(page.url)
     rqdata = params.get("rqdata")
-    is_invisible = bool(params.get("isInvisible"))
 
     # Try to pull fresh rqdata from recent performance entries / page globals
     if not rqdata:
@@ -344,31 +347,25 @@ def solve_and_inject(
         print("  No rqdata found (will try without enterprise payload)", flush=True)
 
     provider = (provider or "capless").strip().lower()
-    if provider == "capsolver":
-        token = solve_capsolver(
-            api_key,
-            website_url=website_url,
-            website_key=sitekey,
-            user_agent=user_agent,
-            rqdata=rqdata,
-            is_invisible=is_invisible,
-            proxy=proxy,
+    # CapMonster-style Riot scripts often use auth.riotgames.com as websiteURL
+    if provider in ("capmonster", "twocaptcha", "2captcha", "nonecap"):
+        website_url = os.getenv("HCAPTCHA_WEBSITE_URL") or "https://auth.riotgames.com"
+
+    if provider == "capless" and not proxy:
+        raise CaptchaSolverError(
+            "Capless requires a proxy (set CAPLESS_PROXY / CAPTCHA_PROXY). "
+            "Use a residential proxy, ideally same IP as this browser."
         )
-    elif provider == "capless":
-        if not proxy:
-            raise CaptchaSolverError(
-                "Capless requires a proxy (set CAPLESS_PROXY / CAPTCHA_PROXY). "
-                "Use a residential proxy, ideally same IP as this browser."
-            )
-        token = solve_capless(
-            api_key,
-            website_url=website_url,
-            website_key=sitekey,
-            proxy=proxy,
-            rqdata=rqdata,
-        )
-    else:
-        raise CaptchaSolverError(f"Unknown captcha provider: {provider}")
+
+    token = solve_with_provider(
+        provider,
+        api_key,
+        website_url=website_url,
+        website_key=sitekey,
+        rqdata=rqdata,
+        user_agent=user_agent,
+        proxy=proxy,
+    )
 
     print(f"  Token received ({len(token)} chars) — injecting…", flush=True)
     inject_hcaptcha_token(page, token)

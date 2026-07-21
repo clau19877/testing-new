@@ -84,13 +84,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--captcha-provider",
-        choices=("capless", "capsolver"),
+        choices=("capless", "capsolver", "capmonster", "twocaptcha", "nonecap", "vision"),
         default=None,
         help="Captcha provider (default: CAPTCHA_PROVIDER or capless)",
     )
     parser.add_argument(
         "--captcha-key",
-        help="Captcha API key (CAPLESS_API_KEY / CAPSOLVER_API_KEY)",
+        help="Captcha API key (or set CAPLESS/CAPMONSTER/TWOCAPTCHA/NONECAP/CAPSOLVER_API_KEY)",
     )
     parser.add_argument(
         "--no-captcha-solver",
@@ -595,10 +595,22 @@ def main() -> int:
     ).strip().lower()
     captcha_key = None
     if not args.no_captcha_solver:
+        key_env = {
+            "capless": "CAPLESS_API_KEY",
+            "capsolver": "CAPSOLVER_API_KEY",
+            "capmonster": "CAPMONSTER_API_KEY",
+            "twocaptcha": "TWOCAPTCHA_API_KEY",
+            "nonecap": "NONECAP_API_KEY",
+        }.get(captcha_provider)
         captcha_key = (
             args.captcha_key
+            or (os.getenv(key_env) if key_env else None)
             or os.getenv("CAPLESS_API_KEY")
             or os.getenv("CAPTCHA_API_KEY")
+            or os.getenv("CAPMONSTER_API_KEY")
+            or os.getenv("TWOCAPTCHA_API_KEY")
+            or os.getenv("TWO_CAPTCHA_API_KEY")
+            or os.getenv("NONECAP_API_KEY")
             or os.getenv("CAPSOLVER_API_KEY")
             or None
         )
