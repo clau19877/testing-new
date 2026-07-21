@@ -1,6 +1,12 @@
 node_modules
 .env
 
+# Amazon JP account system runtime artifacts
+amazon-jp-account-system/node_modules
+amazon-jp-account-system/dist
+amazon-jp-account-system/data
+amazon-jp-account-system/.env
+
 # Hardhat files
 /cache
 /artifacts

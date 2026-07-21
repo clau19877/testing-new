@@ -1,0 +1,38 @@
+[
+  {
+    "id": "identity-001",
+    "email": "you@your-domain.example",
+    "password": "replace-with-strong-password",
+    "fullName": "山田 太郎",
+    "phoneE164": "+819012345678",
+    "postalCode": "100-0001",
+    "prefecture": "東京都",
+    "city": "千代田区",
+    "addressLine1": "千代田1-1",
+    "notes": "Replace with a real identity/email you own before live runs."
+  },
+  {
+    "id": "identity-002",
+    "email": "ops2@your-domain.example",
+    "password": "replace-with-strong-password",
+    "fullName": "佐藤 花子",
+    "phoneE164": "+819087654321",
+    "postalCode": "150-0001",
+    "prefecture": "東京都",
+    "city": "渋谷区",
+    "addressLine1": "神宮前1-1",
+    "notes": "Second owned identity for parallel dry-run demos."
+  },
+  {
+    "id": "identity-003",
+    "email": "ops3@your-domain.example",
+    "password": "replace-with-strong-password",
+    "fullName": "鈴木 一郎",
+    "phoneE164": "+819011122233",
+    "postalCode": "530-0001",
+    "prefecture": "大阪府",
+    "city": "大阪市北区",
+    "addressLine1": "梅田1-1",
+    "notes": "Third owned identity for concurrency demos."
+  }
+]

@@ -1,0 +1,27 @@
+{
+  "marketplace": "amazon.co.jp",
+  "locale": "ja-JP",
+  "timezone": "Asia/Tokyo",
+  "concurrency": 2,
+  "maxRetries": 2,
+  "delayBetweenJobsMs": {
+    "min": 3000,
+    "max": 8000
+  },
+  "browser": {
+    "provider": "dry-run",
+    "headless": true
+  },
+  "mailbox": {
+    "provider": "dry-run",
+    "otpTimeoutMs": 120000,
+    "pollIntervalMs": 3000
+  },
+  "proxy": {
+    "required": false,
+    "sticky": true
+  },
+  "store": {
+    "path": "data/accounts.json"
+  }
+}
