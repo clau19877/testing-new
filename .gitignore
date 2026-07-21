@@ -1,6 +1,10 @@
 node_modules
 .env
 
+# Riot email helper local env / venv
+tools/riot-email-update/.venv/
+tools/riot-email-update/.env
+
 # Hardhat files
 /cache
 /artifacts
