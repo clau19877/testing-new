@@ -1072,7 +1072,6 @@ def solve_visible_captcha(
                     page.wait_for_timeout(1500)
             except Exception:
                 pass
-        click_challenge_next(page)
         page.wait_for_timeout(1000)
         shot2 = screenshot_challenge(page, tag=f"r{round_i}_after")
         _log(f"after-click shot {shot2.name}")
