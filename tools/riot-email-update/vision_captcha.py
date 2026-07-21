@@ -271,11 +271,57 @@ def plan_letter_grid_cv(screenshot: Path) -> VisionPlan | None:
         letter = t["letter"]
         req[letter] = req.get(letter, 0) + times
 
+    # If grid OCR missed letters (rotated tiles), fall back to a geometric 3x4 grid
+    # and OCR each cell with light rotation attempts.
+    if req and len(grid_tiles) < 6:
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, (70, 40, 40), (110, 255, 255))
+        mask[: int(h * 0.32), :] = 0
+        mask[int(h * 0.85) :, :] = 0
+        ys, xs = np.where(mask > 0)
+        if len(xs) > 100:
+            x0, y0, x1, y1 = int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
+            rows, cols = 3, 4
+            geom: list[dict[str, Any]] = []
+            for r in range(rows):
+                for c in range(cols):
+                    cx = int(x0 + (c + 0.5) * (x1 - x0) / cols)
+                    cy = int(y0 + (r + 0.5) * (y1 - y0) / rows)
+                    s = 32
+                    crop = img[max(0, cy - s) : cy + s, max(0, cx - s) : cx + s]
+                    letter = ""
+                    for ang in (0, -15, 15, -10, 10):
+                        if crop.size == 0:
+                            break
+                        M = cv2.getRotationMatrix2D((s, s), ang, 1.0)
+                        rot = cv2.warpAffine(crop, M, (s * 2, s * 2), borderMode=cv2.BORDER_REPLICATE)
+                        letter = _ocr_single_letter(rot)
+                        if letter:
+                            break
+                    geom.append(
+                        {
+                            "letter": letter,
+                            "cx": cx,
+                            "cy": cy,
+                            "x": cx - s,
+                            "y": cy - s,
+                            "w": s * 2,
+                            "h": s * 2,
+                            "area": s * s * 4,
+                        }
+                    )
+            _log(f"CV geom grid={[ (g['letter'], g['cx'], g['cy']) for g in geom ]}")
+            # Prefer geom cells that have letters; merge with existing
+            for g in geom:
+                if g["letter"]:
+                    grid_tiles.append(g)
+
     clicks: list[ClickTarget] = []
     notes: list[str] = []
     for letter, times in req.items():
         matches = [c for c in grid_tiles if c["letter"] == letter]
         if not matches:
+            # Last resort: if only one missing and we know grid geometry, skip
             notes.append(f"letter {letter} not found in grid")
             continue
         # Prefer top-left-most match (stable for duplicates)
@@ -737,16 +783,20 @@ def find_hcaptcha_frame(page):
 
 def captcha_visible(page) -> bool:
     try:
-        if page.locator('iframe[src*="hcaptcha.com"]').count() > 0:
-            return True
+        frames = page.locator('iframe[src*="hcaptcha.com"]')
+        n = frames.count()
+        for i in range(n):
+            box = frames.nth(i).bounding_box(timeout=1000)
+            if box and box["width"] > 100 and box["height"] > 100 and box["y"] >= 0:
+                return True
     except Exception:
         pass
-    content = ""
+    # Challenge prompt text in main page (sometimes mirrored)
     try:
         content = page.content().lower()
     except Exception:
-        pass
-    return "hcaptcha" in content or "click each letter" in content
+        content = ""
+    return "click each letter" in content or "please drag the" in content
 
 
 def screenshot_challenge(page, tag: str = "challenge") -> Path:
@@ -807,20 +857,38 @@ def apply_clicks(page, plan: VisionPlan, screenshot: Path) -> int:
         return 0
 
     offset_x, offset_y = 0.0, 0.0
-    loc = page.locator('iframe[src*="hcaptcha.com"]').last
+    clipped = False
+    # Detect whether screenshot was a clipped iframe (filename + size) or full page
     try:
-        if loc.count() > 0:
-            box = loc.bounding_box(timeout=3000)
-            if box:
-                offset_x, offset_y = box["x"], box["y"]
-                _log(f"iframe offset ({offset_x:.0f},{offset_y:.0f})")
-    except Exception as exc:
-        _log(f"no iframe offset: {exc}")
+        from PIL import Image as _PILImage
+
+        sw, sh = _PILImage.open(screenshot).size
+        clipped = sw <= 600 and sh <= 650
+    except Exception:
+        clipped = True
+
+    if clipped:
+        loc = page.locator('iframe[src*="hcaptcha.com"]').last
+        try:
+            if loc.count() > 0:
+                box = loc.bounding_box(timeout=3000)
+                if box and box["width"] > 50 and box["y"] >= 0 and box["x"] >= -20:
+                    offset_x, offset_y = box["x"], box["y"]
+                    _log(f"iframe offset ({offset_x:.0f},{offset_y:.0f})")
+                else:
+                    _log(f"iframe box unusable: {box} — using page coords")
+        except Exception as exc:
+            _log(f"no iframe offset: {exc}")
+    else:
+        _log("full-page screenshot — clicks are page coords")
 
     applied = 0
     for c in plan.clicks:
         px = offset_x + c.x
         py = offset_y + c.y
+        if py < 0 or px < 0:
+            _log(f"skip click {c.label} offscreen page=({px:.0f},{py:.0f})")
+            continue
         _log(f"click {c.label} screenshot=({c.x},{c.y}) page=({px:.0f},{py:.0f})")
         page.mouse.click(px, py)
         applied += 1
@@ -829,6 +897,9 @@ def apply_clicks(page, plan: VisionPlan, screenshot: Path) -> int:
     for d in plan.drags or []:
         x1, y1 = offset_x + d.x1, offset_y + d.y1
         x2, y2 = offset_x + d.x2, offset_y + d.y2
+        if min(x1, y1, x2, y2) < 0:
+            _log(f"skip drag {d.label} offscreen")
+            continue
         _log(
             f"drag {d.label} ({d.x1},{d.y1})->({d.x2},{d.y2}) "
             f"page=({x1:.0f},{y1:.0f})->({x2:.0f},{y2:.0f})"
@@ -850,6 +921,42 @@ def apply_clicks(page, plan: VisionPlan, screenshot: Path) -> int:
         applied += 1
         page.wait_for_timeout(800)
     return applied
+
+
+def click_challenge_next(page) -> bool:
+    """Click Next/Verify inside the hCaptcha challenge iframe when present."""
+    frame = find_hcaptcha_frame(page)
+    if not frame:
+        return False
+    for sel in [
+        'div.button-submit',
+        '.button-submit',
+        'button:has-text("Next")',
+        'div[role="button"]:has-text("Next")',
+        'button:has-text("Verify")',
+        '.action-button',
+    ]:
+        try:
+            loc = frame.locator(sel).first
+            if loc.count() and loc.is_visible():
+                loc.click(timeout=2000)
+                _log(f"challenge Next via frame {sel}")
+                return True
+        except Exception:
+            continue
+    # Fallback: click bottom-right of challenge iframe bbox
+    try:
+        loc = page.locator('iframe[src*="hcaptcha.com"]').last
+        box = loc.bounding_box(timeout=2000) if loc.count() else None
+        if box and box["y"] >= 0:
+            px = box["x"] + box["width"] * 0.88
+            py = box["y"] + box["height"] * 0.94
+            page.mouse.click(px, py)
+            _log(f"challenge Next via bbox click ({px:.0f},{py:.0f})")
+            return True
+    except Exception as exc:
+        _log(f"challenge Next fallback fail: {exc}")
+    return False
 
 
 def solve_visible_captcha(
@@ -908,12 +1015,18 @@ def solve_visible_captcha(
             page.wait_for_timeout(1500)
             continue
         apply_clicks(page, plan, shot)
-        page.wait_for_timeout(2500)
+        page.wait_for_timeout(800)
+        # Letter-grid challenges often need an explicit Next inside the widget
+        if plan.clicks and "letter" in (plan.instruction or "").lower():
+            if click_challenge_next(page):
+                page.wait_for_timeout(1500)
+        page.wait_for_timeout(1500)
         # Some challenges need an explicit Verify / Next click inside widget —
         # try common buttons on page
         for sel in [
             'button:has-text("Verify")',
             'button:has-text("Next")',
+            'div[role="button"]:has-text("Next")',
             'div[role="button"]:has-text("Verify")',
         ]:
             try:
@@ -924,6 +1037,8 @@ def solve_visible_captcha(
                     page.wait_for_timeout(1500)
             except Exception:
                 pass
+        click_challenge_next(page)
+        page.wait_for_timeout(1000)
         shot2 = screenshot_challenge(page, tag=f"r{round_i}_after")
         _log(f"after-click shot {shot2.name}")
         # If checkbox frame shows success, done
