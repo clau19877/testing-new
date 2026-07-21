@@ -625,11 +625,30 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
             backend = "ocr"
     _log(f"planning with backend={backend} image={screenshot}")
     if backend == "ocr":
-        return plan_ocr(screenshot)
+        plan = plan_ocr(screenshot)
+        # Optional agent fallback when local CV/OCR cannot produce actions
+        if (
+            not plan.clicks
+            and not (plan.drags or [])
+            and os.getenv("VISION_AGENT_FALLBACK", "1") not in ("0", "false", "False")
+        ):
+            _log("OCR/CV empty — falling back to agent vision")
+            try:
+                return plan_agent(
+                    screenshot,
+                    timeout=float(os.getenv("VISION_AGENT_TIMEOUT") or "180"),
+                )
+            except Exception as exc:
+                _log(f"agent fallback failed: {exc}")
+                return plan
+        return plan
     if backend == "openai":
         return plan_openai(screenshot)
     if backend == "agent":
-        return plan_agent(screenshot)
+        return plan_agent(
+            screenshot,
+            timeout=float(os.getenv("VISION_AGENT_TIMEOUT") or "180"),
+        )
     raise ValueError(f"unknown VISION_BACKEND: {backend}")
 
 
@@ -805,7 +824,11 @@ def solve_visible_captcha(
         annotate_plan(shot, plan, tag=f"r{round_i}_ann")
         if not plan.clicks and not (plan.drags or []):
             _log("empty plan — cannot act this round")
-            return False
+            # keep trying later rounds (challenge may change) unless last round
+            if round_i == max_rounds:
+                return False
+            page.wait_for_timeout(1500)
+            continue
         apply_clicks(page, plan, shot)
         page.wait_for_timeout(2500)
         # Some challenges need an explicit Verify / Next click inside widget —
