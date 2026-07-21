@@ -749,18 +749,49 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
         else:
             local_first = os.getenv("VISION_LOCAL_FIRST", "0") in ("1", "true", "True")
         if local_first:
-            if challenge_image_blank(screenshot):
-                _log("blank challenge image — skip local CV, use 2Captcha")
+            if challenge_image_blank(screenshot) or not challenge_content_ready(screenshot):
+                _log("blank/loading challenge image — skip local CV, use 2Captcha")
             else:
                 local = plan_ocr(screenshot)
-                if local.clicks or (local.drags or []):
+                # Incomplete letter OCR (e.g. 1 of 2 letters) is worse than 2cap
+                incomplete = (
+                    "not found" in (local.notes or "").lower()
+                    or (
+                        "letter" in (local.instruction or "").lower()
+                        and len(local.clicks) == 1
+                        and "1 clicks" not in (local.notes or "")
+                    )
+                )
+                if (local.clicks or (local.drags or [])) and not incomplete:
                     _log(
                         f"local CV hit backend={local.backend} "
                         f"clicks={len(local.clicks)} drags={len(local.drags or [])}"
                     )
                     return local
-                _log("local CV miss — escalating to 2Captcha Coordinates")
+                if incomplete:
+                    _log(f"local CV incomplete ({local.notes}) — escalating to 2Captcha")
+                else:
+                    _log("local CV miss — escalating to 2Captcha Coordinates")
         from twocaptcha_click import plan_twocaptcha_clicks
+
+        # Don't waste 2cap budget on Riot error chrome screenshots
+        try:
+            from PIL import Image as _PILImage
+            import pytesseract
+
+            w, h = _PILImage.open(screenshot).size
+            if w > 700 or h < 400:
+                probe = pytesseract.image_to_string(_PILImage.open(screenshot)).lower()
+                if "invalid" in probe or "sign in" in probe and "letter" not in probe:
+                    _log("screenshot looks like login/error page — empty plan")
+                    return VisionPlan(
+                        instruction="invalid/error page",
+                        clicks=[],
+                        backend="twocaptcha",
+                        notes="refusing 2cap on non-challenge screenshot",
+                    )
+        except Exception:
+            pass
 
         return plan_twocaptcha_clicks(screenshot)
     if backend == "ocr":
@@ -937,8 +968,10 @@ def screenshot_challenge(page, tag: str = "challenge") -> Path:
     """Screenshot the challenge area (prefer challenge iframe bbox)."""
     ensure_debug()
     # Drag/grid assets often load after the prompt banner — wait for content
-    if "after" not in tag:
+    if "after" not in tag and "peek" not in tag:
         wait_for_challenge_canvas(page)
+    # If the challenge iframe was parked off-screen, bring it back before clip
+    ensure_challenge_iframe_on_screen(page)
     path = DEBUG_DIR / f"vision_{tag}_{int(time.time())}.png"
     # Try to clip to the challenge iframe
     loc = page.locator('iframe[src*="hcaptcha.com"]').last
@@ -947,13 +980,75 @@ def screenshot_challenge(page, tag: str = "challenge") -> Path:
             box = loc.bounding_box(timeout=3000)
             if box and box["width"] > 50 and box["y"] >= 0 and box["x"] >= -20:
                 page.screenshot(path=str(path), clip=box)
+                _save_clip(path, box)
                 _log(f"clipped iframe screenshot → {path.name} {box}")
                 return path
     except Exception as exc:
         _log(f"iframe clip failed: {exc}")
     page.screenshot(path=str(path), full_page=False)
+    _save_clip(path, None)
     _log(f"full viewport screenshot → {path.name}")
     return path
+
+
+def _clip_sidecar(screenshot: Path) -> Path:
+    return screenshot.with_suffix(screenshot.suffix + ".clip.json")
+
+
+def _save_clip(screenshot: Path, box: dict | None) -> None:
+    import json as _json
+
+    (_clip_sidecar(screenshot)).write_text(_json.dumps(box))
+
+
+def _load_clip(screenshot: Path) -> dict | None:
+    import json as _json
+
+    side = _clip_sidecar(screenshot)
+    if not side.is_file():
+        return None
+    try:
+        data = _json.loads(side.read_text())
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def ensure_challenge_iframe_on_screen(page) -> bool:
+    """
+    hCaptcha parks the challenge iframe at y=-9999 after some interactions.
+    Force it back on-screen so screenshots/clicks stay aligned.
+    """
+    try:
+        moved = page.evaluate(
+            """() => {
+              const frames = [...document.querySelectorAll('iframe[src*="hcaptcha.com"]')];
+              let fixed = 0;
+              for (const f of frames) {
+                const r = f.getBoundingClientRect();
+                const big = (f.clientWidth || r.width) >= 300 && (f.clientHeight || r.height) >= 300;
+                if (!big) continue;
+                if (r.top < 0 || r.left < -50 || r.top > window.innerHeight) {
+                  f.style.setProperty('position', 'fixed', 'important');
+                  f.style.setProperty('left', '50%', 'important');
+                  f.style.setProperty('top', '80px', 'important');
+                  f.style.setProperty('transform', 'translateX(-50%)', 'important');
+                  f.style.setProperty('z-index', '2147483646', 'important');
+                  f.style.setProperty('opacity', '1', 'important');
+                  f.style.setProperty('pointer-events', 'auto', 'important');
+                  fixed += 1;
+                }
+              }
+              return fixed;
+            }"""
+        )
+        if moved:
+            _log(f"repositioned {moved} off-screen hCaptcha iframe(s)")
+            page.wait_for_timeout(400)
+            return True
+    except Exception as exc:
+        _log(f"iframe reposition failed: {exc}")
+    return False
 
 
 def verify_button_visible(page) -> bool:
@@ -1011,37 +1106,50 @@ def apply_clicks(page, plan: VisionPlan, screenshot: Path) -> int:
     """
     Map screenshot-local coords to page coords using the challenge iframe box,
     then click / drag with mouse.
+
+    IMPORTANT: use the clip box captured *with* the screenshot. During long
+    2Captcha waits hCaptcha often parks the iframe at y=-9999; re-querying the
+    live box then mis-aims every click.
     """
     actions = len(plan.clicks) + len(plan.drags or [])
     if actions == 0:
         _log("no clicks/drags in plan")
         return 0
 
+    ensure_challenge_iframe_on_screen(page)
+
     offset_x, offset_y = 0.0, 0.0
     clipped = False
-    # Detect whether screenshot was a clipped iframe (filename + size) or full page
-    try:
-        from PIL import Image as _PILImage
-
-        sw, sh = _PILImage.open(screenshot).size
-        clipped = sw <= 600 and sh <= 650
-    except Exception:
+    saved = _load_clip(screenshot)
+    if saved and saved.get("width", 0) > 50 and saved.get("y", -1) >= 0:
+        offset_x, offset_y = float(saved["x"]), float(saved["y"])
         clipped = True
-
-    if clipped:
-        loc = page.locator('iframe[src*="hcaptcha.com"]').last
-        try:
-            if loc.count() > 0:
-                box = loc.bounding_box(timeout=3000)
-                if box and box["width"] > 50 and box["y"] >= 0 and box["x"] >= -20:
-                    offset_x, offset_y = box["x"], box["y"]
-                    _log(f"iframe offset ({offset_x:.0f},{offset_y:.0f})")
-                else:
-                    _log(f"iframe box unusable: {box} — using page coords")
-        except Exception as exc:
-            _log(f"no iframe offset: {exc}")
+        _log(f"using saved screenshot clip offset ({offset_x:.0f},{offset_y:.0f})")
     else:
-        _log("full-page screenshot — clicks are page coords")
+        try:
+            from PIL import Image as _PILImage
+
+            sw, sh = _PILImage.open(screenshot).size
+            clipped = sw <= 600 and sh <= 650
+        except Exception:
+            clipped = True
+
+        if clipped:
+            loc = page.locator('iframe[src*="hcaptcha.com"]').last
+            try:
+                if loc.count() > 0:
+                    box = loc.bounding_box(timeout=3000)
+                    if box and box["width"] > 50 and box["y"] >= 0 and box["x"] >= -20:
+                        offset_x, offset_y = box["x"], box["y"]
+                        _log(f"iframe offset ({offset_x:.0f},{offset_y:.0f})")
+                    else:
+                        _log(f"iframe box unusable: {box} — trying frame-local clicks")
+                        return _apply_clicks_in_frame(page, plan)
+            except Exception as exc:
+                _log(f"no iframe offset: {exc}")
+                return _apply_clicks_in_frame(page, plan)
+        else:
+            _log("full-page screenshot — clicks are page coords")
 
     applied = 0
     for c in plan.clicks:
@@ -1082,6 +1190,35 @@ def apply_clicks(page, plan: VisionPlan, screenshot: Path) -> int:
         page.mouse.up()
         applied += 1
         page.wait_for_timeout(1000)
+    return applied
+
+
+def _apply_clicks_in_frame(page, plan: VisionPlan) -> int:
+    """Fallback: click via the hCaptcha frame's own coordinate space."""
+    frame = find_hcaptcha_frame(page)
+    if not frame:
+        _log("frame-local clicks: no hCaptcha frame")
+        return 0
+    applied = 0
+    try:
+        body = frame.locator("body").first
+        for c in plan.clicks:
+            _log(f"frame click {c.label} ({c.x},{c.y})")
+            body.click(position={"x": c.x, "y": c.y}, force=True, timeout=3000)
+            applied += 1
+            page.wait_for_timeout(350)
+        for d in plan.drags or []:
+            _log(f"frame drag {d.label} ({d.x1},{d.y1})->({d.x2},{d.y2})")
+            body.hover(position={"x": d.x1, "y": d.y1}, force=True)
+            page.mouse.down()
+            page.wait_for_timeout(300)
+            body.hover(position={"x": d.x2, "y": d.y2}, force=True)
+            page.wait_for_timeout(200)
+            page.mouse.up()
+            applied += 1
+            page.wait_for_timeout(800)
+    except Exception as exc:
+        _log(f"frame-local clicks failed: {exc}")
     return applied
 
 
@@ -1238,8 +1375,11 @@ def solve_visible_captcha(
         apply_clicks(page, plan, shot)
         page.wait_for_timeout(800)
         # Letter-grid + drag challenges need an explicit Next/Verify inside the widget
+        # Only auto-advance when we actually performed actions
         needs_verify = bool(plan.drags) or (
-            bool(plan.clicks) and "letter" in (plan.instruction or "").lower()
+            bool(plan.clicks)
+            and "letter" in (plan.instruction or "").lower()
+            and "not found" not in (plan.notes or "").lower()
         )
         if needs_verify or verify_button_visible(page):
             if click_challenge_next(page):
