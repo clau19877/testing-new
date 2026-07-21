@@ -1,0 +1,9 @@
+# One sticky JP residential/ISP proxy per line (optional for dry-run).
+# Formats:
+#   host:port
+#   host:port:username:password
+#   http://user:pass@host:port
+#
+# Example placeholders (replace with proxies you control):
+# 203.0.113.10:8000
+# 203.0.113.11:8000:user:pass

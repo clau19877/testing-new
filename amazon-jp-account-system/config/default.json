@@ -1,0 +1,41 @@
+{
+  "marketplace": "amazon.co.jp",
+  "locale": "ja-JP",
+  "timezone": "Asia/Tokyo",
+  "concurrency": 1,
+  "maxRetries": 1,
+  "delayBetweenJobsMs": {
+    "min": 1000,
+    "max": 2000
+  },
+  "browser": {
+    "provider": "playwright",
+    "headless": false,
+    "slowMoMs": 40
+  },
+  "mailbox": {
+    "provider": "imap",
+    "otpTimeoutMs": 180000,
+    "pollIntervalMs": 3000,
+    "imap": {
+      "host": "imap.example.com",
+      "port": 993,
+      "secure": true,
+      "mailbox": "INBOX",
+      "fromIncludes": ["amazon"],
+      "subjectIncludes": [],
+      "lookbackMs": 900000,
+      "tlsRejectUnauthorized": true
+    }
+  },
+  "proxy": {
+    "required": false,
+    "sticky": true
+  },
+  "store": {
+    "path": "data/accounts.json"
+  },
+  "amazon": {
+    "registerUrl": "https://www.amazon.co.jp/ap/register?openid.pape.max_auth_age=0&openid.return_to=https%3A%2F%2Fwww.amazon.co.jp%2F%3Fref_%3Dnav_newcust&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=jpflex&openid.mode=checkid_setup&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0"
+  }
+}
