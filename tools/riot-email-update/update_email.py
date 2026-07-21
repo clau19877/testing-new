@@ -2,15 +2,15 @@
 """
 Interactive helper: sign in to your Riot Games account and update its email.
 
-Uses the official portal at https://account.riotgames.com/
-hCaptcha can be solved automatically via CapSolver when CAPSOLVER_API_KEY is set.
+- hCaptcha via CapSolver (CAPSOLVER_API_KEY)
+- MFA / email verification codes via IMAP (IMAP_* / NEW_IMAP_*)
 
 Usage:
   cd tools/riot-email-update
   python3 -m venv .venv && source .venv/bin/activate
   pip install -r requirements.txt
   playwright install chromium
-  cp .env.example .env   # set CAPSOLVER_API_KEY (+ Riot creds)
+  cp .env.example .env
   python update_email.py
 """
 
@@ -20,11 +20,13 @@ import argparse
 import getpass
 import os
 import sys
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 from captcha import CapSolverError, solve_and_inject
+from imap_mail import ImapConfig, ImapInbox
 
 ACCOUNT_URL = "https://account.riotgames.com/"
 AUTH_HOST_HINT = "auth.riotgames.com"
@@ -55,18 +57,16 @@ def env_bool(name: str, default: bool = True) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def env_map() -> dict[str, str]:
+    return {k: (v if v is not None else "") for k, v in os.environ.items()}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Log into your Riot account and update the email address."
     )
-    parser.add_argument(
-        "--username",
-        help="Riot username or email (or set RIOT_USERNAME)",
-    )
-    parser.add_argument(
-        "--new-email",
-        help="New email address (or set NEW_EMAIL)",
-    )
+    parser.add_argument("--username", help="Riot username or email (or RIOT_USERNAME)")
+    parser.add_argument("--new-email", help="New email address (or NEW_EMAIL)")
     parser.add_argument(
         "--headed",
         action=argparse.BooleanOptionalAction,
@@ -76,17 +76,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timeout-ms",
         type=int,
-        default=120_000,
-        help="Default Playwright timeout in ms (default: 120000)",
+        default=180_000,
+        help="Default Playwright timeout in ms (default: 180000)",
     )
     parser.add_argument(
         "--capsolver-key",
-        help="CapSolver API key (or set CAPSOLVER_API_KEY)",
+        help="CapSolver API key (or CAPSOLVER_API_KEY)",
     )
     parser.add_argument(
         "--no-captcha-solver",
         action="store_true",
         help="Disable CapSolver even if an API key is configured",
+    )
+    parser.add_argument(
+        "--imap-timeout",
+        type=float,
+        default=180.0,
+        help="Seconds to wait for Riot mail via IMAP (default: 180)",
     )
     return parser.parse_args()
 
@@ -121,9 +127,18 @@ def click_first_matching(page, selectors: list[str], action_name: str) -> bool:
     return False
 
 
+def page_looks_logged_in(page) -> bool:
+    href = page.url
+    return (
+        "account.riotgames.com" in href
+        and "auth.riotgames.com" not in href
+        and "authenticate.riotgames.com" not in href
+        and "/login" not in href
+    )
+
+
 def wait_until_logged_in(page, timeout_ms: int) -> None:
-    """Stay on auth until we land back on the account portal."""
-    print("  Waiting for successful login (MFA may still be required)…")
+    print("  Waiting for successful login…")
     page.wait_for_function(
         """() => {
             const href = window.location.href;
@@ -133,6 +148,41 @@ def wait_until_logged_in(page, timeout_ms: int) -> None:
                 && !href.includes('/login');
         }""",
         timeout=timeout_ms,
+    )
+
+
+def mfa_fields_visible(page) -> bool:
+    selectors = [
+        'input[name*="code" i]',
+        'input[autocomplete="one-time-code"]',
+        'input[inputmode="numeric"]',
+        'input[placeholder*="code" i]',
+        'input[aria-label*="code" i]',
+    ]
+    for sel in selectors:
+        loc = page.locator(sel)
+        try:
+            if loc.count() > 0 and loc.first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def fill_mfa_code(page, code: str) -> bool:
+    return fill_first_matching(
+        page,
+        [
+            'input[autocomplete="one-time-code"]',
+            'input[name*="code" i]',
+            'input[inputmode="numeric"]',
+            'input[placeholder*="code" i]',
+            'input[aria-label*="code" i]',
+            'input[type="tel"]',
+            'input[type="text"]',
+        ],
+        code,
+        "MFA/email code",
     )
 
 
@@ -150,6 +200,48 @@ def try_solve_hcaptcha(page, api_key: str | None, proxy: str | None) -> bool:
         return False
 
 
+def try_fill_imap_code(
+    page,
+    inbox: ImapInbox | None,
+    *,
+    since_epoch: float,
+    timeout: float,
+    used_codes: set[str],
+) -> bool:
+    if not inbox:
+        return False
+    if not mfa_fields_visible(page) and "code" not in page.content().lower():
+        # Still try — Riot markup varies; wait_for_code is the expensive part only if we call it
+        pass
+    try:
+        code = inbox.wait_for_code(
+            since_epoch=since_epoch,
+            timeout=timeout,
+            used_codes=used_codes,
+        )
+    except Exception as exc:
+        print(f"  IMAP code wait failed: {exc}")
+        return False
+    used_codes.add(code)
+    if not fill_mfa_code(page, code):
+        print(f"  Got code {code} but could not find an input — paste it manually.")
+        pause(f"Enter code {code} in the browser, then continue.")
+        return True
+    click_first_matching(
+        page,
+        [
+            'button[type="submit"]',
+            'button:has-text("Submit")',
+            'button:has-text("Continue")',
+            'button:has-text("Verify")',
+            'button:has-text("Sign in")',
+            'button:has-text("Confirm")',
+        ],
+        "code submit",
+    )
+    return True
+
+
 def run_login(
     page,
     username: str,
@@ -158,18 +250,21 @@ def run_login(
     *,
     capsolver_key: str | None,
     proxy: str | None,
+    current_inbox: ImapInbox | None,
+    imap_timeout: float,
 ) -> None:
     print("\n[1/3] Opening Riot account portal…")
+    login_started = time.time()
+    used_codes: set[str] = set()
     page.goto(ACCOUNT_URL, wait_until="domcontentloaded")
 
-    # Redirect to auth is expected when logged out
     try:
         page.wait_for_url(
             lambda url: "auth.riotgames.com" in url or "authenticate.riotgames.com" in url,
             timeout=15_000,
         )
     except Exception:
-        if "account.riotgames.com" in page.url and AUTH_HOST_HINT not in page.url:
+        if page_looks_logged_in(page):
             print("  Appears already signed in.")
             return
 
@@ -199,14 +294,12 @@ def run_login(
         "password",
     )
 
-    # Solve captcha before / around submit when CapSolver is configured
     page.wait_for_timeout(1_500)
     solved = try_solve_hcaptcha(page, capsolver_key, proxy)
 
     if not (filled_user and filled_pass):
         pause(
-            "Could not auto-fill the login form. Sign in manually in the browser window, "
-            "including any captcha / MFA."
+            "Could not auto-fill the login form. Sign in manually in the browser window."
         )
     else:
         clicked = click_first_matching(
@@ -221,11 +314,10 @@ def run_login(
             "Sign in",
         )
         if not clicked:
-            pause("Click Sign in yourself, then finish captcha / MFA if shown.")
+            pause("Click Sign in yourself.")
 
-        # Riot sometimes shows hCaptcha only after the first submit attempt
         page.wait_for_timeout(2_000)
-        if "account.riotgames.com" not in page.url or "auth" in page.url:
+        if not page_looks_logged_in(page):
             if not solved or page.locator('iframe[src*="hcaptcha"]').count() > 0:
                 solved = try_solve_hcaptcha(page, capsolver_key, proxy)
                 if solved:
@@ -241,38 +333,67 @@ def run_login(
                         "Sign in (after captcha)",
                     )
 
+    # MFA / email code via IMAP
+    page.wait_for_timeout(2_000)
+    if not page_looks_logged_in(page):
+        try_fill_imap_code(
+            page,
+            current_inbox,
+            since_epoch=login_started - 5,
+            timeout=imap_timeout,
+            used_codes=used_codes,
+        )
+
+    try:
+        wait_until_logged_in(page, min(timeout_ms, 60_000))
+        print("  Login detected.")
+        return
+    except Exception:
+        pass
+
+    if capsolver_key and not page_looks_logged_in(page):
+        print("  Login not finished yet — retrying CapSolver once…")
+        if try_solve_hcaptcha(page, capsolver_key, proxy):
+            click_first_matching(
+                page,
+                [
+                    'button[type="submit"]',
+                    'button:has-text("Sign in")',
+                    'button:has-text("Log in")',
+                    'button:has-text("Sign In")',
+                ],
+                "Sign in (retry)",
+            )
+            page.wait_for_timeout(2_000)
+            try_fill_imap_code(
+                page,
+                current_inbox,
+                since_epoch=login_started - 5,
+                timeout=imap_timeout,
+                used_codes=used_codes,
+            )
+
     try:
         wait_until_logged_in(page, timeout_ms)
         print("  Login detected.")
     except Exception:
-        if capsolver_key:
-            print("  Login not finished yet — retrying CapSolver once…")
-            if try_solve_hcaptcha(page, capsolver_key, proxy):
-                click_first_matching(
-                    page,
-                    [
-                        'button[type="submit"]',
-                        'button:has-text("Sign in")',
-                        'button:has-text("Log in")',
-                        'button:has-text("Sign In")',
-                    ],
-                    "Sign in (retry)",
-                )
-                try:
-                    wait_until_logged_in(page, timeout_ms)
-                    print("  Login detected.")
-                    return
-                except Exception:
-                    pass
         pause(
-            "Still waiting on login. Finish MFA (or captcha if CapSolver failed) in the browser, "
+            "Still waiting on login. Finish MFA/captcha in the browser if needed, "
             "then press Enter once you see your account page."
         )
         wait_until_logged_in(page, timeout_ms)
         print("  Login detected.")
 
 
-def run_email_update(page, new_email: str, timeout_ms: int) -> None:
+def run_email_update(
+    page,
+    new_email: str,
+    timeout_ms: int,
+    *,
+    current_inbox: ImapInbox | None,
+    new_inbox: ImapInbox | None,
+    imap_timeout: float,
+) -> None:
     print("\n[2/3] Opening account settings…")
     page.goto(ACCOUNT_URL, wait_until="domcontentloaded")
     page.wait_for_timeout(2_000)
@@ -316,6 +437,8 @@ def run_email_update(page, new_email: str, timeout_ms: int) -> None:
         )
 
     print("[3/3] Entering new email…")
+    change_started = time.time()
+    used_codes: set[str] = set()
     filled = fill_first_matching(
         page,
         [
@@ -330,6 +453,18 @@ def run_email_update(page, new_email: str, timeout_ms: int) -> None:
     )
     if not filled:
         pause(f"Type the new email manually: {new_email}")
+
+    # Confirm field if present
+    fill_first_matching(
+        page,
+        [
+            'input[name*="confirm" i]',
+            'input[placeholder*="confirm" i]',
+            'input[aria-label*="confirm" i]',
+        ],
+        new_email,
+        "confirm email",
+    )
 
     saved = click_first_matching(
         page,
@@ -346,11 +481,51 @@ def run_email_update(page, new_email: str, timeout_ms: int) -> None:
     if not saved:
         pause("Click Save / Continue / Send verification yourself.")
 
-    pause(
-        "Complete verification: enter codes from your CURRENT and/or NEW inbox in the browser. "
-        "When Riot confirms the email change, press Enter here."
-    )
-    print("\nDone. Confirm the new email on account.riotgames.com if you have not already.")
+    page.wait_for_timeout(2_000)
+
+    # Current-inbox ownership code
+    if current_inbox and mfa_fields_visible(page):
+        print("  Waiting for verification code on CURRENT email via IMAP…")
+        try_fill_imap_code(
+            page,
+            current_inbox,
+            since_epoch=change_started - 5,
+            timeout=imap_timeout,
+            used_codes=used_codes,
+        )
+        page.wait_for_timeout(2_000)
+
+    # New-inbox confirm code or verify link
+    if new_inbox:
+        print("  Waiting for verification on NEW email via IMAP…")
+        link = None
+        try:
+            link = new_inbox.wait_for_verify_link(
+                since_epoch=change_started - 5,
+                timeout=min(60.0, imap_timeout),
+            )
+        except Exception:
+            link = None
+        if link:
+            print(f"  Opening verify link…")
+            page.goto(link, wait_until="domcontentloaded")
+        else:
+            try_fill_imap_code(
+                page,
+                new_inbox,
+                since_epoch=change_started - 5,
+                timeout=imap_timeout,
+                used_codes=used_codes,
+            )
+
+    if current_inbox or new_inbox:
+        print("\nDone (IMAP-assisted). Confirm the new email on account.riotgames.com.")
+    else:
+        pause(
+            "Complete verification: enter codes from your CURRENT and/or NEW inbox. "
+            "When Riot confirms the email change, press Enter here."
+        )
+        print("\nDone. Confirm the new email on account.riotgames.com if you have not already.")
 
 
 def main() -> int:
@@ -365,6 +540,11 @@ def main() -> int:
         capsolver_key = capsolver_key.strip() or None
     proxy = (os.getenv("CAPSOLVER_PROXY") or os.getenv("PROXY") or "").strip() or None
 
+    current_cfg = ImapConfig.from_env(env_map(), "IMAP")
+    new_cfg = ImapConfig.from_env(env_map(), "NEW_IMAP")
+    current_inbox = ImapInbox(current_cfg) if current_cfg else None
+    new_inbox = ImapInbox(new_cfg) if new_cfg else None
+
     username = args.username or os.getenv("RIOT_USERNAME") or prompt("Riot username or email")
     password = os.getenv("RIOT_PASSWORD") or prompt("Riot password", secret=True)
     new_email = args.new_email or os.getenv("NEW_EMAIL") or prompt("New email address")
@@ -373,13 +553,25 @@ def main() -> int:
         "\nThis helper drives the official Riot account site for YOUR account only.\n"
         f"Browser mode: {'headed' if headed else 'headless'}\n"
         f"Target email: {new_email}\n"
-        f"hCaptcha solver: {'CapSolver' if capsolver_key else 'manual (no CAPSOLVER_API_KEY)'}\n"
+        f"hCaptcha solver: {'CapSolver' if capsolver_key else 'manual'}\n"
+        f"IMAP current inbox: {current_cfg.user if current_cfg else 'not set'}\n"
+        f"IMAP new inbox: {new_cfg.user if new_cfg else 'not set'}\n"
     )
-    if not capsolver_key:
-        print(
-            "Tip: set CAPSOLVER_API_KEY in .env to auto-solve Riot hCaptcha.\n"
-            "     Get a key at https://www.capsolver.com/\n"
-        )
+
+    if current_inbox:
+        try:
+            current_inbox.test_connection()
+            print("  IMAP current inbox: connection OK")
+        except Exception as exc:
+            print(f"  IMAP current inbox: connection FAILED — {exc}")
+            current_inbox = None
+    if new_inbox:
+        try:
+            new_inbox.test_connection()
+            print("  IMAP new inbox: connection OK")
+        except Exception as exc:
+            print(f"  IMAP new inbox: connection FAILED — {exc}")
+            new_inbox = None
 
     try:
         from playwright.sync_api import sync_playwright
@@ -409,8 +601,17 @@ def main() -> int:
                 args.timeout_ms,
                 capsolver_key=capsolver_key,
                 proxy=proxy,
+                current_inbox=current_inbox,
+                imap_timeout=args.imap_timeout,
             )
-            run_email_update(page, new_email, args.timeout_ms)
+            run_email_update(
+                page,
+                new_email,
+                args.timeout_ms,
+                current_inbox=current_inbox,
+                new_inbox=new_inbox,
+                imap_timeout=args.imap_timeout,
+            )
         except KeyboardInterrupt:
             print("\nCancelled.")
             return 130
