@@ -225,8 +225,16 @@ def main() -> int:
                 shot(page, "04_vision_fail")
                 report["steps"].append({"04_vision": f"fail:{exc}"})
 
-            # If still on login, try sign-in again after captcha
-            if not page_logged_in(page):
+            # If still on login, try sign-in again after captcha (not on Oops)
+            content_l = ""
+            try:
+                content_l = page.content().lower()
+            except Exception:
+                pass
+            if "something went wrong" in content_l:
+                log("04b", "Riot Oops after vision — not re-signing in")
+                report["steps"].append({"04b_oops": True})
+            elif not page_logged_in(page):
                 log("04b", "re-click sign-in after vision")
                 click_signin(page)
                 page.wait_for_timeout(4000)

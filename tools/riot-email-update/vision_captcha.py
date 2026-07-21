@@ -754,13 +754,9 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
             else:
                 local = plan_ocr(screenshot)
                 # Incomplete letter OCR (e.g. 1 of 2 letters) is worse than 2cap
-                incomplete = (
-                    "not found" in (local.notes or "").lower()
-                    or (
-                        "letter" in (local.instruction or "").lower()
-                        and len(local.clicks) == 1
-                        and "1 clicks" not in (local.notes or "")
-                    )
+                incomplete = "not found" in (local.notes or "").lower() or (
+                    "letter" in (local.instruction or "").lower()
+                    and len(local.clicks) < 2
                 )
                 if (local.clicks or (local.drags or [])) and not incomplete:
                     _log(
@@ -782,7 +778,12 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
             w, h = _PILImage.open(screenshot).size
             if w > 700 or h < 400:
                 probe = pytesseract.image_to_string(_PILImage.open(screenshot)).lower()
-                if "invalid" in probe or "sign in" in probe and "letter" not in probe:
+                if "invalid" in probe or (
+                    "sign in" in probe
+                    and "letter" not in probe
+                    and "drag" not in probe
+                    and "click each" not in probe
+                ):
                     _log("screenshot looks like login/error page — empty plan")
                     return VisionPlan(
                         instruction="invalid/error page",
@@ -1266,6 +1267,42 @@ def click_challenge_next(page) -> bool:
     return False
 
 
+def page_has_riot_oops(page) -> bool:
+    try:
+        body = page.content().lower()
+    except Exception:
+        return False
+    return "something went wrong" in body or "captcha attempt has timed out" in body
+
+
+def page_looks_mfa(page) -> bool:
+    try:
+        body = page.content().lower()
+    except Exception:
+        body = ""
+    if page.locator('input[autocomplete="one-time-code"]').count():
+        return True
+    return any(
+        s in body
+        for s in (
+            "enter the code",
+            "verification code",
+            "multifactor",
+            "check your email",
+            "email code",
+        )
+    )
+
+
+def page_looks_auth_progress(page) -> bool:
+    """True when captcha is done and login advanced (account page or MFA)."""
+    if page_looks_past_login(page):
+        return True
+    if page_has_riot_oops(page):
+        return False
+    return page_looks_mfa(page)
+
+
 def solve_visible_captcha(
     page,
     *,
@@ -1274,7 +1311,7 @@ def solve_visible_captcha(
 ) -> bool:
     """
     Loop: detect challenge → screenshot → plan → click → wait.
-    Returns True if captcha frame appears solved / disappears.
+    Returns True if captcha frame appears solved / disappears into MFA or account.
     """
     backend = backend or os.getenv("VISION_BACKEND") or "auto"
     prev_instruction = ""
@@ -1284,8 +1321,19 @@ def solve_visible_captcha(
             break
         page.wait_for_timeout(500)
     for round_i in range(1, max_rounds + 1):
+        if page_has_riot_oops(page):
+            _log("Riot Oops page — captcha path failed")
+            return False
         if not captcha_visible(page):
-            _log("no captcha visible")
+            # Give Riot a moment to navigate to MFA / account / Oops
+            page.wait_for_timeout(2500)
+            if page_has_riot_oops(page):
+                _log("Riot Oops after captcha disappeared — fail")
+                return False
+            if page_looks_auth_progress(page):
+                _log("captcha cleared — MFA/account progress")
+                return True
+            _log("no captcha visible (still on login form) — treating as solved")
             return True
         _log(f"=== vision round {round_i}/{max_rounds} ===")
         # Verify may appear early while the letter grid is still unsolved — peek first
@@ -1409,20 +1457,29 @@ def solve_visible_captcha(
             if click_challenge_next(page):
                 page.wait_for_timeout(2000)
         try:
-            body = page.content().lower()
-            if "something went wrong" in body or "captcha attempt has timed out" in body:
+            if page_has_riot_oops(page):
                 _log("Riot error/timeout page after captcha action — fail")
                 return False
         except Exception:
             pass
         # If checkbox frame shows success, done
         try:
-            # challenge iframe often navigates or shrinks when done
-            if not captcha_visible(page) and page_looks_past_login(page):
-                _log("captcha gone — success")
-                return True
             if not captcha_visible(page):
-                _log("captcha iframe gone but still on login — treating as unresolved")
+                page.wait_for_timeout(2000)
+                if page_has_riot_oops(page):
+                    _log("Oops after captcha cleared — fail")
+                    return False
+                if page_looks_auth_progress(page):
+                    _log("captcha gone — MFA/account success")
+                    return True
+                _log("captcha iframe gone but still on login — continue/finish")
+                # One more wait in case MFA mounts slowly
+                page.wait_for_timeout(2000)
+                if page_looks_auth_progress(page):
+                    return True
+                if page_has_riot_oops(page):
+                    return False
+                return True
         except Exception:
             pass
     _log("max vision rounds exhausted")
