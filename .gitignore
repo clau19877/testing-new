@@ -1,6 +1,11 @@
 node_modules
 .env
 
+# Riot email helper local env / venv
+tools/riot-email-update/.venv/
+tools/riot-email-update/.env
+tools/riot-email-update/__pycache__/
+
 # Hardhat files
 /cache
 /artifacts
@@ -15,4 +20,6 @@ node_modules
 
 # Foundry files
 /out
-/cache_forge
+/cache_forgetools/riot-email-update/debug/
+
+tools/riot-email-update/data/

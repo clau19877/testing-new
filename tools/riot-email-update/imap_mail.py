@@ -1,0 +1,257 @@
+"""IMAP helper to pull Riot MFA / email-change verification codes."""
+
+from __future__ import annotations
+
+import email
+import imaplib
+import re
+import time
+from dataclasses import dataclass
+from email.header import decode_header
+from email.message import Message
+from typing import Iterable
+
+
+RIOT_FROM_HINTS = (
+    "riotgames.com",
+    "email.accounts.riotgames.com",
+    "noreply@riotgames.com",
+    "leagueoflegends@",
+)
+
+CODE_PATTERNS = (
+    re.compile(r"\b(\d{6})\b"),
+    re.compile(r"(?:code|passcode|verification)[^\d]{0,40}(\d{6})", re.I),
+)
+
+VERIFY_LINK_PATTERN = re.compile(
+    r"https?://[^\s\"'<>]*riotgames\.com[^\s\"'<>]*(?:verify|confirm|email)[^\s\"'<>]*",
+    re.I,
+)
+
+
+@dataclass
+class ImapConfig:
+    host: str
+    user: str
+    password: str
+    port: int = 993
+    folder: str = "INBOX"
+    use_ssl: bool = True
+
+    @classmethod
+    def from_env(cls, env: dict[str, str], prefix: str = "IMAP") -> "ImapConfig | None":
+        host = (env.get(f"{prefix}_HOST") or "").strip()
+        user = (env.get(f"{prefix}_USER") or "").strip()
+        password = (env.get(f"{prefix}_PASSWORD") or "").strip()
+        if not (host and user and password):
+            return None
+        port_raw = (env.get(f"{prefix}_PORT") or "993").strip()
+        folder = (env.get(f"{prefix}_FOLDER") or "INBOX").strip() or "INBOX"
+        return cls(
+            host=host,
+            user=user,
+            password=password,
+            port=int(port_raw or "993"),
+            folder=folder,
+            use_ssl=(env.get(f"{prefix}_SSL") or "true").strip().lower()
+            not in {"0", "false", "no"},
+        )
+
+
+@dataclass
+class RiotMail:
+    uid: str
+    subject: str
+    sender: str
+    code: str | None
+    verify_link: str | None
+    received_epoch: float
+
+
+def _decode_mime(value: str | None) -> str:
+    if not value:
+        return ""
+    parts: list[str] = []
+    for chunk, charset in decode_header(value):
+        if isinstance(chunk, bytes):
+            parts.append(chunk.decode(charset or "utf-8", errors="replace"))
+        else:
+            parts.append(chunk)
+    return "".join(parts)
+
+
+def _body_text(msg: Message) -> str:
+    chunks: list[str] = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            ctype = part.get_content_type()
+            disp = str(part.get("Content-Disposition") or "")
+            if "attachment" in disp.lower():
+                continue
+            if ctype in ("text/plain", "text/html"):
+                payload = part.get_payload(decode=True) or b""
+                charset = part.get_content_charset() or "utf-8"
+                chunks.append(payload.decode(charset, errors="replace"))
+    else:
+        payload = msg.get_payload(decode=True) or b""
+        charset = msg.get_content_charset() or "utf-8"
+        chunks.append(payload.decode(charset, errors="replace"))
+    return "\n".join(chunks)
+
+
+def _extract_code(text: str) -> str | None:
+    # Prefer patterns near "code" wording; fall back to any 6-digit token.
+    for pattern in CODE_PATTERNS[1:]:
+        m = pattern.search(text)
+        if m:
+            return m.group(1)
+    m = CODE_PATTERNS[0].search(text)
+    return m.group(1) if m else None
+
+
+def _extract_verify_link(text: str) -> str | None:
+    m = VERIFY_LINK_PATTERN.search(text)
+    if not m:
+        return None
+    return m.group(0).rstrip(").,]}>\"'")
+
+
+def _is_riot_sender(sender: str) -> bool:
+    lower = sender.lower()
+    return any(hint in lower for hint in RIOT_FROM_HINTS)
+
+
+class ImapInbox:
+    def __init__(self, config: ImapConfig):
+        self.config = config
+
+    def _connect(self) -> imaplib.IMAP4:
+        if self.config.use_ssl:
+            client: imaplib.IMAP4 = imaplib.IMAP4_SSL(self.config.host, self.config.port)
+        else:
+            client = imaplib.IMAP4(self.config.host, self.config.port)
+        client.login(self.config.user, self.config.password)
+        typ, _ = client.select(self.config.folder)
+        if typ != "OK":
+            client.logout()
+            raise RuntimeError(f"Cannot select folder {self.config.folder!r}")
+        return client
+
+    def test_connection(self) -> None:
+        client = self._connect()
+        try:
+            client.noop()
+        finally:
+            try:
+                client.logout()
+            except Exception:
+                pass
+
+    def _search_uids(self, client: imaplib.IMAP4, since_epoch: float) -> list[bytes]:
+        # Broad search, filter locally by date/sender for provider quirks.
+        queries = [
+            '(FROM "riotgames.com")',
+            '(FROM "riot")',
+            "ALL",
+        ]
+        uids: list[bytes] = []
+        for query in queries:
+            typ, data = client.uid("search", None, query)
+            if typ == "OK" and data and data[0]:
+                uids = data[0].split()
+                break
+        # Keep the newest ~40 candidates
+        return uids[-40:]
+
+    def fetch_recent_riot_mail(self, *, since_epoch: float) -> list[RiotMail]:
+        client = self._connect()
+        found: list[RiotMail] = []
+        try:
+            for uid in self._search_uids(client, since_epoch):
+                typ, data = client.uid("fetch", uid, "(RFC822)")
+                if typ != "OK" or not data or not data[0]:
+                    continue
+                raw = data[0][1]
+                if not isinstance(raw, (bytes, bytearray)):
+                    continue
+                msg = email.message_from_bytes(raw)
+                sender = _decode_mime(msg.get("From"))
+                subject = _decode_mime(msg.get("Subject"))
+                if not _is_riot_sender(sender) and "riot" not in subject.lower():
+                    continue
+                date_tuple = email.utils.parsedate_to_datetime(msg.get("Date") or "")
+                try:
+                    received = date_tuple.timestamp()
+                except Exception:
+                    received = time.time()
+                if received + 5 < since_epoch:
+                    continue
+                body = _body_text(msg)
+                blob = f"{subject}\n{body}"
+                found.append(
+                    RiotMail(
+                        uid=uid.decode() if isinstance(uid, bytes) else str(uid),
+                        subject=subject,
+                        sender=sender,
+                        code=_extract_code(blob),
+                        verify_link=_extract_verify_link(blob),
+                        received_epoch=received,
+                    )
+                )
+        finally:
+            try:
+                client.logout()
+            except Exception:
+                pass
+        found.sort(key=lambda m: m.received_epoch, reverse=True)
+        return found
+
+    def wait_for_code(
+        self,
+        *,
+        since_epoch: float,
+        timeout: float = 180.0,
+        poll_interval: float = 5.0,
+        used_codes: Iterable[str] | None = None,
+    ) -> str:
+        used = set(used_codes or [])
+        deadline = time.time() + timeout
+        print(
+            f"  IMAP: waiting for Riot code in {self.config.user} "
+            f"(timeout {timeout:.0f}s)…"
+        )
+        while time.time() < deadline:
+            mails = self.fetch_recent_riot_mail(since_epoch=since_epoch)
+            for mail in mails:
+                if mail.code and mail.code not in used:
+                    print(f"  IMAP: found code in “{mail.subject}”")
+                    return mail.code
+            time.sleep(poll_interval)
+        raise TimeoutError(
+            f"No Riot verification code in {self.config.user} within {timeout:.0f}s"
+        )
+
+    def wait_for_verify_link(
+        self,
+        *,
+        since_epoch: float,
+        timeout: float = 180.0,
+        poll_interval: float = 5.0,
+    ) -> str:
+        deadline = time.time() + timeout
+        print(
+            f"  IMAP: waiting for Riot verify link in {self.config.user} "
+            f"(timeout {timeout:.0f}s)…"
+        )
+        while time.time() < deadline:
+            mails = self.fetch_recent_riot_mail(since_epoch=since_epoch)
+            for mail in mails:
+                if mail.verify_link:
+                    print(f"  IMAP: found verify link in “{mail.subject}”")
+                    return mail.verify_link
+                # Some flows only include a code; caller can fall back.
+            time.sleep(poll_interval)
+        raise TimeoutError(
+            f"No Riot verify link in {self.config.user} within {timeout:.0f}s"
+        )
