@@ -295,6 +295,118 @@ def plan_letter_grid_cv(screenshot: Path) -> VisionPlan | None:
     )
 
 
+def plan_drag_cv(screenshot: Path, instruction: str = "") -> VisionPlan | None:
+    """
+    Locate '+ Move' tile (source) and a destination icon (e.g. spaceship)
+    via purple/lavender selection boxes + OCR above the source.
+    """
+    img = cv2.imread(str(screenshot))
+    if img is None:
+        return None
+    import pytesseract
+
+    h, w = img.shape[:2]
+    # Challenge canvas sits under the teal banner and above the footer chrome
+    y0, y1 = int(h * 0.11), int(h * 0.88)
+    x0, x1 = int(w * 0.01), int(w * 0.99)
+    canvas = img[y0:y1, x0:x1]
+    hsv = cv2.cvtColor(canvas, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, np.array((115, 15, 70)), np.array((155, 140, 230)))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=4)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    boxes: list[dict[str, Any]] = []
+    for c in contours:
+        x, y, ww, hh = cv2.boundingRect(c)
+        area = ww * hh
+        if not (2500 < area < 25000):
+            continue
+        ar = ww / max(hh, 1)
+        if not (0.5 < ar < 1.8):
+            continue
+        boxes.append(
+            {
+                "x": x,
+                "y": y,
+                "w": ww,
+                "h": hh,
+                "cx": x + ww // 2,
+                "cy": y + hh // 2,
+                "area": area,
+            }
+        )
+    if not boxes:
+        _log("drag CV: no purple boxes")
+        return None
+
+    for b in boxes:
+        ay0 = max(0, b["y"] - 40)
+        strip = canvas[ay0 : b["y"] + 8, max(0, b["x"] - 25) : b["x"] + b["w"] + 25]
+        if strip.size == 0:
+            b["is_move"] = False
+            continue
+        strip2 = cv2.resize(strip, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        t = pytesseract.image_to_string(strip2).strip().lower()
+        b["above"] = t
+        b["is_move"] = "move" in t or "mov" in t
+
+    move_boxes = [b for b in boxes if b.get("is_move")]
+    other_boxes = [b for b in boxes if not b.get("is_move")]
+    if not move_boxes:
+        # Fallback: lower-middle purple box is usually the draggable
+        move_boxes = [sorted(boxes, key=lambda z: z["cy"], reverse=True)[0]]
+        other_boxes = [b for b in boxes if b is not move_boxes[0]]
+    src = move_boxes[0]
+
+    # Destination: prefer top-left other box (spaceship often sits there),
+    # else largest other box, else white blob in upper half away from source.
+    dst = None
+    if other_boxes:
+        upper = [b for b in other_boxes if b["cy"] < canvas.shape[0] * 0.55]
+        pool = upper or other_boxes
+        # Prefer leftmost-upper (spaceship in this challenge family)
+        dst = sorted(pool, key=lambda z: (z["cy"] + z["cx"], -z["area"]))[0]
+
+    if dst is None:
+        gray = cv2.cvtColor(canvas, cv2.COLOR_BGR2GRAY)
+        white = (gray > 185).astype(np.uint8) * 255
+        n, _labels, stats, cents = cv2.connectedComponentsWithStats(white, 8)
+        best = None
+        for i in range(1, n):
+            x, y, ww, hh, area = stats[i]
+            if area < 80 or area > 4000 or ww < 12 or hh < 12:
+                continue
+            cx, cy = int(cents[i][0]), int(cents[i][1])
+            # skip source neighborhood
+            if abs(cx - src["cx"]) < 40 and abs(cy - src["cy"]) < 40:
+                continue
+            if cy > canvas.shape[0] * 0.6:
+                continue
+            score = area - (cx + cy) * 0.15  # prefer larger + upper-left
+            if best is None or score > best[0]:
+                best = (score, cx, cy)
+        if best:
+            dst = {"cx": best[1], "cy": best[2]}
+
+    if dst is None:
+        _log("drag CV: no destination")
+        return None
+
+    # Map canvas-local → full screenshot coords
+    sx = int(src["cx"] + x0)
+    sy = int(src["cy"] + y0)
+    dx = int(dst["cx"] + x0)
+    dy = int(dst["cy"] + y0)
+    _log(f"drag CV Move=({sx},{sy}) → dest=({dx},{dy}) boxes={len(boxes)}")
+    return VisionPlan(
+        instruction=(instruction or "drag")[:300],
+        clicks=[],
+        drags=[DragTarget(x1=sx, y1=sy, x2=dx, y2=dy, label="move->target")],
+        backend="ocr",
+        notes="drag CV purple/Move + dest icon",
+    )
+
+
 def plan_ocr(screenshot: Path) -> VisionPlan:
     text, boxes = _ocr_image(screenshot)
     _log(f"OCR text:\n{text}")
@@ -303,25 +415,25 @@ def plan_ocr(screenshot: Path) -> VisionPlan:
     lower = text.lower()
 
     # Drag-style challenges (common on Riot / hCaptcha enterprise)
-    if "drag" in lower and ("to the" in lower or " onto " in lower):
-        # Heuristic fallback positions when we can't segment icons:
-        # astronaut/source mid-left, target mid-bottom — refined by agent/openai when available.
-        # Try to locate "Move" handle via OCR boxes for a better source point.
+    if "drag" in lower and ("to the" in lower or " onto " in lower or "astronaut" in lower):
+        cv_drag = plan_drag_cv(screenshot, instruction=text.strip())
+        if cv_drag and cv_drag.drags:
+            return cv_drag
+        # Heuristic fallback positions when we can't segment icons
         src = None
         for b in boxes:
             if "move" in b["text"].lower():
                 src = (b["cx"], b["cy"] + int(b["h"] * 1.5))
                 break
         if not src:
-            # purple selection often around mid-left of canvas (below banner ~15% height)
-            src = (int(w * 0.35), int(h * 0.55))
-        dst = (int(w * 0.50), int(h * 0.72))
+            src = (int(w * 0.40), int(h * 0.48))
+        dst = (int(w * 0.25), int(h * 0.32))
         return VisionPlan(
             instruction=text.strip()[:300],
             clicks=[],
             drags=[DragTarget(x1=src[0], y1=src[1], x2=dst[0], y2=dst[1], label="drag")],
             backend="ocr",
-            notes="drag heuristic from instruction+Move OCR",
+            notes="drag heuristic fallback (CV missed)",
         )
 
     # Prefer CV teal-tile path for letter grids (stylized fonts break plain OCR)
@@ -637,19 +749,21 @@ def apply_clicks(page, plan: VisionPlan, screenshot: Path) -> int:
             f"page=({x1:.0f},{y1:.0f})->({x2:.0f},{y2:.0f})"
         )
         page.mouse.move(x1, y1)
+        page.wait_for_timeout(150)
         page.mouse.down()
-        page.wait_for_timeout(200)
+        page.wait_for_timeout(350)
         # stepped move looks more human
-        steps = 12
+        steps = 20
         for i in range(1, steps + 1):
             page.mouse.move(
                 x1 + (x2 - x1) * i / steps,
                 y1 + (y2 - y1) * i / steps,
             )
-            page.wait_for_timeout(30)
+            page.wait_for_timeout(25)
+        page.wait_for_timeout(200)
         page.mouse.up()
         applied += 1
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(800)
     return applied
 
 
