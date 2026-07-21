@@ -3,15 +3,14 @@
 Interactive helper: sign in to your Riot Games account and update its email.
 
 Uses the official portal at https://account.riotgames.com/
-You must own the account. Captcha, MFA, and email verification codes are
-entered by you in the browser / terminal — this script does not bypass them.
+hCaptcha can be solved automatically via CapSolver when CAPSOLVER_API_KEY is set.
 
 Usage:
   cd tools/riot-email-update
   python3 -m venv .venv && source .venv/bin/activate
   pip install -r requirements.txt
   playwright install chromium
-  cp .env.example .env   # optional
+  cp .env.example .env   # set CAPSOLVER_API_KEY (+ Riot creds)
   python update_email.py
 """
 
@@ -24,6 +23,8 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+from captcha import CapSolverError, solve_and_inject
 
 ACCOUNT_URL = "https://account.riotgames.com/"
 AUTH_HOST_HINT = "auth.riotgames.com"
@@ -78,6 +79,15 @@ def parse_args() -> argparse.Namespace:
         default=120_000,
         help="Default Playwright timeout in ms (default: 120000)",
     )
+    parser.add_argument(
+        "--capsolver-key",
+        help="CapSolver API key (or set CAPSOLVER_API_KEY)",
+    )
+    parser.add_argument(
+        "--no-captcha-solver",
+        action="store_true",
+        help="Disable CapSolver even if an API key is configured",
+    )
     return parser.parse_args()
 
 
@@ -113,27 +123,52 @@ def click_first_matching(page, selectors: list[str], action_name: str) -> bool:
 
 def wait_until_logged_in(page, timeout_ms: int) -> None:
     """Stay on auth until we land back on the account portal."""
-    print("  Waiting for successful login (complete captcha / MFA in the browser if asked)…")
+    print("  Waiting for successful login (MFA may still be required)…")
     page.wait_for_function(
         """() => {
             const href = window.location.href;
             return href.includes('account.riotgames.com')
                 && !href.includes('auth.riotgames.com')
+                && !href.includes('authenticate.riotgames.com')
                 && !href.includes('/login');
         }""",
         timeout=timeout_ms,
     )
 
 
-def run_login(page, username: str, password: str, timeout_ms: int) -> None:
+def try_solve_hcaptcha(page, api_key: str | None, proxy: str | None) -> bool:
+    if not api_key:
+        return False
+    print("[captcha] Solving hCaptcha with CapSolver…")
+    try:
+        return solve_and_inject(page, api_key, proxy=proxy)
+    except CapSolverError as exc:
+        print(f"  CapSolver error: {exc}")
+        return False
+    except Exception as exc:
+        print(f"  CapSolver unexpected error: {exc}")
+        return False
+
+
+def run_login(
+    page,
+    username: str,
+    password: str,
+    timeout_ms: int,
+    *,
+    capsolver_key: str | None,
+    proxy: str | None,
+) -> None:
     print("\n[1/3] Opening Riot account portal…")
     page.goto(ACCOUNT_URL, wait_until="domcontentloaded")
 
     # Redirect to auth is expected when logged out
     try:
-        page.wait_for_url(f"**/*{AUTH_HOST_HINT}**", timeout=15_000)
+        page.wait_for_url(
+            lambda url: "auth.riotgames.com" in url or "authenticate.riotgames.com" in url,
+            timeout=15_000,
+        )
     except Exception:
-        # Already logged in from a previous session, or page layout differs
         if "account.riotgames.com" in page.url and AUTH_HOST_HINT not in page.url:
             print("  Appears already signed in.")
             return
@@ -164,6 +199,10 @@ def run_login(page, username: str, password: str, timeout_ms: int) -> None:
         "password",
     )
 
+    # Solve captcha before / around submit when CapSolver is configured
+    page.wait_for_timeout(1_500)
+    solved = try_solve_hcaptcha(page, capsolver_key, proxy)
+
     if not (filled_user and filled_pass):
         pause(
             "Could not auto-fill the login form. Sign in manually in the browser window, "
@@ -184,12 +223,49 @@ def run_login(page, username: str, password: str, timeout_ms: int) -> None:
         if not clicked:
             pause("Click Sign in yourself, then finish captcha / MFA if shown.")
 
+        # Riot sometimes shows hCaptcha only after the first submit attempt
+        page.wait_for_timeout(2_000)
+        if "account.riotgames.com" not in page.url or "auth" in page.url:
+            if not solved or page.locator('iframe[src*="hcaptcha"]').count() > 0:
+                solved = try_solve_hcaptcha(page, capsolver_key, proxy)
+                if solved:
+                    click_first_matching(
+                        page,
+                        [
+                            'button[type="submit"]',
+                            'button:has-text("Sign in")',
+                            'button:has-text("Log in")',
+                            'button:has-text("Sign In")',
+                            '[data-testid="btn-signin-submit"]',
+                        ],
+                        "Sign in (after captcha)",
+                    )
+
     try:
         wait_until_logged_in(page, timeout_ms)
         print("  Login detected.")
     except Exception:
+        if capsolver_key:
+            print("  Login not finished yet — retrying CapSolver once…")
+            if try_solve_hcaptcha(page, capsolver_key, proxy):
+                click_first_matching(
+                    page,
+                    [
+                        'button[type="submit"]',
+                        'button:has-text("Sign in")',
+                        'button:has-text("Log in")',
+                        'button:has-text("Sign In")',
+                    ],
+                    "Sign in (retry)",
+                )
+                try:
+                    wait_until_logged_in(page, timeout_ms)
+                    print("  Login detected.")
+                    return
+                except Exception:
+                    pass
         pause(
-            "Still waiting on login. Finish captcha / email / authenticator MFA in the browser, "
+            "Still waiting on login. Finish MFA (or captcha if CapSolver failed) in the browser, "
             "then press Enter once you see your account page."
         )
         wait_until_logged_in(page, timeout_ms)
@@ -201,13 +277,12 @@ def run_email_update(page, new_email: str, timeout_ms: int) -> None:
     page.goto(ACCOUNT_URL, wait_until="domcontentloaded")
     page.wait_for_timeout(2_000)
 
-    # Try common paths / UI affordances for personal info / email edit
     navigated = False
     for path in ("/account", "/", "/#/"):
         try:
             page.goto(f"https://account.riotgames.com{path}", wait_until="domcontentloaded")
             page.wait_for_timeout(1_500)
-            if AUTH_HOST_HINT in page.url:
+            if AUTH_HOST_HINT in page.url or "authenticate.riotgames.com" in page.url:
                 raise RuntimeError("Session expired — redirected to login")
             navigated = True
             break
@@ -283,6 +358,12 @@ def main() -> int:
     args = parse_args()
 
     headed = args.headed if args.headed is not None else env_bool("HEADED", True)
+    capsolver_key = None if args.no_captcha_solver else (
+        args.capsolver_key or os.getenv("CAPSOLVER_API_KEY") or None
+    )
+    if capsolver_key:
+        capsolver_key = capsolver_key.strip() or None
+    proxy = (os.getenv("CAPSOLVER_PROXY") or os.getenv("PROXY") or "").strip() or None
 
     username = args.username or os.getenv("RIOT_USERNAME") or prompt("Riot username or email")
     password = os.getenv("RIOT_PASSWORD") or prompt("Riot password", secret=True)
@@ -290,10 +371,15 @@ def main() -> int:
 
     print(
         "\nThis helper drives the official Riot account site for YOUR account only.\n"
-        "It cannot skip captcha, MFA, or email verification.\n"
         f"Browser mode: {'headed' if headed else 'headless'}\n"
         f"Target email: {new_email}\n"
+        f"hCaptcha solver: {'CapSolver' if capsolver_key else 'manual (no CAPSOLVER_API_KEY)'}\n"
     )
+    if not capsolver_key:
+        print(
+            "Tip: set CAPSOLVER_API_KEY in .env to auto-solve Riot hCaptcha.\n"
+            "     Get a key at https://www.capsolver.com/\n"
+        )
 
     try:
         from playwright.sync_api import sync_playwright
@@ -316,7 +402,14 @@ def main() -> int:
         page.set_default_timeout(args.timeout_ms)
 
         try:
-            run_login(page, username, password, args.timeout_ms)
+            run_login(
+                page,
+                username,
+                password,
+                args.timeout_ms,
+                capsolver_key=capsolver_key,
+                proxy=proxy,
+            )
             run_email_update(page, new_email, args.timeout_ms)
         except KeyboardInterrupt:
             print("\nCancelled.")
