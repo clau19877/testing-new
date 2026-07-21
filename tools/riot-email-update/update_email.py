@@ -2,8 +2,8 @@
 """
 Interactive helper: sign in to your Riot Games account and update its email.
 
-- hCaptcha via CapSolver (CAPSOLVER_API_KEY)
-- MFA / email verification codes via IMAP (IMAP_* / NEW_IMAP_*)
+Default captcha path is in-browser hybrid vision (local CV + 2Captcha
+CoordinatesTask). Out-of-band token APIs soft-fail on Riot enterprise.
 
 Usage:
   cd tools/riot-email-update
@@ -84,9 +84,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--captcha-provider",
-        choices=("capless", "capsolver", "capmonster", "twocaptcha", "nonecap", "vision"),
+        choices=("vision", "hybrid", "capless", "capsolver", "capmonster", "twocaptcha", "nonecap"),
         default=None,
-        help="Captcha provider (default: CAPTCHA_PROVIDER or capless)",
+        help="Captcha provider (default: CAPTCHA_PROVIDER or vision/hybrid)",
     )
     parser.add_argument(
         "--captcha-key",
@@ -254,6 +254,38 @@ def try_solve_hcaptcha(
     api_key: str | None,
     proxy: str | None,
 ) -> bool:
+    provider = (provider or "").strip().lower()
+    if provider in ("vision", "hybrid", "2cap_click"):
+        from vision_captcha import (
+            captcha_visible,
+            page_has_riot_oops,
+            solve_visible_captcha,
+        )
+
+        backend = (
+            os.getenv("VISION_BACKEND")
+            or ("hybrid" if provider in ("vision", "hybrid") else "twocaptcha")
+        )
+        print(f"[captcha] In-browser hybrid vision (backend={backend})…")
+        # Wait for challenge mount after sign-in
+        for _ in range(16):
+            if captcha_visible(page) or page_has_riot_oops(page):
+                break
+            page.wait_for_timeout(500)
+        if page_has_riot_oops(page):
+            print("  Riot Oops page before vision — fail")
+            return False
+        if not captcha_visible(page):
+            print("  No hCaptcha challenge visible")
+            return False
+        try:
+            ok = solve_visible_captcha(page, backend=backend, max_rounds=5)
+            print(f"  Vision captcha result={ok}")
+            return bool(ok)
+        except Exception as exc:
+            print(f"  Vision captcha error: {exc}")
+            return False
+
     if not api_key:
         return False
     print(f"[captcha] Solving hCaptcha with {provider}…")
@@ -265,6 +297,31 @@ def try_solve_hcaptcha(
     except Exception as exc:
         print(f"  Captcha unexpected error: {exc}")
         return False
+
+
+def wait_for_mfa_or_login(page, *, timeout_s: float = 20.0) -> str:
+    """
+    After captcha clears, poll briefly for MFA UI, account page, or Oops.
+    Returns: 'logged_in' | 'mfa' | 'oops' | 'login' | 'unknown'
+    """
+    from vision_captcha import page_has_riot_oops, page_looks_mfa
+
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if page_has_riot_oops(page):
+            return "oops"
+        if page_looks_logged_in(page):
+            return "logged_in"
+        if page_looks_mfa(page) or mfa_fields_visible(page):
+            return "mfa"
+        page.wait_for_timeout(500)
+    if page_has_riot_oops(page):
+        return "oops"
+    if page_looks_logged_in(page):
+        return "logged_in"
+    if page_looks_mfa(page) or mfa_fields_visible(page):
+        return "mfa"
+    return "login"
 
 
 def try_fill_imap_code(
@@ -320,7 +377,13 @@ def run_login(
     captcha_proxy: str | None,
     current_inbox: ImapInbox | None,
     imap_timeout: float,
-) -> None:
+) -> str:
+    """
+    Drive Riot login. Returns one of:
+      logged_in | mfa_done | oops | captcha_fail | timeout
+    """
+    from vision_captcha import captcha_visible, page_has_riot_oops
+
     print("\n[1/3] Opening Riot account portal…")
     login_started = time.time()
     used_codes: set[str] = set()
@@ -334,7 +397,7 @@ def run_login(
     except Exception:
         if page_looks_logged_in(page):
             print("  Appears already signed in.")
-            return
+            return "logged_in"
 
     dismiss_cookie_banner(page)
     print("[1/3] Filling login form…")
@@ -363,14 +426,6 @@ def run_login(
         "password",
     )
 
-    page.wait_for_timeout(1_500)
-    solved = try_solve_hcaptcha(
-        page,
-        provider=captcha_provider,
-        api_key=captcha_key,
-        proxy=captcha_proxy,
-    )
-
     if not (filled_user and filled_pass):
         pause(
             "Could not auto-fill the login form. Sign in manually in the browser window."
@@ -380,21 +435,60 @@ def run_login(
         if not clicked:
             pause("Click the red arrow Sign in button yourself.")
 
-        page.wait_for_timeout(2_000)
-        if not page_looks_logged_in(page):
-            if not solved or page.locator('iframe[src*="hcaptcha"]').count() > 0:
-                solved = try_solve_hcaptcha(
-                    page,
-                    provider=captcha_provider,
-                    api_key=captcha_key,
-                    proxy=captcha_proxy,
-                )
-                if solved:
-                    click_riot_signin(page)
-
-    # MFA / email code via IMAP
     page.wait_for_timeout(2_000)
-    if not page_looks_logged_in(page):
+    if page_has_riot_oops(page):
+        print("  Riot Oops right after sign-in")
+        return "oops"
+
+    use_vision = captcha_provider in ("vision", "hybrid", "2cap_click")
+    solved = False
+
+    if use_vision:
+        # Sign-in first, then solve in-browser (enterprise session bind)
+        if captcha_visible(page) or not page_looks_logged_in(page):
+            solved = try_solve_hcaptcha(
+                page,
+                provider=captcha_provider,
+                api_key=captcha_key,
+                proxy=captcha_proxy,
+            )
+            if page_has_riot_oops(page):
+                return "oops"
+            if not solved and captcha_visible(page):
+                return "captcha_fail"
+    else:
+        # Legacy token inject (often soft-fails on Riot enterprise)
+        page.wait_for_timeout(1_500)
+        solved = try_solve_hcaptcha(
+            page,
+            provider=captcha_provider,
+            api_key=captcha_key,
+            proxy=captcha_proxy,
+        )
+        if filled_user and filled_pass:
+            click_riot_signin(page)
+            page.wait_for_timeout(2_000)
+            if not page_looks_logged_in(page):
+                if not solved or page.locator('iframe[src*="hcaptcha"]').count() > 0:
+                    solved = try_solve_hcaptcha(
+                        page,
+                        provider=captcha_provider,
+                        api_key=captcha_key,
+                        proxy=captcha_proxy,
+                    )
+                    if solved:
+                        click_riot_signin(page)
+
+    # After captcha: wait for MFA / account / Oops before IMAP
+    state = wait_for_mfa_or_login(page, timeout_s=20.0)
+    print(f"  Post-captcha state={state}")
+    if state == "oops":
+        return "oops"
+    if state == "logged_in":
+        print("  Login detected.")
+        return "logged_in"
+
+    if state == "mfa" or not page_looks_logged_in(page):
         try_fill_imap_code(
             page,
             current_inbox,
@@ -402,15 +496,25 @@ def run_login(
             timeout=imap_timeout,
             used_codes=used_codes,
         )
+        page.wait_for_timeout(2_000)
+        if page_looks_logged_in(page):
+            print("  Login detected after MFA.")
+            return "mfa_done"
 
     try:
         wait_until_logged_in(page, min(timeout_ms, 60_000))
         print("  Login detected.")
-        return
+        return "logged_in"
     except Exception:
         pass
 
-    if captcha_key and not page_looks_logged_in(page):
+    # One more captcha attempt on same session (token providers only)
+    if (
+        not use_vision
+        and captcha_key
+        and not page_looks_logged_in(page)
+        and not page_has_riot_oops(page)
+    ):
         print("  Login not finished yet — retrying captcha once…")
         if try_solve_hcaptcha(
             page,
@@ -431,12 +535,19 @@ def run_login(
     try:
         wait_until_logged_in(page, timeout_ms)
         print("  Login detected.")
+        return "logged_in"
     except Exception:
+        if page_has_riot_oops(page):
+            return "oops"
         pause(
             "Still waiting on login. Finish MFA/captcha in the browser if needed, "
             "then press Enter once you see your account page."
         )
-        wait_until_logged_in(page, timeout_ms)
+        try:
+            wait_until_logged_in(page, timeout_ms)
+            return "logged_in"
+        except Exception:
+            return "timeout"
         print("  Login detected.")
 
 
@@ -588,11 +699,15 @@ def main() -> int:
     args = parse_args()
 
     headed = args.headed if args.headed is not None else env_bool("HEADED", True)
+    # Default: in-browser hybrid (local CV + 2Captcha Coordinates). Token APIs
+    # soft-fail on Riot enterprise even when they mint P1_ tokens.
     captcha_provider = (
         args.captcha_provider
         or os.getenv("CAPTCHA_PROVIDER")
-        or "capless"
+        or "vision"
     ).strip().lower()
+    if captcha_provider == "hybrid":
+        captcha_provider = "vision"
     captcha_key = None
     if not args.no_captcha_solver:
         key_env = {
@@ -601,21 +716,30 @@ def main() -> int:
             "capmonster": "CAPMONSTER_API_KEY",
             "twocaptcha": "TWOCAPTCHA_API_KEY",
             "nonecap": "NONECAP_API_KEY",
+            "vision": "TWOCAPTCHA_API_KEY",
         }.get(captcha_provider)
         captcha_key = (
             args.captcha_key
             or (os.getenv(key_env) if key_env else None)
+            or os.getenv("TWOCAPTCHA_API_KEY")
+            or os.getenv("TWO_CAPTCHA_API_KEY")
             or os.getenv("CAPLESS_API_KEY")
             or os.getenv("CAPTCHA_API_KEY")
             or os.getenv("CAPMONSTER_API_KEY")
-            or os.getenv("TWOCAPTCHA_API_KEY")
-            or os.getenv("TWO_CAPTCHA_API_KEY")
             or os.getenv("NONECAP_API_KEY")
             or os.getenv("CAPSOLVER_API_KEY")
             or None
         )
     if captcha_key:
         captcha_key = captcha_key.strip() or None
+
+    from proxyutil import pick_proxy, proxy_count, to_playwright
+
+    proxy_list_path = os.getenv("PROXY_LIST") or "data/proxies.txt"
+    proxy_index = int(os.getenv("PROXY_INDEX") or "0")
+    max_proxy_attempts = int(os.getenv("PROXY_ATTEMPTS") or "3")
+    n_proxies = proxy_count(proxy_list_path)
+
     captcha_proxy = (
         os.getenv("CAPLESS_PROXY")
         or os.getenv("CAPTCHA_PROXY")
@@ -625,13 +749,20 @@ def main() -> int:
         or ""
     ).strip() or None
     if not captcha_proxy:
-        from proxyutil import pick_proxy
-
-        captcha_proxy = pick_proxy(None, os.getenv("PROXY_LIST") or "data/proxies.txt")
+        captcha_proxy = pick_proxy(None, proxy_list_path, index=proxy_index)
 
     browser_proxy = (
         os.getenv("BROWSER_PROXY") or captcha_proxy or ""
     ).strip() or None
+
+    # Vision path needs TWOCAPTCHA_API_KEY for Coordinates fallback (or local-only)
+    if captcha_provider == "vision":
+        os.environ.setdefault("VISION_BACKEND", "hybrid")
+        if not (os.getenv("TWOCAPTCHA_API_KEY") or os.getenv("TWO_CAPTCHA_API_KEY")):
+            print(
+                "NOTE: VISION_BACKEND=hybrid works best with TWOCAPTCHA_API_KEY "
+                "for Coordinates fallback when local CV misses.\n"
+            )
 
     current_cfg = ImapConfig.from_env(env_map(), "IMAP")
     new_cfg = ImapConfig.from_env(env_map(), "NEW_IMAP")
@@ -646,21 +777,17 @@ def main() -> int:
         "\nThis helper drives the official Riot account site for YOUR account only.\n"
         f"Browser mode: {'headed' if headed else 'headless'}\n"
         f"Target email: {new_email}\n"
-        f"Captcha: {captcha_provider if captcha_key else 'manual'} "
-        f"{'(proxy set)' if captcha_proxy else '(no proxy)'}\n"
-        f"Browser proxy: {'yes' if browser_proxy else 'no'}\n"
+        f"Captcha: {captcha_provider} "
+        f"(VISION_BACKEND={os.getenv('VISION_BACKEND') or 'hybrid'})\n"
+        f"Proxy list: {n_proxies} entries, start index={proxy_index}, "
+        f"attempts={max_proxy_attempts}\n"
         f"IMAP current inbox: {current_cfg.user if current_cfg else 'not set'}\n"
         f"IMAP new inbox: {new_cfg.user if new_cfg else 'not set'}\n"
     )
     if captcha_provider == "capsolver":
         print(
             "NOTE: CapSolver currently rejects Riot's hCaptcha sitekey.\n"
-            "      Prefer CAPTCHA_PROVIDER=capless + CAPLESS_API_KEY + CAPLESS_PROXY.\n"
-        )
-    if captcha_provider == "capless" and captcha_key and not captcha_proxy:
-        print(
-            "NOTE: Capless requires a residential proxy (CAPLESS_PROXY).\n"
-            "      Format: http://user:pass@host:port\n"
+            "      Prefer CAPTCHA_PROVIDER=vision + TWOCAPTCHA_API_KEY.\n"
         )
 
     if current_inbox:
@@ -694,54 +821,104 @@ def main() -> int:
             headless=not headed,
             args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
         )
-        context_kwargs: dict = {
-            "viewport": {"width": 1280, "height": 900},
-            "locale": "en-US",
-            "user_agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-            ),
-        }
-        if browser_proxy:
-            from proxyutil import to_playwright
 
-            context_kwargs["proxy"] = to_playwright(browser_proxy)
-            print(f"  Browser using proxy {context_kwargs['proxy']['server']}")
-        context = browser.new_context(**context_kwargs)
-        page = context.new_page()
-        page.set_default_timeout(args.timeout_ms)
+        login_ok = False
+        last_status = "unknown"
+        for attempt in range(max_proxy_attempts):
+            idx = (proxy_index + attempt) % max(n_proxies, 1) if n_proxies else proxy_index + attempt
+            session_proxy = (
+                pick_proxy(None, proxy_list_path, index=idx)
+                if n_proxies
+                else browser_proxy
+            )
+            # Prefer rotating list over a single BROWSER_PROXY when retrying
+            if attempt > 0 and n_proxies:
+                session_proxy = pick_proxy(None, proxy_list_path, index=idx)
+            captcha_proxy_attempt = session_proxy or captcha_proxy
 
-        try:
-            run_login(
-                page,
-                username,
-                password,
-                args.timeout_ms,
-                captcha_provider=captcha_provider,
-                captcha_key=captcha_key,
-                captcha_proxy=captcha_proxy,
-                current_inbox=current_inbox,
-                imap_timeout=args.imap_timeout,
+            context_kwargs: dict = {
+                "viewport": {"width": 1280, "height": 900},
+                "locale": "en-US",
+                "user_agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                ),
+            }
+            if session_proxy:
+                context_kwargs["proxy"] = to_playwright(session_proxy)
+                print(
+                    f"\n=== Session attempt {attempt + 1}/{max_proxy_attempts} "
+                    f"proxy_index={idx} "
+                    f"server={context_kwargs['proxy']['server']} ==="
+                )
+            else:
+                print(
+                    f"\n=== Session attempt {attempt + 1}/{max_proxy_attempts} "
+                    f"(no proxy) ==="
+                )
+
+            context = browser.new_context(**context_kwargs)
+            page = context.new_page()
+            page.set_default_timeout(args.timeout_ms)
+
+            try:
+                last_status = run_login(
+                    page,
+                    username,
+                    password,
+                    args.timeout_ms,
+                    captcha_provider=captcha_provider,
+                    captcha_key=captcha_key,
+                    captcha_proxy=captcha_proxy_attempt,
+                    current_inbox=current_inbox,
+                    imap_timeout=args.imap_timeout,
+                )
+                print(f"  Login status: {last_status}")
+                if last_status in ("logged_in", "mfa_done"):
+                    login_ok = True
+                    run_email_update(
+                        page,
+                        new_email,
+                        args.timeout_ms,
+                        current_inbox=current_inbox,
+                        new_inbox=new_inbox,
+                        imap_timeout=args.imap_timeout,
+                    )
+                    break
+                if last_status in ("oops", "captcha_fail"):
+                    print(
+                        "  Captcha/session soft-fail — rotating proxy + fresh browser context"
+                    )
+                    context.close()
+                    continue
+                # timeout / unknown — still try rotate once more
+                print(f"  Login incomplete ({last_status}) — rotating proxy")
+                context.close()
+                continue
+            except KeyboardInterrupt:
+                print("\nCancelled.")
+                context.close()
+                browser.close()
+                return 130
+            except Exception as exc:
+                print(f"\nError: {exc}", file=sys.stderr)
+                pause("Inspect the browser window if it is still open, then press Enter to exit.")
+                try:
+                    context.close()
+                except Exception:
+                    pass
+                break
+
+        if not login_ok:
+            print(
+                f"\nLogin did not succeed after {max_proxy_attempts} proxy attempt(s) "
+                f"(last={last_status}).",
+                file=sys.stderr,
             )
-            run_email_update(
-                page,
-                new_email,
-                args.timeout_ms,
-                current_inbox=current_inbox,
-                new_inbox=new_inbox,
-                imap_timeout=args.imap_timeout,
-            )
-        except KeyboardInterrupt:
-            print("\nCancelled.")
-            return 130
-        except Exception as exc:
-            print(f"\nError: {exc}", file=sys.stderr)
-            pause("Inspect the browser window if it is still open, then press Enter to exit.")
-            return 1
-        finally:
-            context.close()
             browser.close()
+            return 1
 
+        browser.close()
     return 0
 
 

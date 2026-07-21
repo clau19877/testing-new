@@ -108,25 +108,23 @@ def page_logged_in(page) -> bool:
 def main() -> int:
     from playwright.sync_api import sync_playwright
 
+    from vision_captcha import page_has_riot_oops, page_looks_mfa
+
     ensure_debug()
-    report: dict = {"steps": [], "ok": False}
+    report: dict = {"steps": [], "ok": False, "attempts": []}
     started = time.time()
 
     user = os.getenv("RIOT_USERNAME") or ""
     password = os.getenv("RIOT_PASSWORD") or ""
     new_email = os.getenv("NEW_EMAIL") or ""
-    backend = os.getenv("VISION_BACKEND") or "auto"
+    backend = os.getenv("VISION_BACKEND") or "hybrid"
     proxy_list = load_proxy_list(os.getenv("PROXY_LIST") or "data/proxies.txt")
-    proxy_idx = int(os.getenv("PROXY_INDEX") or "9")
-    proxy = (
-        proxy_list[proxy_idx % len(proxy_list)]
-        if proxy_list
-        else (os.getenv("BROWSER_PROXY") or os.getenv("CAPLESS_PROXY") or "")
-    )
+    proxy_idx = int(os.getenv("PROXY_INDEX") or "0")
+    max_attempts = int(os.getenv("PROXY_ATTEMPTS") or "3")
 
     log("init", f"user={user}")
     log("init", f"vision_backend={backend}")
-    log("init", f"proxy_idx={proxy_idx} session={(proxy.split('session-')[1][:16] if 'session-' in proxy else proxy[:40])}")
+    log("init", f"proxy_idx={proxy_idx} attempts={max_attempts} n_proxies={len(proxy_list)}")
 
     cfg = ImapConfig.from_env(dict(os.environ), "IMAP")
     inbox = None
@@ -143,7 +141,7 @@ def main() -> int:
     if not user or not password:
         log("init", "missing Riot creds")
         return 1
-    if not proxy:
+    if not proxy_list and not (os.getenv("BROWSER_PROXY") or os.getenv("CAPLESS_PROXY")):
         log("init", "missing proxy")
         return 1
 
@@ -152,197 +150,196 @@ def main() -> int:
             headless=False,
             args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
         )
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            locale="en-US",
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-            ),
-            proxy=to_playwright(proxy),
-        )
-        page = context.new_page()
-        page.set_default_timeout(90_000)
 
-        # --- 01 open ---
-        log("01", "opening account.riotgames.com")
-        try:
-            page.goto("https://account.riotgames.com/", wait_until="domcontentloaded")
-            page.wait_for_timeout(4000)
-            log("01", f"url={page.url}")
-            log("01", f"title={page.title()}")
-            shot(page, "01_open")
-            report["steps"].append({"01_open": "ok", "url": page.url})
-        except Exception as exc:
-            log("01", f"FAIL {exc}")
-            shot(page, "01_open_fail")
-            report["steps"].append({"01_open": f"fail:{exc}"})
-            (DEBUG_DIR / "debug_report.json").write_text(json.dumps(report, indent=2))
-            context.close()
-            browser.close()
-            return 1
-
-        dismiss_cookies(page)
-
-        # --- 02 fill ---
-        log("02", "filling credentials")
-        try:
-            page.locator('input[name="username"]').first.fill(user)
-            page.locator('input[name="password"]').first.fill(password)
-            shot(page, "02_filled")
-            report["steps"].append({"02_fill": "ok"})
-        except Exception as exc:
-            log("02", f"FAIL {exc}")
-            shot(page, "02_fill_fail")
-            report["steps"].append({"02_fill": f"fail:{exc}"})
-
-        # --- 03 sign-in ---
-        log("03", "clicking sign-in")
-        click_signin(page)
-        page.wait_for_timeout(5000)
-        # Wait briefly for hCaptcha challenge to mount
-        for _ in range(10):
-            if captcha_visible(page):
-                break
-            page.wait_for_timeout(500)
-        shot(page, "03_after_signin")
-        log("03", f"url={page.url}")
-        log("03", f"captcha_visible={captcha_visible(page)}")
-        report["steps"].append(
-            {"03_signin": "ok", "url": page.url, "captcha": captcha_visible(page)}
-        )
-
-        # --- 04 vision captcha ---
-        if captcha_visible(page) or "authenticate.riotgames.com" in page.url:
-            log("04", "starting vision captcha solver")
-            try:
-                ok = solve_visible_captcha(page, backend=backend, max_rounds=5)
-                log("04", f"vision result={ok}")
-                shot(page, "04_after_vision")
-                report["steps"].append({"04_vision": "ok" if ok else "fail", "result": ok})
-            except Exception as exc:
-                log("04", f"FAIL {exc}")
-                shot(page, "04_vision_fail")
-                report["steps"].append({"04_vision": f"fail:{exc}"})
-
-            # If still on login, try sign-in again after captcha (not on Oops)
-            content_l = ""
-            try:
-                content_l = page.content().lower()
-            except Exception:
-                pass
-            if "something went wrong" in content_l:
-                log("04b", "Riot Oops after vision — not re-signing in")
-                report["steps"].append({"04b_oops": True})
-            elif not page_logged_in(page):
-                log("04b", "re-click sign-in after vision")
-                click_signin(page)
-                page.wait_for_timeout(4000)
-                shot(page, "04b_resignin")
-                # maybe captcha again
-                if captcha_visible(page):
-                    log("04c", "captcha still present — second vision pass")
-                    try:
-                        ok2 = solve_visible_captcha(page, backend=backend, max_rounds=3)
-                        report["steps"].append({"04c_vision2": ok2})
-                    except Exception as exc:
-                        report["steps"].append({"04c_vision2": f"fail:{exc}"})
-                    click_signin(page)
-                    page.wait_for_timeout(3000)
-                shot(page, "04c_after")
-        else:
-            log("04", "no captcha detected after sign-in")
-            report["steps"].append({"04_vision": "skipped_no_captcha"})
-
-        log("05", f"url after captcha flow: {page.url}")
-        shot(page, "05_pre_mfa")
-
-        # --- 05 MFA ---
-        content_l = ""
-        try:
-            content_l = page.content().lower()
-        except Exception:
-            pass
-        mfa_input = (
-            page.locator('input[autocomplete="one-time-code"]').count() > 0
-            or page.locator('input[inputmode="numeric"]').count() > 0
-            or page.locator('input[name*="code" i]').count() > 0
-        )
-        needs_mfa = (
-            inbox
-            and not page_logged_in(page)
-            and not captcha_visible(page)
-            and mfa_input
-            and (
-                "multifactor" in content_l
-                or "enter the code" in content_l
-                or "verification code" in content_l
-                or "check your email" in content_l
+        for attempt in range(max_attempts):
+            idx = (proxy_idx + attempt) % len(proxy_list) if proxy_list else attempt
+            proxy = (
+                proxy_list[idx]
+                if proxy_list
+                else (os.getenv("BROWSER_PROXY") or os.getenv("CAPLESS_PROXY") or "")
             )
-        )
-        if needs_mfa:
-            log("05", "MFA UI detected — waiting IMAP")
-            try:
-                code = inbox.wait_for_code(since_epoch=started - 10, timeout=150)
-                log("05", f"got code {code}")
-                filled = False
-                for sel in [
-                    'input[autocomplete="one-time-code"]',
-                    'input[name*="code" i]',
-                    'input[inputmode="numeric"]',
-                    'input[type="tel"]',
-                    'input[type="text"]',
-                ]:
-                    loc = page.locator(sel).first
-                    try:
-                        if loc.count():
-                            loc.fill(code)
-                            filled = True
-                            log("05", f"filled via {sel}")
-                            break
-                    except Exception:
-                        continue
-                if filled:
-                    click_signin(page)
-                    page.wait_for_timeout(4000)
-                report["steps"].append({"05_mfa": "ok", "code": code})
-            except Exception as exc:
-                log("05", f"MFA FAIL {exc}")
-                report["steps"].append({"05_mfa": f"fail:{exc}"})
-            shot(page, "05_after_mfa")
-        else:
-            log("05", "MFA skipped (not shown or no inbox)")
-            report["steps"].append({"05_mfa": "skipped"})
+            attempt_note = {
+                "attempt": attempt + 1,
+                "proxy_index": idx,
+                "session": (
+                    proxy.split("session-")[1][:16]
+                    if "session-" in proxy
+                    else proxy[:40]
+                ),
+            }
+            log(
+                "session",
+                f"attempt {attempt + 1}/{max_attempts} proxy_idx={idx} "
+                f"session={attempt_note['session']}",
+            )
 
-        # --- 06 account ---
-        log("06", f"final url={page.url}")
-        shot(page, "06_final")
-        if page_logged_in(page):
-            log("06", "LOGIN SUCCESS")
-            report["ok"] = True
-            report["steps"].append({"06_login": "success"})
-            if new_email:
-                log("06", f"attempt email update UI → {new_email}")
-                page.goto("https://account.riotgames.com/", wait_until="domcontentloaded")
-                page.wait_for_timeout(4000)
-                shot(page, "06_account")
-                report["steps"].append({"06_account": page.url})
-        else:
-            log("06", "LOGIN NOT COMPLETE")
-            # dump HTML snip for debug
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 900},
+                locale="en-US",
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                ),
+                proxy=to_playwright(proxy),
+            )
+            page = context.new_page()
+            page.set_default_timeout(90_000)
+            attempt_ok = False
+
             try:
-                html = page.content()
-                (DEBUG_DIR / "06_final.html").write_text(html)
-                log("06", f"saved HTML ({len(html)} bytes)")
+                # --- 01 open ---
+                log("01", "opening account.riotgames.com")
+                page.goto(
+                    "https://account.riotgames.com/", wait_until="domcontentloaded"
+                )
+                page.wait_for_timeout(4000)
+                log("01", f"url={page.url}")
+                shot(page, f"a{attempt+1}_01_open")
+                attempt_note["01_open"] = page.url
+
+                dismiss_cookies(page)
+
+                # --- 02 fill ---
+                log("02", "filling credentials")
+                page.locator('input[name="username"]').first.fill(user)
+                page.locator('input[name="password"]').first.fill(password)
+                shot(page, f"a{attempt+1}_02_filled")
+
+                # --- 03 sign-in ---
+                log("03", "clicking sign-in")
+                click_signin(page)
+                page.wait_for_timeout(5000)
+                for _ in range(10):
+                    if captcha_visible(page) or page_has_riot_oops(page):
+                        break
+                    page.wait_for_timeout(500)
+                shot(page, f"a{attempt+1}_03_after_signin")
+                log("03", f"captcha_visible={captcha_visible(page)}")
+                if page_has_riot_oops(page):
+                    log("03", "Oops after sign-in — rotate proxy")
+                    attempt_note["status"] = "oops_signin"
+                    context.close()
+                    continue
+
+                # --- 04 vision ---
+                vision_ok = False
+                if captcha_visible(page) or "authenticate.riotgames.com" in page.url:
+                    log("04", "starting vision captcha solver")
+                    vision_ok = solve_visible_captcha(
+                        page, backend=backend, max_rounds=5
+                    )
+                    log("04", f"vision result={vision_ok}")
+                    shot(page, f"a{attempt+1}_04_after_vision")
+                    attempt_note["vision"] = vision_ok
+                    if page_has_riot_oops(page):
+                        log("04", "Oops after vision — rotate proxy")
+                        attempt_note["status"] = "oops_vision"
+                        context.close()
+                        continue
+                    if not vision_ok and captcha_visible(page):
+                        log("04", "vision failed — rotate proxy")
+                        attempt_note["status"] = "captcha_fail"
+                        context.close()
+                        continue
+                else:
+                    log("04", "no captcha after sign-in")
+                    attempt_note["vision"] = "skipped"
+
+                # --- 05 MFA ---
+                page.wait_for_timeout(2500)
+                shot(page, f"a{attempt+1}_05_pre_mfa")
+                if page_has_riot_oops(page):
+                    attempt_note["status"] = "oops_post"
+                    context.close()
+                    continue
+
+                needs_mfa = (
+                    inbox
+                    and not page_logged_in(page)
+                    and (
+                        page_looks_mfa(page)
+                        or page.locator(
+                            'input[autocomplete="one-time-code"]'
+                        ).count()
+                        > 0
+                    )
+                )
+                if needs_mfa:
+                    log("05", "MFA UI detected — waiting IMAP")
+                    try:
+                        code = inbox.wait_for_code(
+                            since_epoch=started - 10, timeout=150
+                        )
+                        log("05", f"got code {code}")
+                        for sel in [
+                            'input[autocomplete="one-time-code"]',
+                            'input[name*="code" i]',
+                            'input[inputmode="numeric"]',
+                            'input[type="tel"]',
+                            'input[type="text"]',
+                        ]:
+                            loc = page.locator(sel).first
+                            try:
+                                if loc.count():
+                                    loc.fill(code)
+                                    log("05", f"filled via {sel}")
+                                    break
+                            except Exception:
+                                continue
+                        click_signin(page)
+                        page.wait_for_timeout(4000)
+                        attempt_note["mfa"] = "ok"
+                    except Exception as exc:
+                        log("05", f"MFA FAIL {exc}")
+                        attempt_note["mfa"] = f"fail:{exc}"
+                else:
+                    log("05", "MFA skipped (not shown or no inbox)")
+                    attempt_note["mfa"] = "skipped"
+
+                # --- 06 ---
+                log("06", f"final url={page.url}")
+                shot(page, f"a{attempt+1}_06_final")
+                if page_logged_in(page):
+                    log("06", "LOGIN SUCCESS")
+                    report["ok"] = True
+                    attempt_note["status"] = "success"
+                    attempt_ok = True
+                    if new_email:
+                        log("06", f"attempt email update UI → {new_email}")
+                        page.goto(
+                            "https://account.riotgames.com/",
+                            wait_until="domcontentloaded",
+                        )
+                        page.wait_for_timeout(4000)
+                        shot(page, f"a{attempt+1}_06_account")
+                else:
+                    log("06", "LOGIN NOT COMPLETE")
+                    attempt_note["status"] = "incomplete"
+                    try:
+                        html = page.content()
+                        (DEBUG_DIR / f"a{attempt+1}_06_final.html").write_text(html)
+                    except Exception:
+                        pass
             except Exception as exc:
-                log("06", f"html dump fail: {exc}")
-            report["steps"].append({"06_login": "fail", "url": page.url})
+                log("session", f"FAIL {exc}")
+                attempt_note["status"] = f"error:{exc}"
+                shot(page, f"a{attempt+1}_error")
+            finally:
+                report["attempts"].append(attempt_note)
+                if not attempt_ok:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+
+            if attempt_ok:
+                context.close()
+                break
 
         report["elapsed_s"] = round(time.time() - started, 1)
+        report["steps"].append({"attempts": report["attempts"]})
         (DEBUG_DIR / "debug_report.json").write_text(json.dumps(report, indent=2))
         log("done", json.dumps(report, indent=2))
-
-        context.close()
         browser.close()
     return 0 if report.get("ok") else 2
 

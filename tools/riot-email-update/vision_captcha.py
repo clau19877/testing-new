@@ -134,15 +134,20 @@ def _ocr_single_letter(crop_bgr: np.ndarray) -> str:
     """Vote across preprocess variants for a single capital letter tile."""
     import pytesseract
 
+    if crop_bgr is None or crop_bgr.size == 0:
+        return ""
     crop = cv2.resize(crop_bgr, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    _, thr = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # White glyph on teal: boost contrast then threshold
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+    eq = clahe.apply(gray)
+    _, thr = cv2.threshold(eq, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    _, thr2 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     # Prefer dark letter on light background for Tesseract
-    candidates = [thr, 255 - thr, gray]
+    candidates = [thr, 255 - thr, thr2, 255 - thr2, eq, gray]
     cfg = "--psm 10 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     votes: dict[str, float] = {}
     for im in candidates:
-        # If mostly dark, invert so letter is dark on white
         work = im
         if isinstance(work, np.ndarray) and work.ndim == 2 and (work < 128).mean() > 0.55:
             work = 255 - work
@@ -1346,11 +1351,18 @@ def solve_visible_captcha(
                 _log("Verify/Next already visible — clicking instead of re-solving")
                 if click_challenge_next(page):
                     page.wait_for_timeout(2000)
-                    if not captcha_visible(page) and page_looks_past_login(page):
+                    if page_has_riot_oops(page):
+                        _log("Oops after Verify — fail")
+                        return False
+                    if not captcha_visible(page) and page_looks_auth_progress(page):
                         _log("captcha gone after Verify — success")
                         return True
                     if not captcha_visible(page):
                         _log("captcha cleared after Verify (still on auth page)")
+                        # wait briefly for Oops/MFA
+                        page.wait_for_timeout(2000)
+                        if page_has_riot_oops(page):
+                            return False
                         return True
                     # Verify didn't clear — fall through to a fresh solve next loop
                     _log("Verify click did not clear — will re-solve next round")

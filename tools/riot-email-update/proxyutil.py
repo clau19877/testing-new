@@ -61,3 +61,17 @@ def pick_proxy(raw_or_list: str | None, list_path: str | None = None, index: int
         if proxies:
             return proxies[index % len(proxies)]
     return None
+
+
+def proxy_count(list_path: str | None = None) -> int:
+    if not list_path:
+        return 0
+    return len(load_proxy_list(list_path))
+
+
+def next_proxy_index(index: int, list_path: str | None = None) -> int:
+    """Advance to the next proxy in the list (wraps)."""
+    n = proxy_count(list_path)
+    if n <= 0:
+        return index + 1
+    return (index + 1) % n
