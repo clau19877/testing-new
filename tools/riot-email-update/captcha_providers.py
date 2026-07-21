@@ -82,55 +82,12 @@ def solve_capmonster(
     timeout: float = 180.0,
 ) -> str:
     """
-    CapMonster Cloud — Riot open-source scripts pass rqdata as customData.
-    Docs historically: HCaptchaTask / HCaptchaTaskProxyless + customData.
+    CapMonster Cloud — as of 2026-03 CapMonster removed HCaptchaTask support
+    (ERROR_TASK_NOT_SUPPORTED). Kept for clarity / future task types.
     """
-    task: dict[str, Any] = {
-        "type": "HCaptchaTask" if proxy else "HCaptchaTaskProxyless",
-        "websiteURL": website_url,
-        "websiteKey": website_key,
-        "userAgent": user_agent,
-    }
-    if rqdata:
-        task["customData"] = rqdata
-        # Some CapMonster builds also honor enterprisePayload
-        task["enterprisePayload"] = {"rqdata": rqdata}
-    if proxy:
-        # CapMonster wants host:port:user:pass OR separate fields
-        task["proxyType"] = "http"
-        url = to_http_url(proxy)
-        without = url.split("://", 1)[1]
-        if "@" in without:
-            creds, hostport = without.rsplit("@", 1)
-            user, password = creds.split(":", 1)
-            host, port = hostport.split(":", 1)
-            task["proxyAddress"] = host
-            task["proxyPort"] = int(port)
-            task["proxyLogin"] = user
-            task["proxyPassword"] = password
-        else:
-            host, port = without.split(":", 1)
-            task["proxyAddress"] = host
-            task["proxyPort"] = int(port)
-
-    print(f"  CapMonster: createTask customData={'yes' if rqdata else 'no'}…", flush=True)
-    create = requests.post(
-        CAPMONSTER_CREATE,
-        json={"clientKey": api_key, "task": task},
-        timeout=60,
-    )
-    body = create.json()
-    if body.get("errorId"):
-        raise CaptchaSolverError(f"CapMonster create error: {body}")
-    task_id = body.get("taskId")
-    if task_id is None:
-        raise CaptchaSolverError(f"CapMonster no taskId: {body}")
-    return _poll_capmonster_style(
-        result_url=CAPMONSTER_RESULT,
-        client_key=api_key,
-        task_id=task_id,
-        label="CapMonster",
-        timeout=timeout,
+    raise CaptchaSolverError(
+        "CapMonster Cloud no longer supports hCaptcha tasks "
+        "(HCaptchaTask removed ~2026-03). Use twocaptcha / nonecap / capless."
     )
 
 
@@ -146,9 +103,12 @@ def solve_twocaptcha(
 ) -> str:
     """
     2Captcha — pass rqdata as task.data; userAgent is required when data is set.
+    Prefer a residential proxy matching the Riot submit IP (enterprise bind).
     """
+    # Always prefer proxy task when proxy is available — enterprise checks solve IP
+    use_proxy = bool(proxy)
     task: dict[str, Any] = {
-        "type": "HCaptchaTaskProxyless" if not proxy else "HCaptchaTask",
+        "type": "HCaptchaTask" if use_proxy else "HCaptchaTaskProxyless",
         "websiteURL": website_url,
         "websiteKey": website_key,
         "userAgent": user_agent,
@@ -156,19 +116,24 @@ def solve_twocaptcha(
     }
     if rqdata:
         task["data"] = rqdata
-        task["enterprisePayload"] = {"rqdata": rqdata}
-    if proxy:
+    if use_proxy:
+        assert proxy is not None
         url = to_http_url(proxy)
         without = url.split("://", 1)[1]
         creds, hostport = without.rsplit("@", 1)
         user, password = creds.split(":", 1)
+        host, port = hostport.rsplit(":", 1)
         task["proxyType"] = "http"
-        task["proxyAddress"] = hostport.split(":")[0]
-        task["proxyPort"] = int(hostport.split(":")[1])
+        task["proxyAddress"] = host
+        task["proxyPort"] = int(port)
         task["proxyLogin"] = user
         task["proxyPassword"] = password
 
-    print(f"  2Captcha: createTask data={'yes' if rqdata else 'no'}…", flush=True)
+    print(
+        f"  2Captcha: createTask data={'yes' if rqdata else 'no'} "
+        f"proxy={'yes' if use_proxy else 'no'}…",
+        flush=True,
+    )
     create = requests.post(
         TWOCAPTCHA_CREATE,
         json={"clientKey": api_key, "task": task},
