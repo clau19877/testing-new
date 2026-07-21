@@ -786,9 +786,20 @@ def captcha_visible(page) -> bool:
         frames = page.locator('iframe[src*="hcaptcha.com"]')
         n = frames.count()
         for i in range(n):
-            box = frames.nth(i).bounding_box(timeout=1000)
-            # Challenge widget is large; checkbox can be smaller but still > 20px
+            fr = frames.nth(i)
+            box = fr.bounding_box(timeout=1000)
+            # Visible checkbox/challenge
             if box and box["width"] > 20 and box["height"] > 20 and box["y"] >= -5:
+                return True
+            # Off-screen but still a challenge-sized frame → captcha not done
+            if box and box["width"] >= 300 and box["height"] >= 300:
+                return True
+            src = ""
+            try:
+                src = (fr.get_attribute("src") or "").lower()
+            except Exception:
+                pass
+            if "frame=challenge" in src or "/challenge" in src:
                 return True
     except Exception:
         pass
@@ -808,7 +819,7 @@ def screenshot_challenge(page, tag: str = "challenge") -> Path:
     try:
         if loc.count() > 0:
             box = loc.bounding_box(timeout=3000)
-            if box and box["width"] > 50:
+            if box and box["width"] > 50 and box["y"] >= 0 and box["x"] >= -20:
                 page.screenshot(path=str(path), clip=box)
                 _log(f"clipped iframe screenshot → {path.name} {box}")
                 return path
@@ -929,31 +940,37 @@ def click_challenge_next(page) -> bool:
     if not frame:
         return False
     for sel in [
-        'div.button-submit',
-        '.button-submit',
+        'div.button-submit:has-text("Next")',
+        '.button-submit:has-text("Next")',
         'button:has-text("Next")',
         'div[role="button"]:has-text("Next")',
         'button:has-text("Verify")',
-        '.action-button',
+        'div[role="button"]:has-text("Verify")',
+        '.button-submit:has-text("Verify")',
     ]:
         try:
             loc = frame.locator(sel).first
             if loc.count() and loc.is_visible():
+                txt = (loc.inner_text(timeout=500) or "").strip().lower()
+                aria = (loc.get_attribute("aria-label") or "").strip().lower()
+                if "skip" in txt or "skip" in aria:
+                    continue
                 loc.click(timeout=2000)
                 _log(f"challenge Next via frame {sel}")
                 return True
         except Exception:
             continue
-    # Fallback: click bottom-right of challenge iframe bbox
+    # Fallback: only when visible Next text exists
     try:
-        loc = page.locator('iframe[src*="hcaptcha.com"]').last
-        box = loc.bounding_box(timeout=2000) if loc.count() else None
-        if box and box["y"] >= 0:
-            px = box["x"] + box["width"] * 0.88
-            py = box["y"] + box["height"] * 0.94
-            page.mouse.click(px, py)
-            _log(f"challenge Next via bbox click ({px:.0f},{py:.0f})")
-            return True
+        if frame.locator("text=Next").count():
+            loc = page.locator('iframe[src*="hcaptcha.com"]').last
+            box = loc.bounding_box(timeout=2000) if loc.count() else None
+            if box and box["y"] >= 0:
+                px = box["x"] + box["width"] * 0.88
+                py = box["y"] + box["height"] * 0.94
+                page.mouse.click(px, py)
+                _log(f"challenge Next via bbox click ({px:.0f},{py:.0f})")
+                return True
     except Exception as exc:
         _log(f"challenge Next fallback fail: {exc}")
     return False
