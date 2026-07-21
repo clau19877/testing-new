@@ -179,7 +179,29 @@ def solve_capless(
     """
     Capless (https://capless.lol) — supports Riot authenticate.riotgames.com.
     Requires a residential/mobile HTTP proxy matching the browser egress IP.
+    Returns the captcha token string.
     """
+    token, _ua = solve_capless_full(
+        api_key,
+        website_url=website_url,
+        website_key=website_key,
+        proxy=proxy,
+        rqdata=rqdata,
+        timeout=timeout,
+    )
+    return token
+
+
+def solve_capless_full(
+    api_key: str,
+    *,
+    website_url: str,
+    website_key: str,
+    proxy: str,
+    rqdata: str | None = None,
+    timeout: float = 180.0,
+) -> tuple[str, str | None]:
+    """Return (token, user_agent_from_capless)."""
     from proxyutil import to_http_url
 
     site = website_url
@@ -209,50 +231,52 @@ def solve_capless(
     token = data.get("token")
     if not token:
         raise CaptchaSolverError(f"Capless success but no token: {data}")
-    return token
+    return token, data.get("user_agent")
 
 
 def inject_hcaptcha_token(page, token: str) -> None:
+    """Write the solved token into the page without embedding it in JS source."""
+    # Ensure response fields exist
     page.evaluate(
-        """(token) => {
-            const setVal = (el) => {
-              if (!el) return;
-              el.value = token;
-              el.innerHTML = token;
-              el.dispatchEvent(new Event('input', { bubbles: true }));
-              el.dispatchEvent(new Event('change', { bubbles: true }));
-            };
-
-            document.querySelectorAll(
-              '[name="h-captcha-response"], textarea[name="h-captcha-response"],
-               [name="g-recaptcha-response"], textarea[name="g-recaptcha-response"]'
-            ).forEach(setVal);
-
-            const ensure = (name) => {
-              let el = document.querySelector(`[name="${name}"]`);
+        """() => {
+            for (const name of ['h-captcha-response', 'g-recaptcha-response']) {
+              let el = document.querySelector('textarea[name=\"' + name + '\"], [name=\"' + name + '\"]');
               if (!el) {
                 el = document.createElement('textarea');
                 el.name = name;
+                el.setAttribute('name', name);
                 el.style.display = 'none';
-                document.body.appendChild(el);
+                (document.getElementById('root') || document.body).appendChild(el);
               }
-              setVal(el);
-            };
-            ensure('h-captcha-response');
-            ensure('g-recaptcha-response');
+            }
+        }"""
+    )
+    for name in ("h-captcha-response", "g-recaptcha-response"):
+        loc = page.locator(f'textarea[name="{name}"]').first
+        try:
+            loc.fill(token)
+        except Exception:
+            page.evaluate(
+                """({ name, token }) => {
+                    const el = document.querySelector('textarea[name=\"' + name + '\"]');
+                    if (el) {
+                      el.value = token;
+                      el.dispatchEvent(new Event('input', { bubbles: true }));
+                      el.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                }""",
+                {"name": name, "token": token},
+            )
 
-            const cbNames = [
-              'onCaptchaSuccess',
-              'captchaCallback',
-              'hcaptchaCallback',
-              'onSuccess',
-            ];
+    # Notify callbacks if present
+    page.evaluate(
+        """(token) => {
+            const cbNames = ['onCaptchaSuccess','captchaCallback','hcaptchaCallback','onSuccess'];
             for (const name of cbNames) {
               if (typeof window[name] === 'function') {
                 try { window[name](token); } catch (e) {}
               }
             }
-
             const widget = document.querySelector('[data-callback]');
             if (widget) {
               const name = widget.getAttribute('data-callback');
@@ -260,6 +284,11 @@ def inject_hcaptcha_token(page, token: str) -> None:
                 try { window[name](token); } catch (e) {}
               }
             }
+            try {
+              if (window.hcaptcha && typeof window.hcaptcha.getResponse === 'function') {
+                // best-effort: some builds read from textarea only
+              }
+            } catch (e) {}
         }""",
         token,
     )
@@ -277,11 +306,32 @@ def solve_and_inject(
     provider: "capless" (recommended for Riot) or "capsolver"
     """
     website_url = page.url
+    # Capless allowlist is host/* — keep origin+path, drop huge query if needed
+    if "authenticate.riotgames.com" in website_url:
+        website_url = website_url.split("#")[0]
+        if len(website_url) > 300:
+            website_url = "https://authenticate.riotgames.com/"
     user_agent = page.evaluate("() => navigator.userAgent")
     params = extract_hcaptcha_params(page)
-    sitekey = params.get("sitekey") or known_sitekey_for_url(website_url)
+    sitekey = params.get("sitekey") or known_sitekey_for_url(page.url)
     rqdata = params.get("rqdata")
     is_invisible = bool(params.get("isInvisible"))
+
+    # Try to pull fresh rqdata from recent performance entries / page globals
+    if not rqdata:
+        try:
+            rqdata = page.evaluate(
+                """() => {
+                  try {
+                    if (window.__RIOT_RQDATA) return window.__RIOT_RQDATA;
+                    const html = document.documentElement.innerHTML;
+                    const m = html.match(/\"rqdata\"\\s*:\\s*\"([^\"]+)\"/);
+                    return m ? m[1] : null;
+                  } catch (e) { return null; }
+                }"""
+            )
+        except Exception:
+            rqdata = None
 
     if not sitekey:
         print("  No hCaptcha sitekey found on page — skipping solver.", flush=True)

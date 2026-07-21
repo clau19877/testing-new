@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Debug/test runner for Riot login + CapSolver + IMAP (non-interactive)."""
+"""Debug/test runner: Riot login via Capless + matching browser proxy + IMAP."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
-
 os.environ.setdefault("NONINTERACTIVE", "1")
 
-from captcha import CapSolverError, extract_hcaptcha_params, known_sitekey_for_url, solve_and_inject
+from captcha import CaptchaSolverError, extract_hcaptcha_params, known_sitekey_for_url, solve_and_inject
 from imap_mail import ImapConfig, ImapInbox
+from proxyutil import pick_proxy, to_playwright
 
 
 def log(msg: str) -> None:
@@ -28,9 +28,44 @@ def shot(page, name: str) -> None:
     path = out / f"{name}.png"
     try:
         page.screenshot(path=str(path), full_page=True)
-        log(f"  screenshot → {path}")
+        log(f"  screenshot → {path.name}")
     except Exception as exc:
         log(f"  screenshot failed: {exc}")
+
+
+def click_signin(page) -> bool:
+    try:
+        page.locator('button[aria-label="Close this dialog"]').first.click(timeout=2000)
+        log("  dismissed cookie banner")
+    except Exception:
+        pass
+    for sel in [
+        'button[data-testid="btn-signin-submit"]',
+        'button[type="submit"]',
+        'button:has(svg)',
+    ]:
+        loc = page.locator(sel).first
+        try:
+            if loc.count():
+                loc.click(timeout=3000)
+                log(f"  clicked {sel}")
+                return True
+        except Exception:
+            continue
+    clicked = page.evaluate(
+        """() => {
+          const buttons = [...document.querySelectorAll('button')];
+          const candidate = buttons.find(b => {
+            const r = b.getBoundingClientRect();
+            return r.width > 40 && r.width < 120 && r.height > 40 && r.height < 120 && r.top > 200;
+          });
+          if (!candidate) return false;
+          candidate.click();
+          return true;
+        }"""
+    )
+    log(f"  circular click: {clicked}")
+    return bool(clicked)
 
 
 def main() -> int:
@@ -39,26 +74,37 @@ def main() -> int:
     user = os.getenv("RIOT_USERNAME") or ""
     password = os.getenv("RIOT_PASSWORD") or ""
     new_email = os.getenv("NEW_EMAIL") or ""
-    key = os.getenv("CAPSOLVER_API_KEY") or ""
-    proxy = (os.getenv("CAPSOLVER_PROXY") or "").strip() or None
-
+    provider = (os.getenv("CAPTCHA_PROVIDER") or "capless").lower()
+    key = (
+        os.getenv("CAPLESS_API_KEY")
+        or os.getenv("CAPTCHA_API_KEY")
+        or os.getenv("CAPSOLVER_API_KEY")
+        or ""
+    )
+    proxy = pick_proxy(
+        os.getenv("CAPLESS_PROXY") or os.getenv("BROWSER_PROXY"),
+        os.getenv("PROXY_LIST") or "data/proxies.txt",
+        index=0,
+    )
     if not user or not password:
-        log("Missing RIOT_USERNAME / RIOT_PASSWORD")
+        log("Missing Riot creds")
+        return 1
+    if not key:
+        log("Missing Capless API key")
+        return 1
+    if not proxy:
+        log("Missing proxy")
         return 1
 
     cfg = ImapConfig.from_env(dict(os.environ), "IMAP")
     inbox = ImapInbox(cfg) if cfg else None
     if inbox:
-        try:
-            inbox.test_connection()
-            log(f"IMAP OK: {cfg.user}")
-        except Exception as exc:
-            log(f"IMAP FAIL: {exc}")
-            inbox = None
+        inbox.test_connection()
+        log(f"IMAP OK: {cfg.user}")
 
     headed = (os.getenv("HEADED") or "true").lower() in {"1", "true", "yes"}
-    log(f"Launching chromium headed={headed}")
     login_started = time.time()
+    log(f"provider={provider} proxy={proxy.split(':')[0]}… headed={headed}")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -69,27 +115,37 @@ def main() -> int:
             viewport={"width": 1280, "height": 900},
             locale="en-US",
             user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
             ),
+            proxy=to_playwright(proxy),
         )
         page = context.new_page()
-        page.set_default_timeout(60_000)
+        page.set_default_timeout(90_000)
 
         log("GOTO account.riotgames.com")
         page.goto("https://account.riotgames.com/", wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(4000)
         log(f"URL: {page.url}")
         log(f"TITLE: {page.title()}")
         shot(page, "01_landing")
 
-        # fill login
-        for sel in [
-            'input[name="username"]',
-            'input[type="text"]',
-            'input[type="email"]',
-            "#username",
-        ]:
+        # verify egress IP via proxy in-page if possible
+        try:
+            ip = page.evaluate(
+                """async () => {
+                  try {
+                    const r = await fetch('https://api.ipify.org?format=json');
+                    const j = await r.json();
+                    return j.ip;
+                  } catch (e) { return String(e); }
+                }"""
+            )
+            log(f"browser egress IP: {ip}")
+        except Exception as exc:
+            log(f"ip check failed: {exc}")
+
+        for sel in ['input[name="username"]', 'input[type="text"]', "#username"]:
             loc = page.locator(sel).first
             if loc.count():
                 try:
@@ -98,11 +154,7 @@ def main() -> int:
                     break
                 except Exception:
                     continue
-        else:
-            log("USERNAME FIELD NOT FOUND")
-            shot(page, "01b_no_user")
-
-        for sel in ['input[name="password"]', 'input[type="password"]', "#password"]:
+        for sel in ['input[name="password"]', 'input[type="password"]']:
             loc = page.locator(sel).first
             if loc.count():
                 try:
@@ -111,111 +163,92 @@ def main() -> int:
                     break
                 except Exception:
                     continue
-        else:
-            log("PASSWORD FIELD NOT FOUND")
 
         shot(page, "02_filled")
         params = extract_hcaptcha_params(page)
-        log(f"hcaptcha params pre-submit: {params}")
+        log(f"hcaptcha params: {params}")
         sitekey = params.get("sitekey") or known_sitekey_for_url(page.url)
-        log(f"sitekey resolved: {sitekey}")
+        log(f"sitekey: {sitekey}")
 
-        if key:
-            log("Solving captcha with CapSolver (pre-submit)…")
-            try:
-                ok = solve_and_inject(page, key, proxy=proxy)
-                log(f"CapSolver inject: {ok}")
-            except CapSolverError as exc:
-                log(f"CapSolver error: {exc}")
-            except Exception as exc:
-                log(f"CapSolver unexpected: {exc}")
+        # Capless solve + inject before submit
+        try:
+            ok = solve_and_inject(page, provider=provider, api_key=key, proxy=proxy)
+            log(f"captcha inject: {ok}")
+        except CaptchaSolverError as exc:
+            log(f"captcha error: {exc}")
+            # try next proxy session
+            proxy2 = pick_proxy(None, os.getenv("PROXY_LIST") or "data/proxies.txt", index=1)
+            if proxy2 and proxy2 != proxy:
+                log(f"retry Capless with next proxy session…")
+                try:
+                    ok = solve_and_inject(page, provider=provider, api_key=key, proxy=proxy2)
+                    log(f"captcha inject retry: {ok}")
+                except Exception as exc2:
+                    log(f"retry failed: {exc2}")
+        except Exception as exc:
+            log(f"captcha unexpected: {exc}")
 
         shot(page, "03_after_captcha")
-
-        clicked = False
-        for sel in [
-            'button[type="submit"]',
-            'button:has-text("Sign in")',
-            'button:has-text("Sign In")',
-            'button:has-text("Log in")',
-        ]:
-            loc = page.locator(sel).first
-            if loc.count():
-                try:
-                    loc.click()
-                    log(f"clicked {sel}")
-                    clicked = True
-                    break
-                except Exception as exc:
-                    log(f"click fail {sel}: {exc}")
-        if not clicked:
-            log("NO SUBMIT BUTTON")
-
-        page.wait_for_timeout(5000)
+        click_signin(page)
+        page.wait_for_timeout(6000)
         log(f"URL after submit: {page.url}")
         shot(page, "04_after_submit")
 
-        # post-submit captcha?
-        if "account.riotgames.com" not in page.url or "login" in page.url.lower() or "auth" in page.url:
-            params = extract_hcaptcha_params(page)
-            log(f"hcaptcha params post-submit: {params}")
-            if key:
-                log("Solving captcha with CapSolver (post-submit)…")
-                try:
-                    ok = solve_and_inject(page, key, proxy=proxy)
-                    log(f"CapSolver inject: {ok}")
-                    for sel in ['button[type="submit"]', 'button:has-text("Sign in")']:
-                        loc = page.locator(sel).first
-                        if loc.count():
-                            try:
-                                loc.click()
-                                log(f"re-clicked {sel}")
-                                break
-                            except Exception:
-                                pass
+        # If still on auth, try captcha again (sometimes appears after submit)
+        if "authenticate.riotgames.com" in page.url or "auth.riotgames.com" in page.url:
+            try:
+                ok = solve_and_inject(page, provider=provider, api_key=key, proxy=proxy)
+                log(f"post-submit captcha: {ok}")
+                if ok:
+                    click_signin(page)
                     page.wait_for_timeout(5000)
-                except Exception as exc:
-                    log(f"post captcha fail: {exc}")
+            except Exception as exc:
+                log(f"post-submit captcha fail: {exc}")
             shot(page, "05_post_captcha")
 
-        log(f"URL now: {page.url}")
-        content_snip = page.content()[:1500].replace("\n", " ")
-        log(f"HTML snip: {content_snip}")
-
-        # MFA via IMAP?
-        code_sel = page.locator(
-            'input[autocomplete="one-time-code"], input[name*="code" i], input[inputmode="numeric"]'
-        )
-        if inbox and (code_sel.count() > 0 or "code" in page.content().lower()):
-            log("MFA-like page detected; waiting IMAP code…")
+        # MFA
+        content_l = page.content().lower()
+        if inbox and ("code" in content_l or page.locator('input[autocomplete="one-time-code"]').count()):
+            log("MFA-like UI — waiting IMAP…")
             try:
-                code = inbox.wait_for_code(since_epoch=login_started - 10, timeout=120)
-                log(f"Got code: {code}")
-                if code_sel.count():
-                    code_sel.first.fill(code)
-                else:
-                    page.locator('input[type="text"], input[type="tel"]').first.fill(code)
-                for sel in ['button[type="submit"]', 'button:has-text("Submit")', 'button:has-text("Continue")']:
+                code = inbox.wait_for_code(since_epoch=login_started - 10, timeout=150)
+                log(f"code={code}")
+                for sel in [
+                    'input[autocomplete="one-time-code"]',
+                    'input[name*="code" i]',
+                    'input[inputmode="numeric"]',
+                    'input[type="tel"]',
+                    'input[type="text"]',
+                ]:
                     loc = page.locator(sel).first
                     if loc.count():
-                        loc.click()
-                        break
+                        try:
+                            loc.fill(code)
+                            break
+                        except Exception:
+                            continue
+                click_signin(page)
                 page.wait_for_timeout(5000)
             except Exception as exc:
-                log(f"IMAP MFA failed: {exc}")
-            shot(page, "06_after_mfa")
+                log(f"IMAP MFA fail: {exc}")
+            shot(page, "06_mfa")
 
         log(f"FINAL URL: {page.url}")
         shot(page, "07_final")
 
-        # If logged in and new email set, try update briefly
-        if new_email and "account.riotgames.com" in page.url and "auth" not in page.url:
-            log(f"Attempting email update → {new_email}")
+        if (
+            new_email
+            and "account.riotgames.com" in page.url
+            and "authenticate" not in page.url
+            and "auth.riotgames.com" not in page.url
+        ):
+            log(f"Logged in — opening account for email update → {new_email}")
             page.goto("https://account.riotgames.com/", wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(4000)
             shot(page, "08_account")
-            log(f"account page URL: {page.url}")
-            log(f"account title: {page.title()}")
+            log(f"account URL={page.url} title={page.title()}")
+        else:
+            log("Not fully logged in — email update skipped")
 
         context.close()
         browser.close()
