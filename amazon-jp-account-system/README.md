@@ -1,103 +1,66 @@
-# Amazon JP Account System (own identities)
+# Amazon JP Account Creator
 
-Parallel job orchestrator for **amazon.co.jp** account workflows using **identities and inboxes you own**. This is scaffolding for your own ops system — not a disposable/forged-identity farm.
+Create **amazon.co.jp** buyer accounts with Playwright, using emails/identities you own.
 
-## What this is
-
-- Worker pool with configurable concurrency (`p-limit`)
-- Sticky proxy assignment (1 identity ↔ 1 proxy when provided)
-- Pluggable adapters: browser profile, mailbox OTP, Amazon register, account store
-- Dry-run mode that exercises the full pipeline without contacting Amazon
-- JSON identity source + local account store
-
-## What this is not
-
-- Not a captcha/SMS abuse toolkit
-- Not a forged-document or temp-identity generator
-- Live Amazon signup UI automation is left as a skeleton for you to wire against accounts you control
-
-## Layout
-
-```text
-amazon-jp-account-system/
-├── config/
-│   ├── default.json              # concurrency, locale, retries
-│   ├── identities.example.json   # replace with emails you own
-│   └── proxies.example.txt       # optional sticky JP proxies
-├── src/
-│   ├── adapters/                 # browser, mailbox, proxy, amazon, identity
-│   ├── core/orchestrator.ts      # parallel runner
-│   ├── store/account-store.ts
-│   └── cli.ts
-└── data/                         # created at runtime (gitignored)
-```
-
-## Quick start
+## Create one account
 
 ```bash
 cd amazon-jp-account-system
 npm install
-cp config/identities.example.json config/identities.json
-# edit identities.json with emails/phones you control
+npx playwright install chromium
 
-npm run dry-run
-# or:
-npx tsx src/cli.ts run --dry-run --count 3 --concurrency 2
-npx tsx src/cli.ts list
+# Option A: inline identity (recommended for a first live test)
+npm run create-one -- \
+  --email you@your-domain.example \
+  --password 'YourStrongPass1' \
+  --name '山田 太郎' \
+  --headed
+
+# Option B: first entry in identities JSON
+cp config/identities.example.json config/identities.json
+# edit config/identities.json, then:
+npm run create-one -- --identity-id identity-001 --headed
 ```
 
-## Parallel model
+Flow:
+1. Opens amazon.co.jp register page
+2. Fills email → continue
+3. Fills name + password
+4. Prompts you in the terminal for the OTP Amazon emailed/SMS’d
+5. Submits OTP and saves the result to `data/accounts.json`
+6. Writes screenshots under `data/artifacts/` on success/error
+
+Dry-run (no Amazon traffic):
+
+```bash
+npm run create-one:dry -- --email you@example.com --password 'Pass1234' --name 'Test User'
+```
+
+## Captcha / puzzle
+
+Amazon often shows a **「クイズを開始する」** puzzle after password submit. With `--headed` (default for `create-one`), the tool pauses and waits while you solve it in the browser, then continues to the OTP prompt.
+
+Headless runs will stop with a clear error if a puzzle appears.
+
+
+## Other commands
+
+```bash
+npm run dry-run          # parallel dry-run of sample identities
+npx tsx src/cli.ts list  # show stored accounts
+```
+
+## Layout
 
 ```text
-identities.json ──► job queue
-                       │
-                       ▼
-              worker pool (N)
-                 │
-     ┌───────────┼───────────┐
-     ▼           ▼           ▼
-  profile+    profile+    profile+
-  proxy A     proxy B     proxy C
-     │           │           │
-     ▼           ▼           ▼
-  mailbox OTP / Amazon adapter
-     │
-     ▼
-  data/accounts.json
+src/
+  adapters/amazon.ts    # live Playwright signup flow
+  adapters/browser.ts   # Playwright / dry-run / CDP
+  adapters/mailbox.ts   # prompt OTP / dry-run / IMAP stub
+  cli.ts                # create-one | run | list
+  core/orchestrator.ts  # worker pool (create-one uses concurrency=1)
 ```
 
-Defaults keep concurrency low (2). Raise only after your browser/mailbox adapters are stable.
+## Config
 
-## Wiring live adapters
-
-1. **Browser (`src/adapters/browser.ts`)**  
-   Point `CdpBrowser` at AdsPower / GoLogin / Multilogin: start profile → return `wsEndpoint`.
-
-2. **Mailbox (`src/adapters/mailbox.ts`)**  
-   Implement IMAP (or your provider API) against domains/inboxes you own.
-
-3. **Amazon (`src/adapters/amazon.ts`)**  
-   In `LiveAmazonAdapter`, `chromium.connectOverCDP(session.wsEndpoint)` and drive the official amazon.co.jp signup/login flow for the supplied identity.
-
-4. Set config:
-
-```json
-{
-  "browser": { "provider": "cdp", "headless": false },
-  "mailbox": { "provider": "imap", "otpTimeoutMs": 120000, "pollIntervalMs": 3000 },
-  "proxy": { "required": true, "sticky": true }
-}
-```
-
-## CLI
-
-| Command | Purpose |
-|---------|---------|
-| `run --dry-run` | Simulate parallel jobs |
-| `run --concurrency 3 --count 5` | Cap workers and identity count |
-| `run --force` | Re-process identities already in the store |
-| `list` | Print `data/accounts.json` |
-
-## Reference tools (architecture only)
-
-Patterns borrowed from AdsPower/Multilogin multi-profile ops and register-orchestrators like any-auto-register (job queue, semaphore, proxy stickiness, SSE/logging). See the exploration notes in the PR description.
+`config/default.json` defaults to Playwright + terminal OTP prompt for live creation.

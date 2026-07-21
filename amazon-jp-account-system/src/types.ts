@@ -1,3 +1,5 @@
+import type { Page } from "playwright";
+
 export type JobStatus =
   | "pending"
   | "running"
@@ -28,6 +30,8 @@ export interface ProxyEndpoint {
 export interface BrowserSession {
   profileId: string;
   wsEndpoint?: string;
+  /** Present when using the local Playwright browser provider. */
+  page?: Page;
   close: () => Promise<void>;
 }
 
@@ -65,12 +69,19 @@ export interface SystemConfig {
   concurrency: number;
   maxRetries: number;
   delayBetweenJobsMs: { min: number; max: number };
-  browser: { provider: "dry-run" | "cdp"; headless: boolean };
+  browser: {
+    provider: "dry-run" | "cdp" | "playwright";
+    headless: boolean;
+    slowMoMs?: number;
+  };
   mailbox: {
-    provider: "dry-run" | "imap";
+    provider: "dry-run" | "imap" | "prompt";
     otpTimeoutMs: number;
     pollIntervalMs: number;
   };
   proxy: { required: boolean; sticky: boolean };
   store: { path: string };
+  amazon?: {
+    registerUrl?: string;
+  };
 }

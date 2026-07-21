@@ -8,6 +8,7 @@ import { loadProxies } from "./adapters/proxy.js";
 import { loadConfig } from "./config.js";
 import { Orchestrator } from "./core/orchestrator.js";
 import { AccountStore } from "./store/account-store.js";
+import type { OwnedIdentity, SystemConfig } from "./types.js";
 import { log } from "./utils/logger.js";
 
 const program = new Command();
@@ -15,9 +16,121 @@ const program = new Command();
 program
   .name("amz-jp")
   .description(
-    "Own-system orchestrator for parallel amazon.co.jp account workflows using identities you control",
+    "Account creation tool for amazon.co.jp using identities you control",
   )
   .version("0.1.0");
+
+program
+  .command("create-one")
+  .description("Create a single amazon.co.jp account with Playwright")
+  .option("--identity-id <id>", "identity id from identities JSON")
+  .option("--email <email>", "email you own (inline identity)")
+  .option("--password <password>", "account password")
+  .option("--name <fullName>", "full name for the Amazon account")
+  .option("--identities <path>", "path to owned identities JSON")
+  .option("--proxies <path>", "path to proxy list")
+  .option("--config <path>", "path to config JSON")
+  .option("--headed", "show the browser window (recommended)", false)
+  .option("--headless", "run browser headless", false)
+  .option("--otp-prompt", "type OTP in the terminal (default for create-one)", true)
+  .option("--dry-run", "simulate without contacting Amazon", false)
+  .option("--force", "create even if identity already exists in store", false)
+  .action(async (opts: {
+    identityId?: string;
+    email?: string;
+    password?: string;
+    name?: string;
+    identities?: string;
+    proxies?: string;
+    config?: string;
+    headed: boolean;
+    headless: boolean;
+    otpPrompt: boolean;
+    dryRun: boolean;
+    force: boolean;
+  }) => {
+    const base = loadConfig(opts.config);
+    const identity = resolveOneIdentity(opts);
+    const proxies = loadProxies(opts.proxies);
+
+    const config: SystemConfig = {
+      ...base,
+      concurrency: 1,
+      maxRetries: opts.dryRun ? base.maxRetries : Math.min(base.maxRetries, 1),
+      browser: {
+        ...base.browser,
+        provider: opts.dryRun ? "dry-run" : "playwright",
+        headless: opts.headless ? true : opts.headed ? false : base.browser.headless,
+        slowMoMs: base.browser.slowMoMs ?? 40,
+      },
+      mailbox: {
+        ...base.mailbox,
+        provider: opts.dryRun
+          ? "dry-run"
+          : opts.otpPrompt
+            ? "prompt"
+            : base.mailbox.provider,
+      },
+    };
+
+    // Default create-one to headed so captcha/OTP UX is workable.
+    if (!opts.dryRun && !opts.headless && !opts.headed) {
+      config.browser.headless = false;
+    }
+
+    const storePath = process.env.ACCOUNTS_DB_PATH ?? config.store.path;
+    const store = new AccountStore(storePath);
+
+    if (!opts.force) {
+      const existing =
+        store.findByIdentityId(identity.id) ?? store.findByEmail(identity.email);
+      if (existing && existing.status === "created") {
+        log("info", "account already stored as created; use --force to retry", {
+          identityId: identity.id,
+          email: identity.email,
+        });
+        console.log(JSON.stringify(existing, null, 2));
+        return;
+      }
+    }
+
+    log("info", "creating one amazon.co.jp account", {
+      identityId: identity.id,
+      email: identity.email,
+      dryRun: opts.dryRun,
+      headless: config.browser.headless,
+      mailbox: config.mailbox.provider,
+    });
+
+    const orchestrator = new Orchestrator(
+      config,
+      createBrowser(config.browser),
+      createMailbox(config.mailbox),
+      createAmazonAdapter(opts.dryRun),
+      store,
+    );
+
+    const jobs = await orchestrator.run({
+      identities: [identity],
+      proxies,
+      concurrency: 1,
+      count: 1,
+      dryRun: opts.dryRun,
+      skipExisting: !opts.force,
+    });
+
+    const job = jobs[0];
+    if (!job || job.status === "failed") {
+      log("error", "create-one failed", {
+        error: job?.error ?? "unknown error",
+        email: identity.email,
+      });
+      process.exitCode = 1;
+      return;
+    }
+
+    console.log(JSON.stringify(job.result ?? store.findByIdentityId(identity.id), null, 2));
+  });
 
 program
   .command("run")
@@ -42,14 +155,20 @@ program
     const identities = loadOwnedIdentities(opts.identities);
     const proxies = loadProxies(opts.proxies);
     const dryRun = opts.dryRun || config.browser.provider === "dry-run";
+    const effectiveConfig: SystemConfig = dryRun
+      ? {
+          ...config,
+          browser: { ...config.browser, provider: "dry-run" },
+          mailbox: { ...config.mailbox, provider: "dry-run" },
+        }
+      : config;
 
-    const storePath =
-      process.env.ACCOUNTS_DB_PATH ?? config.store.path;
+    const storePath = process.env.ACCOUNTS_DB_PATH ?? effectiveConfig.store.path;
     const store = new AccountStore(storePath);
     const orchestrator = new Orchestrator(
-      config,
-      createBrowser(config.browser),
-      createMailbox(config.mailbox),
+      effectiveConfig,
+      createBrowser(effectiveConfig.browser),
+      createMailbox(effectiveConfig.mailbox),
       createAmazonAdapter(dryRun),
       store,
     );
@@ -87,6 +206,38 @@ program
     const rows = store.list();
     console.log(JSON.stringify(rows, null, 2));
   });
+
+function resolveOneIdentity(opts: {
+  identityId?: string;
+  email?: string;
+  password?: string;
+  name?: string;
+  identities?: string;
+}): OwnedIdentity {
+  if (opts.email || opts.password || opts.name) {
+    if (!opts.email || !opts.password || !opts.name) {
+      throw new Error(
+        "Inline identity requires --email, --password, and --name together",
+      );
+    }
+    return {
+      id: opts.identityId ?? `inline-${opts.email}`,
+      email: opts.email,
+      password: opts.password,
+      fullName: opts.name,
+    };
+  }
+
+  const identities = loadOwnedIdentities(opts.identities);
+  if (opts.identityId) {
+    const found = identities.find((i) => i.id === opts.identityId);
+    if (!found) {
+      throw new Error(`Identity not found: ${opts.identityId}`);
+    }
+    return found;
+  }
+  return identities[0];
+}
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   log("error", "fatal", {

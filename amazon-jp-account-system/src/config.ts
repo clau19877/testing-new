@@ -18,11 +18,12 @@ const ConfigSchema = z.object({
       message: "delayBetweenJobsMs.max must be >= min",
     }),
   browser: z.object({
-    provider: z.enum(["dry-run", "cdp"]).default("dry-run"),
+    provider: z.enum(["dry-run", "cdp", "playwright"]).default("dry-run"),
     headless: z.boolean().default(true),
+    slowMoMs: z.number().int().min(0).optional(),
   }),
   mailbox: z.object({
-    provider: z.enum(["dry-run", "imap"]).default("dry-run"),
+    provider: z.enum(["dry-run", "imap", "prompt"]).default("dry-run"),
     otpTimeoutMs: z.number().int().positive().default(120_000),
     pollIntervalMs: z.number().int().positive().default(3_000),
   }),
@@ -33,6 +34,11 @@ const ConfigSchema = z.object({
   store: z.object({
     path: z.string().default("data/accounts.json"),
   }),
+  amazon: z
+    .object({
+      registerUrl: z.string().url().optional(),
+    })
+    .optional(),
 });
 
 export function loadConfig(configPath?: string): SystemConfig {
