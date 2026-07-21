@@ -60,11 +60,13 @@ def extract_instruction(screenshot: Path) -> str:
 
         img = Image.open(screenshot)
         w, h = img.size
-        # Prompt is usually in the top banner
-        top = img.crop((0, 0, w, int(h * 0.28)))
+        # Prompt banner + requirement strip (1x F / 1x Z) sit in the top ~38%
+        top = img.crop((0, 0, w, int(h * 0.38)))
         text = pytesseract.image_to_string(top).strip()
         if text:
-            return re.sub(r"\s+", " ", text)[:240]
+            cleaned = re.sub(r"\s+", " ", text)[:280]
+            # Prefer keeping Nx Letter tokens for workers
+            return cleaned
     except Exception as exc:
         _log(f"instruction OCR failed: {exc}")
     return (
@@ -72,6 +74,23 @@ def extract_instruction(screenshot: Path) -> str:
         "For letter grids click the required letters the listed number of times. "
         "For drag challenges drag the object onto the target."
     )
+
+
+def letter_grid_click_hint(screenshot: Path) -> tuple[str, int]:
+    """
+    Build a stronger CoordinatesTask comment for letter grids and estimate
+    minimum clicks from '1x' / '2x' tokens in the requirement strip.
+    """
+    instruction = extract_instruction(screenshot)
+    times = [int(n) for n in re.findall(r"(\d)\s*[xX]", instruction)]
+    min_clicks = max(1, sum(times) if times else 2)
+    comment = (
+        f"{instruction}. "
+        "Click EVERY required letter tile the exact number of times shown "
+        "(e.g. 1x F means click F once). Do not click Skip or Verify."
+    )
+    return comment, min_clicks
+
 
 
 def _image_to_b64_under_limit(path: Path, limit_kb: int = 95) -> str:
@@ -255,11 +274,17 @@ def plan_twocaptcha_clicks(screenshot: Path):
             notes="2Captcha Coordinates drag (src→dst)",
         )
 
+    if "letter" in lower or "click each" in lower:
+        comment, min_clicks = letter_grid_click_hint(screenshot)
+    else:
+        comment = instruction or (
+            "Click the required tiles/letters for this hCaptcha challenge."
+        )
+        min_clicks = 1
     coords = solve_coordinates(
         screenshot,
-        comment=instruction
-        or "Click the required tiles/letters for this hCaptcha challenge.",
-        min_clicks=1,
+        comment=comment,
+        min_clicks=min_clicks,
         max_clicks=8,
     )
     clicks = [

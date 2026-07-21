@@ -872,8 +872,39 @@ def challenge_image_blank(path: Path) -> bool:
         return False
 
 
-def wait_for_challenge_canvas(page, timeout_s: float = 12.0) -> None:
-    """Poll until the challenge mid-area has loaded image content (not blank)."""
+def challenge_content_ready(path: Path) -> bool:
+    """
+    True when mid-canvas has real challenge content (not blank / spinner).
+    Letter grids → teal tiles; drag → dark structured scene.
+    """
+    try:
+        import numpy as np
+        from PIL import Image
+
+        if challenge_image_blank(path):
+            return False
+        im = np.array(Image.open(path).convert("RGB"))
+        h, w = im.shape[:2]
+        mid = im[int(h * 0.18) : int(h * 0.82), int(w * 0.04) : int(w * 0.96)]
+        mean = float(mid.mean())
+        std = float(mid.std())
+        # Loading spinner on pale gray
+        if mean > 200 and std < 40:
+            return False
+        r, g, b = mid[:, :, 0], mid[:, :, 1], mid[:, :, 2]
+        teal = ((g > r + 15) & (g > b + 10) & (g > 80)).mean()
+        dark = (mid.mean(axis=2) < 80).mean()
+        if teal > 0.08:
+            return True
+        if dark > 0.35 and std > 40:
+            return True
+        return std > 45
+    except Exception:
+        return not challenge_image_blank(path)
+
+
+def wait_for_challenge_canvas(page, timeout_s: float = 15.0) -> None:
+    """Poll until the challenge mid-area has loaded image content (not blank/spinner)."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         tmp = DEBUG_DIR / f"_canvas_probe_{int(time.time() * 1000)}.png"
@@ -884,19 +915,23 @@ def wait_for_challenge_canvas(page, timeout_s: float = 12.0) -> None:
                 box = loc.bounding_box(timeout=2000)
                 if box and box["width"] > 50 and box["y"] >= 0:
                     page.screenshot(path=str(tmp), clip=box)
-                    if not challenge_image_blank(tmp):
+                    if challenge_content_ready(tmp):
                         _log("challenge canvas ready")
                         try:
                             tmp.unlink(missing_ok=True)
                         except Exception:
                             pass
                         return
-                    _log("challenge canvas still blank — waiting…")
+                    _log("challenge canvas still loading — waiting…")
         except Exception as exc:
             _log(f"canvas probe: {exc}")
-        page.wait_for_timeout(700)
+        page.wait_for_timeout(800)
     _log("challenge canvas wait timed out — proceeding anyway")
 
+
+def challenge_still_solvable(path: Path) -> bool:
+    """True when Verify may be showing but letter/drag content is still interactive."""
+    return challenge_content_ready(path)
 
 def screenshot_challenge(page, tag: str = "challenge") -> Path:
     """Screenshot the challenge area (prefer challenge iframe bbox)."""
@@ -1116,20 +1151,28 @@ def solve_visible_captcha(
             _log("no captcha visible")
             return True
         _log(f"=== vision round {round_i}/{max_rounds} ===")
-        # After a successful drag, Verify appears — click it before re-planning
+        # Verify may appear early while the letter grid is still unsolved — peek first
         if verify_button_visible(page):
-            _log("Verify/Next already visible — clicking instead of re-solving")
-            if click_challenge_next(page):
-                page.wait_for_timeout(2000)
-                if not captcha_visible(page) and page_looks_past_login(page):
-                    _log("captcha gone after Verify — success")
-                    return True
-                if not captcha_visible(page):
-                    _log("captcha cleared after Verify (still on auth page)")
-                    # May need MFA next; treat as captcha solved
-                    return True
-                continue
-        shot = screenshot_challenge(page, tag=f"r{round_i}")
+            peek = screenshot_challenge(page, tag=f"r{round_i}_peek")
+            if challenge_still_solvable(peek):
+                _log("Verify visible but challenge content still present — re-solving")
+                shot = peek
+            else:
+                _log("Verify/Next already visible — clicking instead of re-solving")
+                if click_challenge_next(page):
+                    page.wait_for_timeout(2000)
+                    if not captcha_visible(page) and page_looks_past_login(page):
+                        _log("captcha gone after Verify — success")
+                        return True
+                    if not captcha_visible(page):
+                        _log("captcha cleared after Verify (still on auth page)")
+                        return True
+                    # Verify didn't clear — fall through to a fresh solve next loop
+                    _log("Verify click did not clear — will re-solve next round")
+                    continue
+                shot = peek
+        else:
+            shot = screenshot_challenge(page, tag=f"r{round_i}")
         # If screenshot is a full login page (no challenge clip), wait and retry
         try:
             from PIL import Image as _PILImage
@@ -1143,13 +1186,13 @@ def solve_visible_captcha(
                 shot = screenshot_challenge(page, tag=f"r{round_i}b")
         except Exception:
             pass
-        if challenge_image_blank(shot):
-            _log("blank challenge screenshot — waiting for assets and retrying")
-            page.wait_for_timeout(2000)
-            wait_for_challenge_canvas(page, timeout_s=8.0)
+        if not challenge_content_ready(shot):
+            _log("challenge content not ready — waiting for assets and retrying")
+            page.wait_for_timeout(1500)
+            wait_for_challenge_canvas(page, timeout_s=10.0)
             shot = screenshot_challenge(page, tag=f"r{round_i}c")
-            if challenge_image_blank(shot):
-                _log("still blank — skip this round")
+            if not challenge_content_ready(shot):
+                _log("still not ready — skip this round")
                 page.wait_for_timeout(1500)
                 continue
         use_backend = backend
