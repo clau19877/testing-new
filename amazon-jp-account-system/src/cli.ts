@@ -3,7 +3,7 @@ import { Command } from "commander";
 import { createAmazonAdapter } from "./adapters/amazon.js";
 import { createBrowser } from "./adapters/browser.js";
 import { loadOwnedIdentities } from "./adapters/identity.js";
-import { createMailbox } from "./adapters/mailbox.js";
+import { createMailbox, ImapMailbox } from "./adapters/mailbox.js";
 import { loadProxies } from "./adapters/proxy.js";
 import { loadConfig } from "./config.js";
 import { Orchestrator } from "./core/orchestrator.js";
@@ -32,7 +32,8 @@ program
   .option("--config <path>", "path to config JSON")
   .option("--headed", "show the browser window (recommended)", false)
   .option("--headless", "run browser headless", false)
-  .option("--otp-prompt", "type OTP in the terminal (default for create-one)", true)
+  .option("--imap", "fetch OTP automatically via IMAP", false)
+  .option("--otp-prompt", "type OTP in the terminal instead of IMAP", false)
   .option("--dry-run", "simulate without contacting Amazon", false)
   .option("--force", "create even if identity already exists in store", false)
   .action(async (opts: {
@@ -45,13 +46,19 @@ program
     config?: string;
     headed: boolean;
     headless: boolean;
+    imap: boolean;
     otpPrompt: boolean;
     dryRun: boolean;
     force: boolean;
   }) => {
+    if (opts.imap && opts.otpPrompt) {
+      throw new Error("Use only one of --imap or --otp-prompt");
+    }
+
     const base = loadConfig(opts.config);
     const identity = resolveOneIdentity(opts);
     const proxies = loadProxies(opts.proxies);
+    const mailboxProvider = resolveMailboxProvider(opts, base);
 
     const config: SystemConfig = {
       ...base,
@@ -65,11 +72,7 @@ program
       },
       mailbox: {
         ...base.mailbox,
-        provider: opts.dryRun
-          ? "dry-run"
-          : opts.otpPrompt
-            ? "prompt"
-            : base.mailbox.provider,
+        provider: mailboxProvider,
       },
     };
 
@@ -130,6 +133,21 @@ program
     }
 
     console.log(JSON.stringify(job.result ?? store.findByIdentityId(identity.id), null, 2));
+  });
+
+program
+  .command("test-imap")
+  .description("Verify IMAP login and mailbox access")
+  .option("--config <path>", "path to config JSON")
+  .action(async (opts: { config?: string }) => {
+    const config = loadConfig(opts.config);
+    const mailbox = new ImapMailbox({
+      ...config.mailbox,
+      provider: "imap",
+    });
+    const result = await mailbox.ping();
+    log("info", "IMAP connection ok", result);
+    console.log(JSON.stringify({ ok: true, ...result }, null, 2));
   });
 
 program
@@ -206,6 +224,22 @@ program
     const rows = store.list();
     console.log(JSON.stringify(rows, null, 2));
   });
+
+function resolveMailboxProvider(
+  opts: { dryRun: boolean; imap: boolean; otpPrompt: boolean },
+  base: SystemConfig,
+): SystemConfig["mailbox"]["provider"] {
+  if (opts.dryRun) return "dry-run";
+  if (opts.imap) return "imap";
+  if (opts.otpPrompt) return "prompt";
+  if (base.mailbox.provider === "imap" || base.mailbox.imap) return "imap";
+  if (base.mailbox.provider === "prompt") return "prompt";
+  // Prefer IMAP when env credentials exist; otherwise prompt.
+  if (process.env.IMAP_HOST && process.env.IMAP_USER && process.env.IMAP_PASS) {
+    return "imap";
+  }
+  return "prompt";
+}
 
 function resolveOneIdentity(opts: {
   identityId?: string;

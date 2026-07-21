@@ -14,9 +14,19 @@
     "slowMoMs": 40
   },
   "mailbox": {
-    "provider": "prompt",
+    "provider": "imap",
     "otpTimeoutMs": 180000,
-    "pollIntervalMs": 3000
+    "pollIntervalMs": 3000,
+    "imap": {
+      "host": "imap.example.com",
+      "port": 993,
+      "secure": true,
+      "mailbox": "INBOX",
+      "fromIncludes": ["amazon"],
+      "subjectIncludes": [],
+      "lookbackMs": 900000,
+      "tlsRejectUnauthorized": true
+    }
   },
   "proxy": {
     "required": false,

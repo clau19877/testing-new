@@ -13,6 +13,8 @@
     "start": "node dist/cli.js",
     "create-one": "tsx src/cli.ts create-one",
     "create-one:dry": "tsx src/cli.ts create-one --dry-run",
+    "test-otp": "tsx scripts/test-otp-utils.ts",
+    "test-imap": "tsx src/cli.ts test-imap",
     "dry-run": "tsx src/cli.ts run --dry-run --count 3 --concurrency 2",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
@@ -21,12 +23,13 @@
   },
   "dependencies": {
     "commander": "^13.1.0",
+    "imapflow": "^1.4.7",
     "p-limit": "^6.2.0",
     "playwright": "^1.61.1",
     "zod": "^3.24.2"
   },
   "devDependencies": {
-    "@types/node": "^22.13.10",
+    "@types/node": "^22.20.1",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"
   }

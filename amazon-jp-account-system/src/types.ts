@@ -62,6 +62,22 @@ export interface Job {
   result?: RegisterResult;
 }
 
+export interface ImapSettings {
+  host: string;
+  port: number;
+  secure: boolean;
+  user: string;
+  pass: string;
+  mailbox: string;
+  /** Optional From: filter substrings (case-insensitive). */
+  fromIncludes: string[];
+  /** Optional Subject: filter substrings (case-insensitive). */
+  subjectIncludes: string[];
+  /** How far back to search on each poll (ms). */
+  lookbackMs: number;
+  tlsRejectUnauthorized: boolean;
+}
+
 export interface SystemConfig {
   marketplace: string;
   locale: string;
@@ -78,6 +94,7 @@ export interface SystemConfig {
     provider: "dry-run" | "imap" | "prompt";
     otpTimeoutMs: number;
     pollIntervalMs: number;
+    imap?: ImapSettings;
   };
   proxy: { required: boolean; sticky: boolean };
   store: { path: string };
