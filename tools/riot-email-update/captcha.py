@@ -1,8 +1,28 @@
 """Captcha solvers for Riot hCaptcha.
 
-CapSolver does NOT support Riot's sitekey (returns ERROR_INVALID_TASK_DATA /
-"We don't support this service"). Capless explicitly lists Riot Games as
-supported and is the recommended provider for this script.
+Riot uses **hCaptcha Enterprise** with a fresh per-challenge `rqdata` blob.
+A valid token must be minted against that exact rqdata on an IP that matches
+the submit session.
+
+Approaches implemented in this package
+--------------------------------------
+Token APIs (captcha.py / captcha_providers.py):
+  - capmonster  — HCaptchaTask + customData=rqdata (common in Riot auth scripts)
+  - twocaptcha  — HCaptchaTask + data=rqdata + matching User-Agent
+  - nonecap     — type=hcaptcha_enterprise + rqdata
+  - capless     — /solve with site+sitekey+proxy+rqdata (lists Riot; often soft-fails)
+  - capsolver   — hard-rejects Riot sitekey ("We don't support this service")
+
+In-browser (vision_captcha.py):
+  - OCR/CV letter-grid + drag heuristics, optional agent/OpenAI backends
+  - Does NOT mint enterprise-bound tokens; Riot may still reject / Oops
+
+Riot Client API path (riot_api_login.py):
+  - POST auth.riotgames.com/authorization → POST authenticate …/login
+  - Extract sitekey+rqdata → solver → PUT login with `hcaptcha <token>`
+  - Preferred over injecting tokens into the web widget
+
+Probe: `python probe_hcaptcha_approaches.py`
 """
 
 from __future__ import annotations

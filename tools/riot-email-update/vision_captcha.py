@@ -499,7 +499,8 @@ def plan_drag_cv(screenshot: Path, instruction: str = "") -> VisionPlan | None:
         return None
 
     sx = int(src["cx"] + x0)
-    sy = int(src["cy"] + y0)
+    # Prefer the "+ Move" handle near the top of the selection tile
+    sy = int(src["y"] + y0 + max(8, int(src["h"] * 0.15)))
     dx = int(dst["cx"] + x0)
     dy = int(dst["cy"] + y0)
     dist = ((sx - dx) ** 2 + (sy - dy) ** 2) ** 0.5
@@ -526,26 +527,27 @@ def plan_ocr(screenshot: Path) -> VisionPlan:
     w, h = img.size
     lower = text.lower()
 
+    if challenge_image_blank(screenshot):
+        _log("blank challenge canvas — refusing heuristic plan")
+        return VisionPlan(
+            instruction=text.strip()[:300],
+            clicks=[],
+            backend="ocr",
+            notes="blank canvas",
+        )
+
     # Drag-style challenges (common on Riot / hCaptcha enterprise)
     if "drag" in lower and ("to the" in lower or " onto " in lower or "astronaut" in lower):
         cv_drag = plan_drag_cv(screenshot, instruction=text.strip())
         if cv_drag and cv_drag.drags:
             return cv_drag
-        # Heuristic fallback positions when we can't segment icons
-        src = None
-        for b in boxes:
-            if "move" in b["text"].lower():
-                src = (b["cx"], b["cy"] + int(b["h"] * 1.5))
-                break
-        if not src:
-            src = (int(w * 0.40), int(h * 0.48))
-        dst = (int(w * 0.25), int(h * 0.32))
+        # No blind heuristic — empty plan lets hybrid escalate to 2Captcha
+        _log("drag CV missed — empty plan (no heuristic)")
         return VisionPlan(
             instruction=text.strip()[:300],
             clicks=[],
-            drags=[DragTarget(x1=src[0], y1=src[1], x2=dst[0], y2=dst[1], label="drag")],
             backend="ocr",
-            notes="drag heuristic fallback (CV missed)",
+            notes="drag CV miss",
         )
 
     # Prefer CV teal-tile path for letter grids (stylized fonts break plain OCR)
@@ -731,11 +733,36 @@ def plan_agent(screenshot: Path, timeout: float = 180.0) -> VisionPlan:
 def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionPlan:
     backend = (backend or os.getenv("VISION_BACKEND") or "auto").lower()
     if backend == "auto":
-        if os.getenv("OPENAI_API_KEY"):
+        # Prefer hybrid: local CV first, 2Captcha Coordinates as oracle/fallback
+        if os.getenv("TWOCAPTCHA_API_KEY") or os.getenv("TWO_CAPTCHA_API_KEY"):
+            backend = "hybrid"
+        elif os.getenv("OPENAI_API_KEY"):
             backend = "openai"
         else:
             backend = "ocr"
     _log(f"planning with backend={backend} image={screenshot}")
+    if backend in ("twocaptcha", "2captcha", "2cap", "2cap_click", "hybrid"):
+        # hybrid → always try local CV first; twocaptcha → oracle only
+        # (set VISION_LOCAL_FIRST=1 to also try local before pure twocaptcha)
+        if backend == "hybrid":
+            local_first = True
+        else:
+            local_first = os.getenv("VISION_LOCAL_FIRST", "0") in ("1", "true", "True")
+        if local_first:
+            if challenge_image_blank(screenshot):
+                _log("blank challenge image — skip local CV, use 2Captcha")
+            else:
+                local = plan_ocr(screenshot)
+                if local.clicks or (local.drags or []):
+                    _log(
+                        f"local CV hit backend={local.backend} "
+                        f"clicks={len(local.clicks)} drags={len(local.drags or [])}"
+                    )
+                    return local
+                _log("local CV miss — escalating to 2Captcha Coordinates")
+        from twocaptcha_click import plan_twocaptcha_clicks
+
+        return plan_twocaptcha_clicks(screenshot)
     if backend == "ocr":
         plan = plan_ocr(screenshot)
         # Optional agent fallback when local CV/OCR cannot produce actions
@@ -752,6 +779,21 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
                 )
             except Exception as exc:
                 _log(f"agent fallback failed: {exc}")
+                return plan
+        # Optional 2Captcha click fallback after empty/weak OCR
+        if (
+            not plan.clicks
+            and not (plan.drags or [])
+            and (os.getenv("TWOCAPTCHA_API_KEY") or os.getenv("TWO_CAPTCHA_API_KEY"))
+            and os.getenv("VISION_2CAP_FALLBACK", "1") not in ("0", "false", "False")
+        ):
+            _log("OCR/CV empty — falling back to 2Captcha Coordinates")
+            try:
+                from twocaptcha_click import plan_twocaptcha_clicks
+
+                return plan_twocaptcha_clicks(screenshot)
+            except Exception as exc:
+                _log(f"2Captcha click fallback failed: {exc}")
                 return plan
         return plan
     if backend == "openai":
@@ -810,9 +852,58 @@ def captcha_visible(page) -> bool:
     return "click each letter" in content or "please drag the" in content
 
 
+def challenge_image_blank(path: Path) -> bool:
+    """True when the challenge canvas failed to load (white/empty mid region)."""
+    try:
+        from PIL import Image
+
+        im = Image.open(path).convert("RGB")
+        w, h = im.size
+        mid = im.crop((int(w * 0.05), int(h * 0.18), int(w * 0.95), int(h * 0.82)))
+        pixels = list(mid.getdata())
+        if not pixels:
+            return True
+        mean = sum(sum(p) for p in pixels) / (len(pixels) * 3)
+        # Nearly-white mid canvas with little structure
+        whiteish = sum(1 for p in pixels if p[0] > 235 and p[1] > 235 and p[2] > 235)
+        white_ratio = whiteish / len(pixels)
+        return mean > 230 and white_ratio > 0.85
+    except Exception:
+        return False
+
+
+def wait_for_challenge_canvas(page, timeout_s: float = 12.0) -> None:
+    """Poll until the challenge mid-area has loaded image content (not blank)."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        tmp = DEBUG_DIR / f"_canvas_probe_{int(time.time() * 1000)}.png"
+        ensure_debug()
+        loc = page.locator('iframe[src*="hcaptcha.com"]').last
+        try:
+            if loc.count() > 0:
+                box = loc.bounding_box(timeout=2000)
+                if box and box["width"] > 50 and box["y"] >= 0:
+                    page.screenshot(path=str(tmp), clip=box)
+                    if not challenge_image_blank(tmp):
+                        _log("challenge canvas ready")
+                        try:
+                            tmp.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        return
+                    _log("challenge canvas still blank — waiting…")
+        except Exception as exc:
+            _log(f"canvas probe: {exc}")
+        page.wait_for_timeout(700)
+    _log("challenge canvas wait timed out — proceeding anyway")
+
+
 def screenshot_challenge(page, tag: str = "challenge") -> Path:
     """Screenshot the challenge area (prefer challenge iframe bbox)."""
     ensure_debug()
+    # Drag/grid assets often load after the prompt banner — wait for content
+    if "after" not in tag:
+        wait_for_challenge_canvas(page)
     path = DEBUG_DIR / f"vision_{tag}_{int(time.time())}.png"
     # Try to clip to the challenge iframe
     loc = page.locator('iframe[src*="hcaptcha.com"]').last
@@ -828,6 +919,30 @@ def screenshot_challenge(page, tag: str = "challenge") -> Path:
     page.screenshot(path=str(path), full_page=False)
     _log(f"full viewport screenshot → {path.name}")
     return path
+
+
+def verify_button_visible(page) -> bool:
+    """True when the challenge shows an in-iframe Verify / Next control."""
+    frame = find_hcaptcha_frame(page)
+    if not frame:
+        return False
+    for sel in [
+        'div.button-submit:has-text("Verify")',
+        '.button-submit:has-text("Verify")',
+        'button:has-text("Verify")',
+        'div.button-submit:has-text("Next")',
+        '.button-submit:has-text("Next")',
+    ]:
+        try:
+            loc = frame.locator(sel).first
+            if loc.count() and loc.is_visible():
+                txt = (loc.inner_text(timeout=400) or "").strip().lower()
+                if "skip" in txt:
+                    continue
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def annotate_plan(screenshot: Path, plan: VisionPlan, tag: str = "annotated") -> Path:
@@ -916,21 +1031,22 @@ def apply_clicks(page, plan: VisionPlan, screenshot: Path) -> int:
             f"page=({x1:.0f},{y1:.0f})->({x2:.0f},{y2:.0f})"
         )
         page.mouse.move(x1, y1)
-        page.wait_for_timeout(150)
+        page.wait_for_timeout(200)
         page.mouse.down()
-        page.wait_for_timeout(350)
-        # stepped move looks more human
-        steps = 20
+        page.wait_for_timeout(450)
+        # stepped move looks more human; hold slightly past dest
+        steps = 28
         for i in range(1, steps + 1):
             page.mouse.move(
                 x1 + (x2 - x1) * i / steps,
                 y1 + (y2 - y1) * i / steps,
+                steps=1,
             )
-            page.wait_for_timeout(25)
-        page.wait_for_timeout(200)
+            page.wait_for_timeout(30)
+        page.wait_for_timeout(350)
         page.mouse.up()
         applied += 1
-        page.wait_for_timeout(800)
+        page.wait_for_timeout(1000)
     return applied
 
 
@@ -940,13 +1056,14 @@ def click_challenge_next(page) -> bool:
     if not frame:
         return False
     for sel in [
+        'div.button-submit:has-text("Verify")',
+        '.button-submit:has-text("Verify")',
+        'button:has-text("Verify")',
+        'div[role="button"]:has-text("Verify")',
         'div.button-submit:has-text("Next")',
         '.button-submit:has-text("Next")',
         'button:has-text("Next")',
         'div[role="button"]:has-text("Next")',
-        'button:has-text("Verify")',
-        'div[role="button"]:has-text("Verify")',
-        '.button-submit:has-text("Verify")',
     ]:
         try:
             loc = frame.locator(sel).first
@@ -956,23 +1073,24 @@ def click_challenge_next(page) -> bool:
                 if "skip" in txt or "skip" in aria:
                     continue
                 loc.click(timeout=2000)
-                _log(f"challenge Next via frame {sel}")
+                _log(f"challenge Next/Verify via frame {sel}")
                 return True
         except Exception:
             continue
-    # Fallback: only when visible Next text exists
+    # Fallback: only when visible Verify/Next text exists (never Skip)
     try:
-        if frame.locator("text=Next").count():
-            loc = page.locator('iframe[src*="hcaptcha.com"]').last
-            box = loc.bounding_box(timeout=2000) if loc.count() else None
-            if box and box["y"] >= 0:
-                px = box["x"] + box["width"] * 0.88
-                py = box["y"] + box["height"] * 0.94
-                page.mouse.click(px, py)
-                _log(f"challenge Next via bbox click ({px:.0f},{py:.0f})")
-                return True
+        for label in ("Verify", "Next"):
+            if frame.locator(f"text={label}").count():
+                loc = page.locator('iframe[src*="hcaptcha.com"]').last
+                box = loc.bounding_box(timeout=2000) if loc.count() else None
+                if box and box["y"] >= 0:
+                    px = box["x"] + box["width"] * 0.88
+                    py = box["y"] + box["height"] * 0.94
+                    page.mouse.click(px, py)
+                    _log(f"challenge {label} via bbox click ({px:.0f},{py:.0f})")
+                    return True
     except Exception as exc:
-        _log(f"challenge Next fallback fail: {exc}")
+        _log(f"challenge Next/Verify fallback fail: {exc}")
     return False
 
 
@@ -998,6 +1116,19 @@ def solve_visible_captcha(
             _log("no captcha visible")
             return True
         _log(f"=== vision round {round_i}/{max_rounds} ===")
+        # After a successful drag, Verify appears — click it before re-planning
+        if verify_button_visible(page):
+            _log("Verify/Next already visible — clicking instead of re-solving")
+            if click_challenge_next(page):
+                page.wait_for_timeout(2000)
+                if not captcha_visible(page) and page_looks_past_login(page):
+                    _log("captcha gone after Verify — success")
+                    return True
+                if not captcha_visible(page):
+                    _log("captcha cleared after Verify (still on auth page)")
+                    # May need MFA next; treat as captcha solved
+                    return True
+                continue
         shot = screenshot_challenge(page, tag=f"r{round_i}")
         # If screenshot is a full login page (no challenge clip), wait and retry
         try:
@@ -1012,16 +1143,28 @@ def solve_visible_captcha(
                 shot = screenshot_challenge(page, tag=f"r{round_i}b")
         except Exception:
             pass
+        if challenge_image_blank(shot):
+            _log("blank challenge screenshot — waiting for assets and retrying")
+            page.wait_for_timeout(2000)
+            wait_for_challenge_canvas(page, timeout_s=8.0)
+            shot = screenshot_challenge(page, tag=f"r{round_i}c")
+            if challenge_image_blank(shot):
+                _log("still blank — skip this round")
+                page.wait_for_timeout(1500)
+                continue
         use_backend = backend
-        # If a previous drag/click didn't clear the same challenge, escalate to agent
+        # If a previous drag/click didn't clear the same challenge, escalate
         if (
             round_i > 1
             and prev_instruction
-            and os.getenv("VISION_AGENT_FALLBACK", "1") not in ("0", "false", "False")
-            and backend in ("ocr", "auto")
+            and backend in ("ocr", "auto", "hybrid")
         ):
-            _log("prior round did not clear challenge — using agent backend")
-            use_backend = "agent"
+            if os.getenv("TWOCAPTCHA_API_KEY") or os.getenv("TWO_CAPTCHA_API_KEY"):
+                _log("prior round did not clear — escalating to 2Captcha Coordinates")
+                use_backend = "twocaptcha"
+            elif os.getenv("VISION_AGENT_FALLBACK", "1") not in ("0", "false", "False"):
+                _log("prior round did not clear challenge — using agent backend")
+                use_backend = "agent"
         plan = plan_for_screenshot(shot, backend=use_backend)
         prev_instruction = (plan.instruction or "")[:120]
         n_drags = len(plan.drags or [])
@@ -1051,13 +1194,15 @@ def solve_visible_captcha(
             continue
         apply_clicks(page, plan, shot)
         page.wait_for_timeout(800)
-        # Letter-grid challenges often need an explicit Next inside the widget
-        if plan.clicks and "letter" in (plan.instruction or "").lower():
+        # Letter-grid + drag challenges need an explicit Next/Verify inside the widget
+        needs_verify = bool(plan.drags) or (
+            bool(plan.clicks) and "letter" in (plan.instruction or "").lower()
+        )
+        if needs_verify or verify_button_visible(page):
             if click_challenge_next(page):
                 page.wait_for_timeout(1500)
-        page.wait_for_timeout(1500)
-        # Some challenges need an explicit Verify / Next click inside widget —
-        # try common buttons on page
+        page.wait_for_timeout(800)
+        # Fallback: page-level Verify/Next (rare — usually inside iframe)
         for sel in [
             'button:has-text("Verify")',
             'button:has-text("Next")',
@@ -1075,6 +1220,11 @@ def solve_visible_captcha(
         page.wait_for_timeout(1000)
         shot2 = screenshot_challenge(page, tag=f"r{round_i}_after")
         _log(f"after-click shot {shot2.name}")
+        # If Verify appeared after drag (Skip → Verify), click it now
+        if verify_button_visible(page):
+            _log("Verify visible after action — clicking")
+            if click_challenge_next(page):
+                page.wait_for_timeout(2000)
         try:
             body = page.content().lower()
             if "something went wrong" in body or "captcha attempt has timed out" in body:

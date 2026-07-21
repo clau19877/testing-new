@@ -115,7 +115,7 @@ def main() -> int:
     user = os.getenv("RIOT_USERNAME") or ""
     password = os.getenv("RIOT_PASSWORD") or ""
     new_email = os.getenv("NEW_EMAIL") or ""
-    backend = os.getenv("VISION_BACKEND") or "ocr"
+    backend = os.getenv("VISION_BACKEND") or "auto"
     proxy_list = load_proxy_list(os.getenv("PROXY_LIST") or "data/proxies.txt")
     proxy_idx = int(os.getenv("PROXY_INDEX") or "9")
     proxy = (
