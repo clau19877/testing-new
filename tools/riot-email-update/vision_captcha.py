@@ -1128,12 +1128,11 @@ def annotate_plan(screenshot: Path, plan: VisionPlan, tag: str = "annotated") ->
 
 def apply_clicks(page, plan: VisionPlan, screenshot: Path) -> int:
     """
-    Map screenshot-local coords (relative to the challenge iframe content)
-    onto the *current* on-screen iframe box, then click / drag.
-
-    Do NOT reuse a stale absolute page offset from screenshot time — hCaptcha
-    parks the iframe at y=-9999 during 2Captcha waits, and our reposition
-    helper moves it; stale offsets then hit Riot's Facebook/Apple buttons.
+    Apply click/drag plans. For clipped challenge screenshots, always click
+    inside the hCaptcha frame (screenshot coords == frame content coords).
+    Page-level mouse + bbox offsets are unreliable after hCaptcha parks the
+    iframe at y=-9999 and our CSS reposition — those mis-hits Riot social
+    login buttons (Facebook / Apple / Xbox / PlayStation).
     """
     actions = len(plan.clicks) + len(plan.drags or [])
     if actions == 0:
@@ -1142,8 +1141,6 @@ def apply_clicks(page, plan: VisionPlan, screenshot: Path) -> int:
 
     ensure_challenge_iframe_on_screen(page)
 
-    offset_x, offset_y = 0.0, 0.0
-    use_frame_local = False
     clipped = False
     saved = _load_clip(screenshot)
     if saved and saved.get("width", 0) > 50:
@@ -1158,60 +1155,31 @@ def apply_clicks(page, plan: VisionPlan, screenshot: Path) -> int:
             clipped = True
 
     if clipped:
-        loc = page.locator('iframe[src*="hcaptcha.com"]').last
-        try:
-            if loc.count() > 0:
-                box = loc.bounding_box(timeout=3000)
-                if box and box["width"] > 50 and box["y"] >= 0 and box["x"] >= -20:
-                    offset_x, offset_y = float(box["x"]), float(box["y"])
-                    _log(
-                        f"live iframe offset ({offset_x:.0f},{offset_y:.0f}) "
-                        f"(saved was "
-                        f"{(saved or {}).get('x')},{(saved or {}).get('y')})"
-                    )
-                else:
-                    _log(f"iframe box unusable: {box} — frame-local clicks")
-                    use_frame_local = True
-        except Exception as exc:
-            _log(f"no live iframe offset: {exc} — frame-local clicks")
-            use_frame_local = True
-    else:
-        _log("full-page screenshot — clicks are page coords")
-
-    if use_frame_local:
+        _log("clipped challenge shot — using frame-local clicks")
         return _apply_clicks_in_frame(page, plan)
 
+    _log("full-page screenshot — clicks are page coords")
     applied = 0
     for c in plan.clicks:
-        px = offset_x + c.x
-        py = offset_y + c.y
-        if py < 0 or px < 0:
-            _log(f"skip click {c.label} offscreen page=({px:.0f},{py:.0f})")
+        if c.y < 0 or c.x < 0:
             continue
-        _log(f"click {c.label} screenshot=({c.x},{c.y}) page=({px:.0f},{py:.0f})")
-        page.mouse.click(px, py)
+        _log(f"click {c.label} page=({c.x},{c.y})")
+        page.mouse.click(c.x, c.y)
         applied += 1
         page.wait_for_timeout(350)
-
     for d in plan.drags or []:
-        x1, y1 = offset_x + d.x1, offset_y + d.y1
-        x2, y2 = offset_x + d.x2, offset_y + d.y2
-        if min(x1, y1, x2, y2) < 0:
-            _log(f"skip drag {d.label} offscreen")
+        if min(d.x1, d.y1, d.x2, d.y2) < 0:
             continue
-        _log(
-            f"drag {d.label} ({d.x1},{d.y1})->({d.x2},{d.y2}) "
-            f"page=({x1:.0f},{y1:.0f})->({x2:.0f},{y2:.0f})"
-        )
-        page.mouse.move(x1, y1)
+        _log(f"drag {d.label} ({d.x1},{d.y1})->({d.x2},{d.y2})")
+        page.mouse.move(d.x1, d.y1)
         page.wait_for_timeout(200)
         page.mouse.down()
         page.wait_for_timeout(450)
         steps = 28
         for i in range(1, steps + 1):
             page.mouse.move(
-                x1 + (x2 - x1) * i / steps,
-                y1 + (y2 - y1) * i / steps,
+                d.x1 + (d.x2 - d.x1) * i / steps,
+                d.y1 + (d.y2 - d.y1) * i / steps,
                 steps=1,
             )
             page.wait_for_timeout(30)
@@ -1223,27 +1191,47 @@ def apply_clicks(page, plan: VisionPlan, screenshot: Path) -> int:
 
 
 def _apply_clicks_in_frame(page, plan: VisionPlan) -> int:
-    """Fallback: click via the hCaptcha frame's own coordinate space."""
+    """Click via the hCaptcha frame's own coordinate space."""
     frame = find_hcaptcha_frame(page)
     if not frame:
         _log("frame-local clicks: no hCaptcha frame")
         return 0
     applied = 0
     try:
-        body = frame.locator("body").first
+        # Prefer the challenge document element for hit-testing
+        root = frame.locator("body").first
         for c in plan.clicks:
             _log(f"frame click {c.label} ({c.x},{c.y})")
-            body.click(position={"x": c.x, "y": c.y}, force=True, timeout=3000)
+            root.click(position={"x": float(c.x), "y": float(c.y)}, force=True, timeout=4000)
             applied += 1
             page.wait_for_timeout(350)
         for d in plan.drags or []:
             _log(f"frame drag {d.label} ({d.x1},{d.y1})->({d.x2},{d.y2})")
-            body.hover(position={"x": d.x1, "y": d.y1}, force=True)
-            page.mouse.down()
-            page.wait_for_timeout(300)
-            body.hover(position={"x": d.x2, "y": d.y2}, force=True)
-            page.wait_for_timeout(200)
-            page.mouse.up()
+            # Playwright frame drag: mouse down/move/up in page coords of the
+            # element's box — use locator.drag_to when possible.
+            src = frame.locator("body")
+            try:
+                box = src.bounding_box(timeout=2000)
+            except Exception:
+                box = None
+            if box:
+                page.mouse.move(box["x"] + d.x1, box["y"] + d.y1)
+                page.wait_for_timeout(200)
+                page.mouse.down()
+                page.wait_for_timeout(300)
+                steps = 24
+                for i in range(1, steps + 1):
+                    page.mouse.move(
+                        box["x"] + d.x1 + (d.x2 - d.x1) * i / steps,
+                        box["y"] + d.y1 + (d.y2 - d.y1) * i / steps,
+                    )
+                    page.wait_for_timeout(25)
+                page.wait_for_timeout(200)
+                page.mouse.up()
+            else:
+                src.click(position={"x": float(d.x1), "y": float(d.y1)}, force=True)
+                page.wait_for_timeout(200)
+                src.click(position={"x": float(d.x2), "y": float(d.y2)}, force=True)
             applied += 1
             page.wait_for_timeout(800)
     except Exception as exc:
