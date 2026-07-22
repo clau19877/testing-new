@@ -78,6 +78,40 @@ def _image_to_jpeg_b64(path: Path, *, max_side: int = 900) -> tuple[str, tuple[i
     return base64.b64encode(buf.getvalue()).decode(), orig
 
 
+def _pil_to_jpeg_b64(img, *, quality: int = 90) -> str:
+    buf = BytesIO()
+    img.convert("RGB").save(buf, format="JPEG", quality=quality, optimize=True)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def extract_anchors(screenshot: Path) -> list[str]:
+    """
+    Crop the requirement/icon strip for challenges that need auxiliary images
+    (e.g. "find ALL objects matching the provided number").
+
+    YesCaptcha docs: anchors are required when the question can only be judged
+    from small reference images above the grid.
+    """
+    from PIL import Image
+
+    img = Image.open(screenshot).convert("RGB")
+    w, h = img.size
+    # Prompt strip sits under the teal banner, above the main grid.
+    y0, y1 = int(h * 0.12), int(h * 0.36)
+    if y1 <= y0 + 20:
+        return []
+    strip = img.crop((0, y0, w, y1))
+    anchors: list[str] = [_pil_to_jpeg_b64(strip)]
+    sw, sh = strip.size
+    # Also send individual icon zones (3 common targets).
+    for cx in (0.28, 0.55, 0.82):
+        x = int(sw * cx) - 36
+        crop = strip.crop((max(0, x), 6, min(sw, x + 72), sh - 4))
+        if crop.size[0] >= 24 and crop.size[1] >= 24:
+            anchors.append(_pil_to_jpeg_b64(crop))
+    return anchors
+
+
 def extract_question(screenshot: Path) -> str:
     try:
         from twocaptcha_click import extract_instruction
@@ -95,14 +129,15 @@ def create_classification_task(
     key = _api_key()
     q = (question or extract_question(screenshot)).strip()
     b64, _orig = _image_to_jpeg_b64(screenshot)
+    anchors = extract_anchors(screenshot)
     # Screenshot mode (drag / point / new styles): single JPEG in queries.
     task: dict[str, Any] = {
         "type": "HCaptchaClassification",
         "queries": [b64],
         "question": q,
-        "anchors": [],
+        "anchors": anchors,
     }
-    _log(f"createTask question={q[:90]!r}")
+    _log(f"createTask question={q[:90]!r} anchors={len(anchors)}")
     resp = requests.post(
         YESCAPTCHA_CREATE,
         json={"clientKey": key, "task": task},
@@ -229,13 +264,15 @@ def plan_yescaptcha_clicks(screenshot: Path, extra_comment: str | None = None):
     up = Image.open(BytesIO(base64.b64decode(b64)))
     upload_size = up.size
     orig_size = Image.open(screenshot).size
+    anchors = extract_anchors(screenshot)
+    _log(f"anchors={len(anchors)}")
 
     key = _api_key()
     task = {
         "type": "HCaptchaClassification",
         "queries": [b64],
         "question": question,
-        "anchors": [],
+        "anchors": anchors,
     }
     _log(f"createTask question={question[:90]!r} upload={upload_size} orig={orig_size}")
     resp = requests.post(
@@ -244,15 +281,27 @@ def plan_yescaptcha_clicks(screenshot: Path, extra_comment: str | None = None):
         timeout=60,
     )
     data = resp.json()
+    # Some createTask responses are already ready (sync Classification).
     if data.get("errorId"):
         raise CaptchaSolverError(f"YesCaptcha createTask: {data}")
-    task_id = data.get("taskId")
-    if not task_id:
-        raise CaptchaSolverError(f"YesCaptcha missing taskId: {data}")
-
-    sol = poll_result(str(task_id))
+    if (data.get("status") or "").lower() == "ready" and isinstance(
+        data.get("solution"), dict
+    ):
+        sol = data["solution"]
+    else:
+        task_id = data.get("taskId")
+        if not task_id:
+            raise CaptchaSolverError(f"YesCaptcha missing taskId: {data}")
+        sol = poll_result(str(task_id))
     sol_type = (sol.get("type") or "").lower()
     box = sol.get("box")
+    # Newer API also returns structured clicks: [{x,y}, ...]
+    if not box and isinstance(sol.get("clicks"), list):
+        flat: list[Any] = []
+        for item in sol["clicks"]:
+            if isinstance(item, dict) and "x" in item and "y" in item:
+                flat.extend([item["x"], item["y"]])
+        box = flat
     _log(f"solution type={sol_type or 'click'} box={str(box)[:120]}")
 
     drags_raw = _parse_box_drags(box, upload_size=upload_size, orig_size=orig_size)
@@ -287,5 +336,5 @@ def plan_yescaptcha_clicks(screenshot: Path, extra_comment: str | None = None):
         instruction=question,
         clicks=clicks,
         backend="yescaptcha",
-        notes=f"YesCaptcha Classification ({len(clicks)} clicks)",
+        notes=f"YesCaptcha Classification ({len(clicks)} clicks, anchors={len(anchors)})",
     )

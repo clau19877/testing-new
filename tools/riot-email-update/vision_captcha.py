@@ -899,6 +899,8 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
             _log(f"letter-grid hint skipped: {exc}")
 
         # Prefer YesCaptcha Classification when keyed (drag/image/point).
+        # Skip for "matching the provided number" — YesCaptcha is weak there
+        # even with anchors; 2Captcha human workers handle icon refs better.
         use_yes = bool(
             (
                 os.getenv("YESCAPTCHA_API_KEY")
@@ -908,6 +910,27 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
         ) and backend in ("hybrid", "yescaptcha", "yes", "auto")
         if backend in ("yescaptcha", "yes"):
             use_yes = True
+        instr_probe = ""
+        try:
+            from twocaptcha_click import extract_instruction
+
+            instr_probe = (extract_instruction(screenshot) or "").lower()
+        except Exception:
+            instr_probe = ""
+        if use_yes and (
+            "matching the provided number" in instr_probe
+            or "objects matching" in instr_probe
+        ):
+            force_yes_numbers = os.getenv("YESCAPTCHA_FORCE_NUMBER_MATCH", "0") in (
+                "1",
+                "true",
+                "True",
+            )
+            if not force_yes_numbers and backend not in ("yescaptcha", "yes"):
+                _log(
+                    "number-match challenge — preferring 2Captcha over YesCaptcha"
+                )
+                use_yes = False
         if use_yes:
             try:
                 from yescaptcha_click import plan_yescaptcha_clicks
@@ -1296,6 +1319,16 @@ def click_point_is_on_hcaptcha(page, x: float, y: float) -> bool:
                     const src = (el.getAttribute('src') || '').toLowerCase();
                     return src.includes('hcaptcha');
                   }
+                  // After CSS reposition, a wrapper/overlay can sit above the
+                  // iframe in hit-testing — still accept nearby hCaptcha iframes.
+                  const frames = [...document.querySelectorAll('iframe[src*="hcaptcha.com"]')];
+                  for (const f of frames) {
+                    const r = f.getBoundingClientRect();
+                    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom
+                        && r.width >= 300 && r.height >= 300) {
+                      return true;
+                    }
+                  }
                   return false;
                 }""",
                 [x, y],
@@ -1422,9 +1455,9 @@ def apply_clicks(page, plan: VisionPlan, screenshot: Path) -> int:
 
 def _apply_clicks_in_frame(page, plan: VisionPlan) -> int:
     """
-    Click inside the challenge iframe using iframe bounding-box + screenshot
-    offsets. Avoid body.click(force=True) — if the wrong (checkbox) frame is
-    selected, out-of-bounds force clicks land on Riot social OAuth buttons.
+    Click inside the challenge iframe using iframe-relative coordinates.
+    Prefer Playwright iframe.click(position=…) so CSS reposition / overlays
+    cannot make elementFromPoint falsely reject in-bounds challenge clicks.
     """
     ensure_challenge_iframe_on_screen(page)
     iframe = find_challenge_iframe_locator(page)
@@ -1452,6 +1485,7 @@ def _apply_clicks_in_frame(page, plan: VisionPlan) -> int:
         f"w={box['width']:.0f} h={box['height']:.0f}"
     )
     applied = 0
+    use_iframe_click = iframe is not None
     try:
         for c in plan.clicks:
             if c.x < 0 or c.y < 0 or c.x > box["width"] + 5 or c.y > box["height"] + 5:
@@ -1459,14 +1493,26 @@ def _apply_clicks_in_frame(page, plan: VisionPlan) -> int:
                 continue
             px = box["x"] + c.x
             py = box["y"] + c.y
+            # Soft safety: only skip when clearly outside every challenge iframe.
             if not click_point_is_on_hcaptcha(page, px, py):
                 _log(
-                    f"skip click {c.label} page=({px:.0f},{py:.0f}) — "
-                    "not over hCaptcha iframe (would hit page chrome)"
+                    f"warn click {c.label} page=({px:.0f},{py:.0f}) — "
+                    "elementFromPoint miss; still clicking via iframe position"
                 )
-                continue
+            clicked = False
+            if use_iframe_click:
+                try:
+                    iframe.click(
+                        position={"x": float(c.x), "y": float(c.y)},
+                        timeout=2500,
+                        force=True,
+                    )
+                    clicked = True
+                except Exception as exc:
+                    _log(f"iframe.click failed ({exc}); falling back to page mouse")
+            if not clicked:
+                page.mouse.click(px, py)
             _log(f"frame click {c.label} local=({c.x},{c.y}) page=({px:.0f},{py:.0f})")
-            page.mouse.click(px, py)
             applied += 1
             page.wait_for_timeout(350)
             if page_looks_social_oauth(page):
@@ -1479,9 +1525,6 @@ def _apply_clicks_in_frame(page, plan: VisionPlan) -> int:
                 _log(f"skip out-of-frame drag {d.label}")
                 continue
             sx, sy = box["x"] + d.x1, box["y"] + d.y1
-            if not click_point_is_on_hcaptcha(page, sx, sy):
-                _log(f"skip drag {d.label} — source not over hCaptcha iframe")
-                continue
             _log(f"frame drag {d.label} ({d.x1},{d.y1})->({d.x2},{d.y2})")
             page.mouse.move(sx, sy)
             page.wait_for_timeout(200)
@@ -1722,8 +1765,12 @@ def solve_visible_captcha(
                 return False
             page.wait_for_timeout(1500)
             continue
-        apply_clicks(page, plan, shot)
+        applied_n = apply_clicks(page, plan, shot)
         page.wait_for_timeout(800)
+        if applied_n <= 0:
+            _log("no clicks/drags applied — skipping Verify to avoid burning attempt")
+            page.wait_for_timeout(800)
+            continue
         # Letter-grid + drag challenges need an explicit Next/Verify inside the widget
         # Only auto-advance when we actually performed actions
         needs_verify = bool(plan.drags) or (
