@@ -63,16 +63,9 @@ def _log(msg: str) -> None:
 def prompt_is_drag(text: str) -> bool:
     """True for drag/move challenges where YesCaptcha box-drags tend to work."""
     lower = (text or "").lower()
-    return any(
-        k in lower
-        for k in (
-            "please drag",
-            "drag the",
-            "drag ",
-            "move the",
-            "+ move",
-        )
-    )
+    if re.search(r"\bdrag\b", lower):
+        return True
+    return any(k in lower for k in ("move the", "+ move"))
 
 
 def prompt_is_click_grid(text: str) -> bool:
