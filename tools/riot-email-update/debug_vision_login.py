@@ -256,6 +256,7 @@ def main() -> int:
                 needs_mfa = (
                     inbox
                     and not page_logged_in(page)
+                    and "authenticate.riotgames.com" in (page.url or "")
                     and (
                         page_looks_mfa(page)
                         or page.locator(

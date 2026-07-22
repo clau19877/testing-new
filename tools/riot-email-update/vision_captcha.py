@@ -1128,12 +1128,12 @@ def annotate_plan(screenshot: Path, plan: VisionPlan, tag: str = "annotated") ->
 
 def apply_clicks(page, plan: VisionPlan, screenshot: Path) -> int:
     """
-    Map screenshot-local coords to page coords using the challenge iframe box,
-    then click / drag with mouse.
+    Map screenshot-local coords (relative to the challenge iframe content)
+    onto the *current* on-screen iframe box, then click / drag.
 
-    IMPORTANT: use the clip box captured *with* the screenshot. During long
-    2Captcha waits hCaptcha often parks the iframe at y=-9999; re-querying the
-    live box then mis-aims every click.
+    Do NOT reuse a stale absolute page offset from screenshot time — hCaptcha
+    parks the iframe at y=-9999 during 2Captcha waits, and our reposition
+    helper moves it; stale offsets then hit Riot's Facebook/Apple buttons.
     """
     actions = len(plan.clicks) + len(plan.drags or [])
     if actions == 0:
@@ -1143,12 +1143,11 @@ def apply_clicks(page, plan: VisionPlan, screenshot: Path) -> int:
     ensure_challenge_iframe_on_screen(page)
 
     offset_x, offset_y = 0.0, 0.0
+    use_frame_local = False
     clipped = False
     saved = _load_clip(screenshot)
-    if saved and saved.get("width", 0) > 50 and saved.get("y", -1) >= 0:
-        offset_x, offset_y = float(saved["x"]), float(saved["y"])
+    if saved and saved.get("width", 0) > 50:
         clipped = True
-        _log(f"using saved screenshot clip offset ({offset_x:.0f},{offset_y:.0f})")
     else:
         try:
             from PIL import Image as _PILImage
@@ -1158,22 +1157,29 @@ def apply_clicks(page, plan: VisionPlan, screenshot: Path) -> int:
         except Exception:
             clipped = True
 
-        if clipped:
-            loc = page.locator('iframe[src*="hcaptcha.com"]').last
-            try:
-                if loc.count() > 0:
-                    box = loc.bounding_box(timeout=3000)
-                    if box and box["width"] > 50 and box["y"] >= 0 and box["x"] >= -20:
-                        offset_x, offset_y = box["x"], box["y"]
-                        _log(f"iframe offset ({offset_x:.0f},{offset_y:.0f})")
-                    else:
-                        _log(f"iframe box unusable: {box} — trying frame-local clicks")
-                        return _apply_clicks_in_frame(page, plan)
-            except Exception as exc:
-                _log(f"no iframe offset: {exc}")
-                return _apply_clicks_in_frame(page, plan)
-        else:
-            _log("full-page screenshot — clicks are page coords")
+    if clipped:
+        loc = page.locator('iframe[src*="hcaptcha.com"]').last
+        try:
+            if loc.count() > 0:
+                box = loc.bounding_box(timeout=3000)
+                if box and box["width"] > 50 and box["y"] >= 0 and box["x"] >= -20:
+                    offset_x, offset_y = float(box["x"]), float(box["y"])
+                    _log(
+                        f"live iframe offset ({offset_x:.0f},{offset_y:.0f}) "
+                        f"(saved was "
+                        f"{(saved or {}).get('x')},{(saved or {}).get('y')})"
+                    )
+                else:
+                    _log(f"iframe box unusable: {box} — frame-local clicks")
+                    use_frame_local = True
+        except Exception as exc:
+            _log(f"no live iframe offset: {exc} — frame-local clicks")
+            use_frame_local = True
+    else:
+        _log("full-page screenshot — clicks are page coords")
+
+    if use_frame_local:
+        return _apply_clicks_in_frame(page, plan)
 
     applied = 0
     for c in plan.clicks:
@@ -1201,7 +1207,6 @@ def apply_clicks(page, plan: VisionPlan, screenshot: Path) -> int:
         page.wait_for_timeout(200)
         page.mouse.down()
         page.wait_for_timeout(450)
-        # stepped move looks more human; hold slightly past dest
         steps = 28
         for i in range(1, steps + 1):
             page.mouse.move(
@@ -1363,7 +1368,17 @@ def solve_visible_captcha(
                 return True
             # If we landed on a social OAuth page, that was a misclick — fail
             u = (page.url or "").lower()
-            if "facebook.com" in u or "accounts.google" in u or "apple.com" in u:
+            if any(
+                h in u
+                for h in (
+                    "facebook.com",
+                    "accounts.google",
+                    "apple.com",
+                    "live.com",
+                    "xbox.com",
+                    "playstation.com",
+                )
+            ):
                 _log(f"misclick navigated to social login ({u[:80]}) — fail")
                 return False
             _log("no captcha visible (still on login form) — treating as solved")
