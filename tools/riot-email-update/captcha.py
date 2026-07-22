@@ -314,6 +314,114 @@ def inject_hcaptcha_token(page, token: str) -> None:
     )
 
 
+# JS installed before page scripts run. Wraps window.hcaptcha as soon as it
+# appears so we can (a) capture the rqdata Riot passes into render(), and
+# (b) resolve Riot's execute()/callback with an externally-minted token.
+_HCAPTCHA_HOOK_JS = r"""
+(() => {
+  if (window.__hcHookInstalled) return;
+  window.__hcHookInstalled = true;
+  window.__hcCallbacks = {};
+  window.__hcRender = null;        // captured render config (sitekey/rqdata/callback)
+  window.__riotInjectToken = null; // set from Python before execute()
+  window.__hcExecuteCalls = 0;
+
+  const wrap = () => {
+    try {
+      if (!window.hcaptcha || window.hcaptcha.__wrapped) return;
+      const hc = window.hcaptcha;
+      hc.__wrapped = true;
+
+      const origRender = hc.render ? hc.render.bind(hc) : null;
+      hc.render = function (container, opts) {
+        try {
+          opts = opts || {};
+          window.__hcRender = {
+            sitekey: opts.sitekey || opts.siteKey || null,
+            rqdata: opts.rqdata || (opts.enterprise && opts.enterprise.rqdata) || null,
+            size: opts.size || null,
+            hasCallback: !!opts.callback,
+          };
+        } catch (e) {}
+        let id;
+        try { id = origRender ? origRender(container, opts) : String(Math.random()); }
+        catch (e) { id = String(Math.random()); }
+        try { if (opts && opts.callback) window.__hcCallbacks[String(id)] = opts.callback; } catch (e) {}
+        return id;
+      };
+
+      const origExecute = hc.execute ? hc.execute.bind(hc) : null;
+      hc.execute = function (id, opts) {
+        window.__hcExecuteCalls++;
+        const tok = window.__riotInjectToken;
+        if (tok) {
+          // Fire the registered callback (invisible flow) and resolve the promise.
+          try {
+            const cb = window.__hcCallbacks[String(id)] ||
+                       Object.values(window.__hcCallbacks)[0];
+            if (typeof cb === 'function') { try { cb(tok); } catch (e) {} }
+          } catch (e) {}
+          try {
+            const el = document.querySelector('textarea[name="h-captcha-response"], textarea[name="g-recaptcha-response"]');
+            if (el) { el.value = tok; el.dispatchEvent(new Event('input', {bubbles:true})); }
+          } catch (e) {}
+          if (opts && (opts.async === true)) {
+            return Promise.resolve({ response: tok, key: (id || '') });
+          }
+          return tok;
+        }
+        return origExecute ? origExecute(id, opts) : undefined;
+      };
+
+      const origGet = hc.getResponse ? hc.getResponse.bind(hc) : null;
+      hc.getResponse = function (id) {
+        if (window.__riotInjectToken) return window.__riotInjectToken;
+        return origGet ? origGet(id) : '';
+      };
+    } catch (e) {}
+  };
+
+  wrap();
+  const iv = setInterval(wrap, 40);
+  setTimeout(() => clearInterval(iv), 60000);
+})();
+"""
+
+
+def install_hcaptcha_hook(page_or_context) -> None:
+    """
+    Install the hcaptcha.execute/render hook via add_init_script so it runs
+    before Riot's page scripts. Accepts a Playwright Page or BrowserContext.
+    """
+    try:
+        page_or_context.add_init_script(_HCAPTCHA_HOOK_JS)
+    except Exception as exc:
+        print(f"  install_hcaptcha_hook failed: {exc}", flush=True)
+
+
+def read_hook_render_config(page) -> dict | None:
+    """Return the captured hcaptcha.render() config (sitekey/rqdata/size)."""
+    try:
+        return page.evaluate("() => window.__hcRender || null")
+    except Exception:
+        return None
+
+
+def set_inject_token(page, token: str) -> None:
+    """Arm the hook so the next hcaptcha.execute() resolves with this token."""
+    try:
+        page.evaluate("(t) => { window.__riotInjectToken = t; }", token)
+    except Exception as exc:
+        print(f"  set_inject_token failed: {exc}", flush=True)
+
+
+def hook_execute_count(page) -> int:
+    try:
+        return int(page.evaluate("() => window.__hcExecuteCalls || 0"))
+    except Exception:
+        return 0
+
+
 def install_rqdata_network_capture(page) -> list[dict]:
     """
     Capture sitekey/rqdata from Riot authenticate API / hCaptcha network traffic.
