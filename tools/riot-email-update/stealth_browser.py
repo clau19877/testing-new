@@ -68,11 +68,11 @@ def launch_stealth_browser(
         }
         # Match fingerprint geo to residential proxy egress when possible
         if proxy_dict:
-            kw["proxy"] = proxy_dict
             kw["geoip"] = True
+            kw["proxy"] = proxy_dict
         print(
             f"[stealth] engine=camoufox headed={headed} "
-            f"proxy={'yes' if proxy else 'no'} humanize=True",
+            f"proxy={'yes' if proxy else 'no'} humanize=True geoip={bool(proxy_dict)}",
             flush=True,
         )
         # Camoufox manages its own fingerprint; avoid forcing Chrome UA on Firefox

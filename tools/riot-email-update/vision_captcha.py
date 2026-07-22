@@ -1786,6 +1786,36 @@ def solve_visible_captcha(
             _log("no captcha visible (still on login form) — treating as solved")
             return True
         _log(f"=== vision round {round_i}/{max_rounds} ===")
+        # Multibot Canvas/Drag (when key present) — before YesCaptcha
+        mb_key = (
+            os.getenv("MULTIBOT_API_KEY") or os.getenv("MULTIBOT_KEY") or ""
+        ).strip()
+        if mb_key and backend in ("hybrid", "auto", "multibot"):
+            try:
+                from multibot_click import try_solve_with_multibot
+
+                mb = try_solve_with_multibot(page)
+            except Exception as exc:
+                _log(f"Multibot path error: {exc}")
+                mb = None
+            if mb is True:
+                page.wait_for_timeout(1500)
+                if page_has_riot_oops(page) or page_has_invalid_captcha(page):
+                    _log("Oops/invalid after Multibot — fail")
+                    return False
+                if page_looks_auth_progress(page) or not captcha_visible(page):
+                    _log("Multibot cleared captcha")
+                    return True
+                prev_instruction = "multibot"
+                continue
+            if mb is False:
+                prev_instruction = "multibot"
+                if page_has_riot_oops(page) or page_has_invalid_captcha(page):
+                    return False
+                if round_i < 2:
+                    _log("Multibot incomplete — retry")
+                    continue
+                _log("Multibot incomplete — falling through")
         # YesCaptcha DEMO / canvas path:
         #   - classic 9× .task-image grids: always OK
         #   - Riot canvas drag: YesCaptcha first (strong box-drag answers)
