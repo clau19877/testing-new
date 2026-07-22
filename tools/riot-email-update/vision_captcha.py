@@ -966,9 +966,15 @@ def plan_for_screenshot(
         elif use_yes and is_drag:
             _log("remote order: YesCaptcha first (drag challenge)")
 
-        has_multibot = bool(
-            (os.getenv("MULTIBOT_API_KEY") or os.getenv("MULTIBOT_KEY") or "").strip()
-        ) and backend in ("hybrid", "auto", "multibot")
+        # Multibot proved ineffective on Riot's adversarial canvas grids (click
+        # tasks queue forever; token method returns WRONG_RESULT). Off by
+        # default so it doesn't stall the working path; opt in with
+        # MULTIBOT_ENABLE=1 to experiment.
+        has_multibot = (
+            bool((os.getenv("MULTIBOT_API_KEY") or os.getenv("MULTIBOT_KEY") or "").strip())
+            and os.getenv("MULTIBOT_ENABLE", "0") in ("1", "true", "True")
+            and backend in ("hybrid", "auto", "multibot")
+        )
 
         def _try_multibot() -> VisionPlan | None:
             if not has_multibot:
@@ -1830,7 +1836,8 @@ def solve_visible_captcha(
         # Direct canvas-box Multibot path is opt-in; default routes Multibot
         # through plan_for_screenshot (cleaner coordinate handling).
         mb_direct = os.getenv("MULTIBOT_CANVAS_DIRECT", "0") in ("1", "true", "True")
-        if mb_key and mb_direct and backend in ("hybrid", "auto", "multibot"):
+        mb_enable = os.getenv("MULTIBOT_ENABLE", "0") in ("1", "true", "True")
+        if mb_key and mb_direct and mb_enable and backend in ("hybrid", "auto", "multibot"):
             try:
                 from multibot_click import try_solve_with_multibot
 
