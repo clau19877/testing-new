@@ -222,11 +222,16 @@ def collect_training_sample(
     return folder
 
 
-def plan_twocaptcha_clicks(screenshot: Path, extra_comment: str | None = None):
+def plan_twocaptcha_clicks(
+    screenshot: Path,
+    extra_comment: str | None = None,
+    prompt: str | None = None,
+):
     """Return a VisionPlan built from 2Captcha coordinate workers."""
     from vision_captcha import ClickTarget, DragTarget, VisionPlan
 
-    instruction = extract_instruction(screenshot)
+    # Prefer the clean in-frame prompt when provided (avoids OCR canvas garbage).
+    instruction = (prompt or "").strip() or extract_instruction(screenshot)
     lower = instruction.lower()
     extra = (extra_comment or "").strip()
 

@@ -808,7 +808,11 @@ def plan_agent(screenshot: Path, timeout: float = 180.0) -> VisionPlan:
     raise TimeoutError("agent vision_response.json not provided in time")
 
 
-def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionPlan:
+def plan_for_screenshot(
+    screenshot: Path,
+    backend: str | None = None,
+    prompt_override: str | None = None,
+) -> VisionPlan:
     backend = (backend or os.getenv("VISION_BACKEND") or "auto").lower()
     if backend == "auto":
         # Prefer hybrid: local CV first, 2Captcha Coordinates as oracle/fallback
@@ -982,7 +986,11 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
             try:
                 from twocaptcha_click import plan_twocaptcha_clicks
 
-                return plan_twocaptcha_clicks(screenshot, extra_comment=extra or None)
+                return plan_twocaptcha_clicks(
+                    screenshot,
+                    extra_comment=extra or None,
+                    prompt=prompt_override,
+                )
             except Exception as exc:
                 _log(f"2Captcha failed ({exc})")
                 return None
@@ -1950,7 +1958,20 @@ def solve_visible_captcha(
             elif os.getenv("VISION_AGENT_FALLBACK", "1") not in ("0", "false", "False"):
                 _log("prior round did not clear challenge — using agent backend")
                 use_backend = "agent"
-        plan = plan_for_screenshot(shot, backend=use_backend)
+        # Prefer the clean in-frame prompt over OCR (OCR appends canvas garbage
+        # like "I) })" that confuses remote workers).
+        clean_prompt = None
+        try:
+            from yescaptcha_click import extract_prompt_from_frame
+
+            _fr = find_hcaptcha_frame(page)
+            if _fr is not None:
+                clean_prompt = (extract_prompt_from_frame(_fr) or "").strip() or None
+        except Exception:
+            clean_prompt = None
+        plan = plan_for_screenshot(
+            shot, backend=use_backend, prompt_override=clean_prompt
+        )
         prev_instruction = (plan.instruction or "")[:120]
         n_drags = len(plan.drags or [])
         _log(
