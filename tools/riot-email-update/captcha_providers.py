@@ -143,7 +143,8 @@ def solve_twocaptcha(
 
     print(
         f"  2Captcha: createTask data={'yes' if rqdata else 'no'} "
-        f"enterprise={bool(rqdata)} proxy={'yes' if use_proxy else 'no'} "
+        f"isEnterprise={bool(task.get('isEnterprise'))} "
+        f"proxy={'yes' if use_proxy else 'no'} "
         f"ua={user_agent[:48]}…",
         flush=True,
     )
