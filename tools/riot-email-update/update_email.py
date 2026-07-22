@@ -810,64 +810,55 @@ def main() -> int:
             new_inbox = None
 
     try:
-        from playwright.sync_api import sync_playwright
+        from stealth_browser import browser_engine, launch_stealth_browser
     except ImportError:
         print(
-            "Playwright is not installed. Run:\n"
-            "  pip install -r requirements.txt\n"
-            "  playwright install chromium",
+            "Stealth browser helper missing. Ensure tools/riot-email-update "
+            "is intact and deps installed (patchright / playwright).",
             file=sys.stderr,
         )
         return 1
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=not headed,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+    login_ok = False
+    last_status = "unknown"
+    print(
+        f"  Browser engine: {browser_engine()} "
+        f"(HUMAN_MOUSE={os.getenv('HUMAN_MOUSE', '1')})",
+        flush=True,
+    )
+    for attempt in range(max_proxy_attempts):
+        idx = (proxy_index + attempt) % max(n_proxies, 1) if n_proxies else proxy_index + attempt
+        session_proxy = (
+            pick_proxy(None, proxy_list_path, index=idx)
+            if n_proxies
+            else browser_proxy
         )
+        # Prefer rotating list over a single BROWSER_PROXY when retrying
+        if attempt > 0 and n_proxies:
+            session_proxy = pick_proxy(None, proxy_list_path, index=idx)
+        captcha_proxy_attempt = session_proxy or captcha_proxy
 
-        login_ok = False
-        last_status = "unknown"
-        for attempt in range(max_proxy_attempts):
-            idx = (proxy_index + attempt) % max(n_proxies, 1) if n_proxies else proxy_index + attempt
-            session_proxy = (
-                pick_proxy(None, proxy_list_path, index=idx)
-                if n_proxies
-                else browser_proxy
+        if session_proxy:
+            print(
+                f"\n=== Session attempt {attempt + 1}/{max_proxy_attempts} "
+                f"proxy_index={idx} "
+                f"server={to_playwright(session_proxy)['server']} ==="
             )
-            # Prefer rotating list over a single BROWSER_PROXY when retrying
-            if attempt > 0 and n_proxies:
-                session_proxy = pick_proxy(None, proxy_list_path, index=idx)
-            captcha_proxy_attempt = session_proxy or captcha_proxy
+        else:
+            print(
+                f"\n=== Session attempt {attempt + 1}/{max_proxy_attempts} "
+                f"(no proxy) ==="
+            )
 
-            context_kwargs: dict = {
-                "viewport": {"width": 1280, "height": 900},
-                "locale": "en-US",
-                "user_agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-                ),
-            }
-            if session_proxy:
-                context_kwargs["proxy"] = to_playwright(session_proxy)
-                print(
-                    f"\n=== Session attempt {attempt + 1}/{max_proxy_attempts} "
-                    f"proxy_index={idx} "
-                    f"server={context_kwargs['proxy']['server']} ==="
-                )
-            else:
-                print(
-                    f"\n=== Session attempt {attempt + 1}/{max_proxy_attempts} "
-                    f"(no proxy) ==="
-                )
+        try:
+            with launch_stealth_browser(
+                headed=headed, proxy=session_proxy
+            ) as (_p, _browser, context):
+                page = context.new_page()
+                page.set_default_timeout(args.timeout_ms)
+                # Capture fresh enterprise rqdata from Riot API responses for token path
+                install_rqdata_network_capture(page)
 
-            context = browser.new_context(**context_kwargs)
-            page = context.new_page()
-            page.set_default_timeout(args.timeout_ms)
-            # Capture fresh enterprise rqdata from Riot API responses for token path
-            install_rqdata_network_capture(page)
-
-            try:
                 last_status = run_login(
                     page,
                     username,
@@ -890,41 +881,32 @@ def main() -> int:
                         new_inbox=new_inbox,
                         imap_timeout=args.imap_timeout,
                     )
-                    break
-                if last_status in ("oops", "captcha_fail"):
+                elif last_status in ("oops", "captcha_fail"):
                     print(
                         "  Captcha/session soft-fail — rotating proxy + fresh browser context"
                     )
-                    context.close()
-                    continue
-                # timeout / unknown — still try rotate once more
-                print(f"  Login incomplete ({last_status}) — rotating proxy")
-                context.close()
-                continue
-            except KeyboardInterrupt:
-                print("\nCancelled.")
-                context.close()
-                browser.close()
-                return 130
-            except Exception as exc:
-                print(f"\nError: {exc}", file=sys.stderr)
-                pause("Inspect the browser window if it is still open, then press Enter to exit.")
-                try:
-                    context.close()
-                except Exception:
-                    pass
-                break
+                else:
+                    print(f"  Login incomplete ({last_status}) — rotating proxy")
+        except KeyboardInterrupt:
+            print("\nCancelled.")
+            return 130
+        except Exception as exc:
+            print(f"\nError: {exc}", file=sys.stderr)
+            pause("Inspect the browser window if it is still open, then press Enter to exit.")
+            last_status = "error"
 
-        if not login_ok:
-            print(
-                f"\nLogin did not succeed after {max_proxy_attempts} proxy attempt(s) "
-                f"(last={last_status}).",
-                file=sys.stderr,
-            )
-            browser.close()
-            return 1
+        if login_ok:
+            break
+        # fall through to next proxy attempt
 
-        browser.close()
+    if not login_ok:
+        print(
+            f"\nLogin did not succeed after {max_proxy_attempts} proxy attempt(s) "
+            f"(last={last_status}).",
+            file=sys.stderr,
+        )
+        return 1
+
     return 0
 
 

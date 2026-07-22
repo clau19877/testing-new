@@ -1489,32 +1489,44 @@ def apply_clicks(page, plan: VisionPlan, screenshot: Path) -> int:
         return _apply_clicks_in_frame(page, plan)
 
     _log("full-page screenshot — clicks are page coords")
+    try:
+        from human_mouse import click_human, drag_human, human_mouse_enabled
+
+        use_human = human_mouse_enabled()
+    except Exception:
+        use_human = False
     applied = 0
     for c in plan.clicks:
         if c.y < 0 or c.x < 0:
             continue
         _log(f"click {c.label} page=({c.x},{c.y})")
-        page.mouse.click(c.x, c.y)
+        if use_human:
+            click_human(page, float(c.x), float(c.y))
+        else:
+            page.mouse.click(c.x, c.y)
         applied += 1
         page.wait_for_timeout(350)
     for d in plan.drags or []:
         if min(d.x1, d.y1, d.x2, d.y2) < 0:
             continue
         _log(f"drag {d.label} ({d.x1},{d.y1})->({d.x2},{d.y2})")
-        page.mouse.move(d.x1, d.y1)
-        page.wait_for_timeout(200)
-        page.mouse.down()
-        page.wait_for_timeout(450)
-        steps = 28
-        for i in range(1, steps + 1):
-            page.mouse.move(
-                d.x1 + (d.x2 - d.x1) * i / steps,
-                d.y1 + (d.y2 - d.y1) * i / steps,
-                steps=1,
-            )
-            page.wait_for_timeout(30)
-        page.wait_for_timeout(350)
-        page.mouse.up()
+        if use_human:
+            drag_human(page, float(d.x1), float(d.y1), float(d.x2), float(d.y2))
+        else:
+            page.mouse.move(d.x1, d.y1)
+            page.wait_for_timeout(200)
+            page.mouse.down()
+            page.wait_for_timeout(450)
+            steps = 28
+            for i in range(1, steps + 1):
+                page.mouse.move(
+                    d.x1 + (d.x2 - d.x1) * i / steps,
+                    d.y1 + (d.y2 - d.y1) * i / steps,
+                    steps=1,
+                )
+                page.wait_for_timeout(30)
+            page.wait_for_timeout(350)
+            page.mouse.up()
         applied += 1
         page.wait_for_timeout(1000)
     return applied
@@ -1554,6 +1566,14 @@ def _apply_clicks_in_frame(page, plan: VisionPlan) -> int:
     applied = 0
     use_iframe_click = iframe is not None
     try:
+        from human_mouse import click_human, drag_human, human_mouse_enabled
+
+        use_human = human_mouse_enabled()
+    except Exception:
+        use_human = False
+    if use_human:
+        _log("human mouse trajectories enabled (Multibot-style curves)")
+    try:
         for c in plan.clicks:
             if c.x < 0 or c.y < 0 or c.x > box["width"] + 5 or c.y > box["height"] + 5:
                 _log(f"skip out-of-frame click {c.label} ({c.x},{c.y})")
@@ -1567,7 +1587,13 @@ def _apply_clicks_in_frame(page, plan: VisionPlan) -> int:
                     "elementFromPoint miss; still clicking via iframe position"
                 )
             clicked = False
-            if use_iframe_click:
+            if use_human:
+                try:
+                    click_human(page, px, py)
+                    clicked = True
+                except Exception as exc:
+                    _log(f"human click failed ({exc}); falling back")
+            if not clicked and use_iframe_click and not use_human:
                 try:
                     iframe.click(
                         position={"x": float(c.x), "y": float(c.y)},
@@ -1592,20 +1618,39 @@ def _apply_clicks_in_frame(page, plan: VisionPlan) -> int:
                 _log(f"skip out-of-frame drag {d.label}")
                 continue
             sx, sy = box["x"] + d.x1, box["y"] + d.y1
+            ex, ey = box["x"] + d.x2, box["y"] + d.y2
             _log(f"frame drag {d.label} ({d.x1},{d.y1})->({d.x2},{d.y2})")
-            page.mouse.move(sx, sy)
-            page.wait_for_timeout(200)
-            page.mouse.down()
-            page.wait_for_timeout(300)
-            steps = 24
-            for i in range(1, steps + 1):
-                page.mouse.move(
-                    box["x"] + d.x1 + (d.x2 - d.x1) * i / steps,
-                    box["y"] + d.y1 + (d.y2 - d.y1) * i / steps,
-                )
-                page.wait_for_timeout(25)
-            page.wait_for_timeout(200)
-            page.mouse.up()
+            if use_human:
+                try:
+                    drag_human(page, sx, sy, ex, ey)
+                except Exception as exc:
+                    _log(f"human drag failed ({exc}); linear fallback")
+                    page.mouse.move(sx, sy)
+                    page.wait_for_timeout(200)
+                    page.mouse.down()
+                    page.wait_for_timeout(300)
+                    steps = 24
+                    for i in range(1, steps + 1):
+                        page.mouse.move(
+                            sx + (ex - sx) * i / steps,
+                            sy + (ey - sy) * i / steps,
+                        )
+                        page.wait_for_timeout(25)
+                    page.mouse.up()
+            else:
+                page.mouse.move(sx, sy)
+                page.wait_for_timeout(200)
+                page.mouse.down()
+                page.wait_for_timeout(300)
+                steps = 24
+                for i in range(1, steps + 1):
+                    page.mouse.move(
+                        box["x"] + d.x1 + (d.x2 - d.x1) * i / steps,
+                        box["y"] + d.y1 + (d.y2 - d.y1) * i / steps,
+                    )
+                    page.wait_for_timeout(25)
+                page.wait_for_timeout(200)
+                page.mouse.up()
             applied += 1
             page.wait_for_timeout(800)
             if page_looks_social_oauth(page):

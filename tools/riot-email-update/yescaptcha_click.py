@@ -528,6 +528,13 @@ def _click_canvas_box(
         except Exception:
             iframe_box = None
 
+    try:
+        from human_mouse import click_human, drag_human, human_mouse_enabled
+
+        use_human = human_mouse_enabled()
+    except Exception:
+        use_human = False
+
     applied = 0
     for i, c in enumerate(clicks):
         # c is in upload/canvas bitmap space
@@ -542,13 +549,23 @@ def _click_canvas_box(
         else:
             px, py = cx, cy
         try:
-            # Prefer clicking the canvas element at CSS offset
-            frame.locator("canvas").first.click(
-                position={"x": float(local_x), "y": float(local_y)},
-                timeout=2500,
-                force=True,
-            )
-            _log(f"canvas click #{i+1} bitmap=({c['x']},{c['y']}) disp=({local_x:.0f},{local_y:.0f})")
+            if use_human:
+                click_human(page, float(px), float(py))
+                _log(
+                    f"canvas human-click #{i+1} bitmap=({c['x']},{c['y']}) "
+                    f"page=({px:.0f},{py:.0f})"
+                )
+            else:
+                # Prefer clicking the canvas element at CSS offset
+                frame.locator("canvas").first.click(
+                    position={"x": float(local_x), "y": float(local_y)},
+                    timeout=2500,
+                    force=True,
+                )
+                _log(
+                    f"canvas click #{i+1} bitmap=({c['x']},{c['y']}) "
+                    f"disp=({local_x:.0f},{local_y:.0f})"
+                )
             applied += 1
             time.sleep(0.3 + random.random() * 0.35)
         except Exception as exc:
@@ -574,18 +591,21 @@ def _click_canvas_box(
             p2 = (float(canvas_info.get("left") or 0) + x2,
                   float(canvas_info.get("top") or 0) + y2)
         _log(f"canvas drag #{i+1} ({x1:.0f},{y1:.0f})->({x2:.0f},{y2:.0f})")
-        page.mouse.move(*p1)
-        page.wait_for_timeout(150)
-        page.mouse.down()
-        page.wait_for_timeout(200)
-        steps = 24
-        for s in range(1, steps + 1):
-            page.mouse.move(
-                p1[0] + (p2[0] - p1[0]) * s / steps,
-                p1[1] + (p2[1] - p1[1]) * s / steps,
-            )
-            page.wait_for_timeout(20)
-        page.mouse.up()
+        if use_human:
+            drag_human(page, float(p1[0]), float(p1[1]), float(p2[0]), float(p2[1]))
+        else:
+            page.mouse.move(*p1)
+            page.wait_for_timeout(150)
+            page.mouse.down()
+            page.wait_for_timeout(200)
+            steps = 24
+            for s in range(1, steps + 1):
+                page.mouse.move(
+                    p1[0] + (p2[0] - p1[0]) * s / steps,
+                    p1[1] + (p2[1] - p1[1]) * s / steps,
+                )
+                page.wait_for_timeout(20)
+            page.mouse.up()
         applied += 1
         page.wait_for_timeout(600)
     return applied
