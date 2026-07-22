@@ -13,7 +13,13 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")
 os.environ.setdefault("NONINTERACTIVE", "1")
 
-from captcha import CaptchaSolverError, extract_hcaptcha_params, known_sitekey_for_url, solve_and_inject
+from captcha import (
+    CaptchaSolverError,
+    extract_hcaptcha_params,
+    install_rqdata_network_capture,
+    known_sitekey_for_url,
+    solve_and_inject,
+)
 from imap_mail import ImapConfig, ImapInbox
 from proxyutil import pick_proxy, to_playwright
 
@@ -74,7 +80,7 @@ def main() -> int:
     user = os.getenv("RIOT_USERNAME") or ""
     password = os.getenv("RIOT_PASSWORD") or ""
     new_email = os.getenv("NEW_EMAIL") or ""
-    provider = (os.getenv("CAPTCHA_PROVIDER") or "capless").lower()
+    provider = (os.getenv("CAPTCHA_PROVIDER") or "twocaptcha").lower()
     key = (
         os.getenv("CAPLESS_API_KEY")
         or os.getenv("CAPTCHA_API_KEY")
@@ -122,6 +128,7 @@ def main() -> int:
         )
         page = context.new_page()
         page.set_default_timeout(90_000)
+        install_rqdata_network_capture(page)
 
         log("GOTO account.riotgames.com")
         page.goto("https://account.riotgames.com/", wait_until="domcontentloaded")

@@ -100,11 +100,17 @@ def solve_twocaptcha(
     user_agent: str = DEFAULT_UA,
     proxy: str | None = None,
     timeout: float = 180.0,
+    require_proxy: bool = False,
+    require_rqdata: bool = False,
 ) -> str:
     """
     2Captcha — pass rqdata as task.data; userAgent is required when data is set.
     Prefer a residential proxy matching the Riot submit IP (enterprise bind).
     """
+    if require_rqdata and not rqdata:
+        raise CaptchaSolverError("2Captcha enterprise strict: rqdata required")
+    if require_proxy and not proxy:
+        raise CaptchaSolverError("2Captcha enterprise strict: proxy required")
     # Always prefer proxy task when proxy is available — enterprise checks solve IP
     use_proxy = bool(proxy)
     task: dict[str, Any] = {
@@ -116,6 +122,8 @@ def solve_twocaptcha(
     }
     if rqdata:
         task["data"] = rqdata
+        # Enterprise sitekeys: mark explicitly so workers use enterprise path
+        task["isEnterprise"] = True
     if use_proxy:
         assert proxy is not None
         url = to_http_url(proxy)
@@ -131,7 +139,8 @@ def solve_twocaptcha(
 
     print(
         f"  2Captcha: createTask data={'yes' if rqdata else 'no'} "
-        f"proxy={'yes' if use_proxy else 'no'}…",
+        f"enterprise={bool(rqdata)} proxy={'yes' if use_proxy else 'no'} "
+        f"ua={user_agent[:48]}…",
         flush=True,
     )
     create = requests.post(
@@ -160,13 +169,20 @@ def solve_nonecap(
     website_url: str,
     website_key: str,
     rqdata: str | None = None,
+    user_agent: str = DEFAULT_UA,
     proxy: str | None = None,
     timeout: float = 90.0,
+    require_proxy: bool = False,
+    require_rqdata: bool = False,
 ) -> str:
     """
     NoneCap — dedicated hCaptcha enterprise solver.
     POST /v1/solves?wait=N with type=hcaptcha_enterprise + rqdata.
     """
+    if require_rqdata and not rqdata:
+        raise CaptchaSolverError("NoneCap enterprise strict: rqdata required")
+    if require_proxy and not proxy:
+        raise CaptchaSolverError("NoneCap enterprise strict: proxy required")
     payload: dict[str, Any] = {
         "type": "hcaptcha_enterprise" if rqdata else "hcaptcha",
         "sitekey": website_key,
@@ -176,10 +192,18 @@ def solve_nonecap(
         payload["rqdata"] = rqdata
     if proxy:
         payload["proxy"] = to_http_url(proxy)
+    # Best-effort UA bind (ignored by API if unsupported)
+    if user_agent:
+        payload["userAgent"] = user_agent
+        payload["user_agent"] = user_agent
 
     wait = max(10, min(int(timeout), 90))
     url = f"{NONECAP_SOLVE}?wait={wait}"
-    print(f"  NoneCap: {payload['type']} wait={wait}s…", flush=True)
+    print(
+        f"  NoneCap: {payload['type']} wait={wait}s "
+        f"proxy={'yes' if proxy else 'no'} ua={user_agent[:48]}…",
+        flush=True,
+    )
     resp = requests.post(
         url,
         json=payload,
@@ -215,9 +239,15 @@ def solve_with_provider(
     user_agent: str = DEFAULT_UA,
     proxy: str | None = None,
     timeout: float = 180.0,
+    require_proxy: bool = False,
+    require_rqdata: bool = False,
 ) -> str:
     """Dispatch to a named provider."""
     p = (provider or "").strip().lower()
+    if require_rqdata and not (rqdata or "").strip():
+        raise CaptchaSolverError(f"{p or provider}: enterprise strict requires rqdata")
+    if require_proxy and not proxy:
+        raise CaptchaSolverError(f"{p or provider}: enterprise strict requires proxy")
     if p in ("capmonster", "capmonstercloud"):
         return solve_capmonster(
             api_key,
@@ -237,6 +267,8 @@ def solve_with_provider(
             user_agent=user_agent,
             proxy=proxy,
             timeout=timeout,
+            require_proxy=require_proxy,
+            require_rqdata=require_rqdata,
         )
     if p == "nonecap":
         return solve_nonecap(
@@ -244,8 +276,11 @@ def solve_with_provider(
             website_url=website_url,
             website_key=website_key,
             rqdata=rqdata,
+            user_agent=user_agent,
             proxy=proxy,
             timeout=min(timeout, 90),
+            require_proxy=require_proxy,
+            require_rqdata=require_rqdata,
         )
     if p == "capless":
         from captcha import solve_capless
@@ -273,3 +308,33 @@ def solve_with_provider(
             timeout=timeout,
         )
     raise CaptchaSolverError(f"Unknown captcha provider: {provider}")
+
+
+def proxy_egress_ip(proxy: str, *, timeout: float = 30.0) -> str | None:
+    """Return public IP seen through proxy (for solve/submit bind checks)."""
+    url = to_http_url(proxy)
+    for endpoint in (
+        "https://api.ipify.org?format=json",
+        "https://httpbin.org/ip",
+    ):
+        try:
+            r = requests.get(
+                endpoint,
+                proxies={"http": url, "https": url},
+                timeout=timeout,
+            )
+            if not r.ok:
+                continue
+            try:
+                data = r.json()
+            except Exception:
+                text = (r.text or "").strip()
+                return text or None
+            return (
+                data.get("ip")
+                or data.get("origin")
+                or (str(data) if data else None)
+            )
+        except Exception:
+            continue
+    return None

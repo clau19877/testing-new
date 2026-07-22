@@ -3,16 +3,22 @@ Generalized Riot RSO login via authenticate.riotgames.com API + token solver.
 
 Supports CapMonster-style customData=rqdata (common in open-source Riot auth),
 plus Capless / 2Captcha / NoneCap via captcha_providers.solve_with_provider.
+
+Strict enterprise mode (default for token probes):
+  - same User-Agent on Riot session AND solver task
+  - residential proxy required (solve IP == submit IP)
+  - fresh rqdata required (hard-fail if missing)
 """
 
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 import requests
 
-from captcha_providers import DEFAULT_UA, solve_with_provider
+from captcha_providers import DEFAULT_UA, proxy_egress_ip, solve_with_provider
 from proxyutil import to_http_url
 
 AUTH_BASE = "https://authenticate.riotgames.com"
@@ -30,14 +36,36 @@ class RiotLoginError(RuntimeError):
     pass
 
 
-def _session(proxy: str, *, riot_client: bool = True) -> requests.Session:
+def resolve_ua(ua_mode: str | None = None) -> str:
+    """
+    ua_mode:
+      chrome  — browser Chrome UA (DEFAULT_UA)
+      riot    — RiotClient UA
+      <other> — treated as a literal User-Agent string
+    """
+    mode = (ua_mode or os.getenv("RIOT_UA_MODE") or "chrome").strip()
+    lower = mode.lower()
+    if lower in ("chrome", "browser", "default"):
+        return DEFAULT_UA
+    if lower in ("riot", "riotclient", "client"):
+        return RIOT_CLIENT_UA
+    return mode
+
+
+def _session(proxy: str, *, user_agent: str | None = None, riot_client: bool | None = None) -> requests.Session:
     s = requests.Session()
     proxy_url = to_http_url(proxy)
     s.proxies.update({"http": proxy_url, "https": proxy_url})
-    ua = RIOT_CLIENT_UA if riot_client else USER_AGENT
+    if user_agent is None:
+        # Back-compat: riot_client=True → RiotClient UA
+        if riot_client is None:
+            riot_client = True
+        user_agent = RIOT_CLIENT_UA if riot_client else USER_AGENT
+    else:
+        riot_client = user_agent.startswith("RiotClient/")
     s.headers.update(
         {
-            "User-Agent": ua,
+            "User-Agent": user_agent,
             "Accept": "application/json",
             "Content-Type": "application/json",
             "Cache-Control": "no-cache",
@@ -50,7 +78,6 @@ def _session(proxy: str, *, riot_client: bool = True) -> requests.Session:
             {
                 "Origin": AUTH_BASE,
                 "Referer": f"{AUTH_BASE}/",
-                "User-Agent": USER_AGENT,
             }
         )
     return s
@@ -122,13 +149,33 @@ def login_with_solver(
     proxy: str,
     page_url: str,
     website_url: str | None = None,
+    ua_mode: str | None = None,
+    require_rqdata: bool = True,
+    require_proxy: bool = True,
+    check_egress: bool = True,
 ) -> dict[str, Any]:
     """
     Perform Riot identity login using a token solver.
     Returns the final login API JSON (success / multifactor / error / …).
+
+    Strict defaults: matched UA, required rqdata+proxy, optional egress IP log.
     """
-    session = _session(proxy, riot_client=True)
-    print("  Riot API: bootstrapping login challenge…", flush=True)
+    if require_proxy and not (proxy or "").strip():
+        raise RiotLoginError("enterprise strict: proxy required for solve+submit bind")
+
+    user_agent = resolve_ua(ua_mode)
+    session = _session(proxy, user_agent=user_agent)
+    print(
+        f"  Riot API: bootstrapping login challenge (ua_mode={ua_mode or 'chrome'}, "
+        f"ua={user_agent[:56]}…)…",
+        flush=True,
+    )
+
+    egress = None
+    if check_egress and proxy:
+        egress = proxy_egress_ip(proxy)
+        print(f"  proxy egress IP={egress or 'unknown'}", flush=True)
+
     data = bootstrap_login(session, page_url)
     print(f"  Riot API bootstrap type={data.get('type')} keys={list(data.keys())}", flush=True)
 
@@ -153,10 +200,16 @@ def login_with_solver(
 
     if not sitekey:
         raise RiotLoginError(f"No hCaptcha challenge in Riot response: {json.dumps(data)[:500]}")
+    if require_rqdata and not rqdata:
+        raise RiotLoginError("enterprise strict: no rqdata in Riot captcha challenge")
 
-    print(f"  Riot captcha sitekey={sitekey} rqdata={'yes' if rqdata else 'no'}", flush=True)
+    print(
+        f"  Riot captcha sitekey={sitekey} rqdata={'yes' if rqdata else 'no'} "
+        f"len={len(rqdata or '')}",
+        flush=True,
+    )
     # Open-source Riot auth commonly uses https://auth.riotgames.com as websiteURL
-    solve_url = website_url or "https://auth.riotgames.com"
+    solve_url = website_url or os.getenv("HCAPTCHA_WEBSITE_URL") or "https://authenticate.riotgames.com/"
     if provider == "capless":
         # Capless allowlist uses authenticate.riotgames.com/*
         solve_url = f"{AUTH_BASE}/"
@@ -167,8 +220,10 @@ def login_with_solver(
         website_url=solve_url,
         website_key=sitekey,
         rqdata=rqdata,
-        user_agent=USER_AGENT,
+        user_agent=user_agent,
         proxy=proxy,
+        require_proxy=require_proxy,
+        require_rqdata=require_rqdata,
     )
     print(f"  {provider} token ok ({len(token)} chars) — submitting login…", flush=True)
 
@@ -200,6 +255,15 @@ def login_with_solver(
         for c in session.cookies
     ]
     result["_session"] = session
+    result["_meta"] = {
+        "user_agent": user_agent,
+        "website_url": solve_url,
+        "sitekey": sitekey,
+        "rqdata_len": len(rqdata or ""),
+        "egress_ip": egress,
+        "provider": provider,
+        "token_prefix": token[:12],
+    }
     return result
 
 

@@ -314,6 +314,89 @@ def inject_hcaptcha_token(page, token: str) -> None:
     )
 
 
+def install_rqdata_network_capture(page) -> list[dict]:
+    """
+    Capture sitekey/rqdata from Riot authenticate API / hCaptcha network traffic.
+    Stores the latest blob on window.__RIOT_RQDATA and returns a mutable sink list.
+    """
+    sink: list[dict] = []
+
+    def _on_response(resp) -> None:
+        try:
+            url = (resp.url or "").lower()
+            ctype = (resp.headers.get("content-type") or "").lower()
+            interesting = (
+                "/api/v1/login" in url
+                or "hcaptcha.com" in url
+                or "rqdata" in url
+                or "authenticate.riotgames.com" in url
+            )
+            if not interesting:
+                return
+            # Prefer JSON bodies; skip encrypted getcaptcha octet-stream
+            if "octet-stream" in ctype:
+                return
+            body = None
+            try:
+                body = resp.json()
+            except Exception:
+                try:
+                    text = resp.text()
+                except Exception:
+                    return
+                if not text or "rqdata" not in text.lower():
+                    return
+                import re
+
+                m = re.search(r'"rqdata"\s*:\s*"([^"]+)"', text)
+                sk = re.search(
+                    r'"key"\s*:\s*"([0-9a-f-]{36})"|'
+                    r'"sitekey"\s*:\s*"([0-9a-f-]{36})"',
+                    text,
+                    re.I,
+                )
+                if m:
+                    item = {
+                        "rqdata": m.group(1),
+                        "sitekey": (sk.group(1) or sk.group(2)) if sk else None,
+                        "url": resp.url,
+                    }
+                    sink.append(item)
+                    try:
+                        page.evaluate(
+                            "(v) => { window.__RIOT_RQDATA = v; }",
+                            item["rqdata"],
+                        )
+                    except Exception:
+                        pass
+                return
+            if not isinstance(body, dict):
+                return
+            captcha = body.get("captcha") or {}
+            hcap = (
+                captcha.get("hcaptcha")
+                or captcha.get("hcaptcha_enterprise")
+                or {}
+            )
+            rq = hcap.get("data") or hcap.get("rqdata") or body.get("rqdata")
+            sk = hcap.get("key") or hcap.get("sitekey") or body.get("sitekey")
+            if rq:
+                item = {"rqdata": rq, "sitekey": sk, "url": resp.url}
+                sink.append(item)
+                try:
+                    page.evaluate("(v) => { window.__RIOT_RQDATA = v; }", rq)
+                except Exception:
+                    pass
+        except Exception:
+            return
+
+    try:
+        page.on("response", _on_response)
+    except Exception:
+        pass
+    return sink
+
+
 def solve_and_inject(
     page,
     *,
@@ -324,11 +407,15 @@ def solve_and_inject(
     """
     Detect hCaptcha on the current page, solve, inject token.
     provider: capless | capsolver | capmonster | twocaptcha | nonecap
+
+    Enterprise-strict (default ON via ENTERPRISE_STRICT=1):
+      require rqdata + proxy; match page User-Agent to solver task.
     """
     import os
 
-    from captcha_providers import solve_with_provider
+    from captcha_providers import proxy_egress_ip, solve_with_provider
 
+    strict = os.getenv("ENTERPRISE_STRICT", "1") not in ("0", "false", "False")
     website_url = page.url
     # Capless allowlist is host/* — keep origin+path, drop huge query if needed
     if "authenticate.riotgames.com" in website_url:
@@ -340,7 +427,7 @@ def solve_and_inject(
     sitekey = params.get("sitekey") or known_sitekey_for_url(page.url)
     rqdata = params.get("rqdata")
 
-    # Try to pull fresh rqdata from recent performance entries / page globals
+    # Network capture + page globals (fresh enterprise blob)
     if not rqdata:
         try:
             rqdata = page.evaluate(
@@ -363,13 +450,32 @@ def solve_and_inject(
     print(f"  hCaptcha sitekey: {sitekey}", flush=True)
     if rqdata:
         print(f"  rqdata present ({len(rqdata)} chars)", flush=True)
+    elif strict:
+        raise CaptchaSolverError(
+            "enterprise strict: no rqdata on page — refuse token solve without "
+            "fresh challenge blob (set ENTERPRISE_STRICT=0 to override)"
+        )
     else:
         print("  No rqdata found (will try without enterprise payload)", flush=True)
 
+    if strict and not proxy:
+        raise CaptchaSolverError(
+            "enterprise strict: proxy required so solve IP matches browser IP"
+        )
+
+    if proxy:
+        egress = proxy_egress_ip(proxy)
+        print(f"  proxy egress IP={egress or 'unknown'} (must match browser)", flush=True)
+
     provider = (provider or "capless").strip().lower()
-    # CapMonster-style Riot scripts often use auth.riotgames.com as websiteURL
-    if provider in ("capmonster", "twocaptcha", "2captcha", "nonecap"):
-        website_url = os.getenv("HCAPTCHA_WEBSITE_URL") or "https://auth.riotgames.com"
+    # Strict: prefer live page URL; legacy scripts often hardcode auth.riotgames.com
+    override = os.getenv("HCAPTCHA_WEBSITE_URL")
+    if override:
+        website_url = override
+    elif not strict and provider in ("capmonster", "twocaptcha", "2captcha", "nonecap"):
+        website_url = "https://auth.riotgames.com"
+    elif "authenticate.riotgames.com" in (page.url or ""):
+        website_url = "https://authenticate.riotgames.com/"
 
     if provider == "capless" and not proxy:
         raise CaptchaSolverError(
@@ -377,6 +483,11 @@ def solve_and_inject(
             "Use a residential proxy, ideally same IP as this browser."
         )
 
+    print(
+        f"  solve bind provider={provider} websiteURL={website_url} "
+        f"ua={user_agent[:48]}…",
+        flush=True,
+    )
     token = solve_with_provider(
         provider,
         api_key,
@@ -385,6 +496,8 @@ def solve_and_inject(
         rqdata=rqdata,
         user_agent=user_agent,
         proxy=proxy,
+        require_proxy=strict,
+        require_rqdata=strict,
     )
 
     print(f"  Token received ({len(token)} chars) — injecting…", flush=True)

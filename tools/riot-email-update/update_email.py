@@ -25,7 +25,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from captcha import CaptchaSolverError, solve_and_inject
+from captcha import (
+    CaptchaSolverError,
+    install_rqdata_network_capture,
+    solve_and_inject,
+)
 from imap_mail import ImapConfig, ImapInbox
 
 ACCOUNT_URL = "https://account.riotgames.com/"
@@ -860,6 +864,8 @@ def main() -> int:
             context = browser.new_context(**context_kwargs)
             page = context.new_page()
             page.set_default_timeout(args.timeout_ms)
+            # Capture fresh enterprise rqdata from Riot API responses for token path
+            install_rqdata_network_capture(page)
 
             try:
                 last_status = run_login(
