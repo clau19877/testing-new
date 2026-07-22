@@ -1355,19 +1355,8 @@ def solve_visible_captcha(
                 _log("captcha cleared — MFA/account progress")
                 return True
             # If we landed on a social OAuth page, that was a misclick — fail
-            u = (page.url or "").lower()
-            if any(
-                h in u
-                for h in (
-                    "facebook.com",
-                    "accounts.google",
-                    "apple.com",
-                    "live.com",
-                    "xbox.com",
-                    "playstation.com",
-                )
-            ):
-                _log(f"misclick navigated to social login ({u[:80]}) — fail")
+            if page_looks_social_oauth(page):
+                _log(f"misclick navigated to social login ({(page.url or '')[:80]}) — fail")
                 return False
             _log("no captcha visible (still on login form) — treating as solved")
             return True
@@ -1476,22 +1465,7 @@ def solve_visible_captcha(
             if click_challenge_next(page):
                 page.wait_for_timeout(1500)
         page.wait_for_timeout(800)
-        # Fallback: page-level Verify/Next (rare — usually inside iframe)
-        for sel in [
-            'button:has-text("Verify")',
-            'button:has-text("Next")',
-            'div[role="button"]:has-text("Next")',
-            'div[role="button"]:has-text("Verify")',
-        ]:
-            try:
-                loc = page.locator(sel).first
-                if loc.count() and loc.is_visible():
-                    loc.click(timeout=1000)
-                    _log(f"clicked {sel}")
-                    page.wait_for_timeout(1500)
-            except Exception:
-                pass
-        page.wait_for_timeout(1000)
+        # Never click page-level Next/Verify — that hits Riot social OAuth buttons.
         shot2 = screenshot_challenge(page, tag=f"r{round_i}_after")
         _log(f"after-click shot {shot2.name}")
         # If Verify appeared after drag (Skip → Verify), click it now
@@ -1500,8 +1474,11 @@ def solve_visible_captcha(
             if click_challenge_next(page):
                 page.wait_for_timeout(2000)
         try:
-            if page_has_riot_oops(page):
-                _log("Riot error/timeout page after captcha action — fail")
+            if page_has_riot_oops(page) or page_has_invalid_captcha(page):
+                _log("Riot error/invalid captcha after action — fail")
+                return False
+            if page_looks_social_oauth(page):
+                _log(f"social OAuth misclick ({(page.url or '')[:80]}) — fail")
                 return False
         except Exception:
             pass
@@ -1509,8 +1486,11 @@ def solve_visible_captcha(
         try:
             if not captcha_visible(page):
                 page.wait_for_timeout(2000)
-                if page_has_riot_oops(page):
-                    _log("Oops after captcha cleared — fail")
+                if page_has_riot_oops(page) or page_has_invalid_captcha(page):
+                    _log("Oops/invalid after captcha cleared — fail")
+                    return False
+                if page_looks_social_oauth(page):
+                    _log(f"social OAuth after captcha ({(page.url or '')[:80]}) — fail")
                     return False
                 if page_looks_auth_progress(page):
                     _log("captcha gone — MFA/account success")
@@ -1518,15 +1498,35 @@ def solve_visible_captcha(
                 _log("captcha iframe gone but still on login — continue/finish")
                 # One more wait in case MFA mounts slowly
                 page.wait_for_timeout(2000)
+                if page_looks_social_oauth(page):
+                    return False
                 if page_looks_auth_progress(page):
                     return True
-                if page_has_riot_oops(page):
+                if page_has_riot_oops(page) or page_has_invalid_captcha(page):
                     return False
                 return True
         except Exception:
             pass
     _log("max vision rounds exhausted")
     return False
+
+
+def page_looks_social_oauth(page) -> bool:
+    u = (page.url or "").lower()
+    return any(
+        h in u
+        for h in (
+            "facebook.com",
+            "accounts.google",
+            "apple.com",
+            "live.com",
+            "login.live.com",
+            "xbox.com",
+            "playstation.com",
+            "my.account.sony.com",
+            "sonyacct",
+        )
+    )
 
 
 def page_looks_past_login(page) -> bool:
