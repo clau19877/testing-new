@@ -122,8 +122,12 @@ def solve_twocaptcha(
     }
     if rqdata:
         task["data"] = rqdata
-        # Enterprise sitekeys: mark explicitly so workers use enterprise path
-        task["isEnterprise"] = True
+        # Enterprise sitekeys: mark explicitly so workers use enterprise path.
+        # Override with TWOCAPTCHA_IS_ENTERPRISE=0 if workers stall on the flag.
+        import os as _os
+
+        if _os.getenv("TWOCAPTCHA_IS_ENTERPRISE", "1") not in ("0", "false", "False"):
+            task["isEnterprise"] = True
     if use_proxy:
         assert proxy is not None
         url = to_http_url(proxy)
