@@ -48,13 +48,14 @@ def _create_and_poll(
     task: Any,
     *,
     task_type: str,
-    timeout: float = 60.0,
-    poll: float = 1.0,
+    timeout: float = 150.0,
+    poll: float = 3.0,
 ) -> dict[str, Any]:
     key = _api_key()
     payload = {"clientKey": key, "type": task_type, "task": task}
     last_err: Exception | None = None
     task_id = None
+    create_host = None
     for url in (CREATE_URL, CREATE_URL_CLOUD):
         try:
             r = requests.post(url, json=payload, timeout=30)
@@ -64,6 +65,7 @@ def _create_and_poll(
                 continue
             task_id = body.get("taskId")
             if task_id:
+                create_host = url
                 break
             last_err = CaptchaSolverError(f"Multibot no taskId: {body}")
         except Exception as exc:
@@ -71,10 +73,17 @@ def _create_and_poll(
     if not task_id:
         raise CaptchaSolverError(f"Multibot createTask failed: {last_err}")
 
+    # Poll the matching host's result endpoint.
+    if create_host and "multibot.in" in create_host:
+        result_urls = (RESULT_URL, RESULT_URL_CLOUD)
+    else:
+        result_urls = (RESULT_URL_CLOUD, RESULT_URL)
+
     deadline = time.time() + timeout
+    logged_shape = False
     while time.time() < deadline:
         time.sleep(poll)
-        for url in (RESULT_URL, RESULT_URL_CLOUD):
+        for url in result_urls:
             try:
                 r = requests.post(
                     url,
@@ -87,11 +96,14 @@ def _create_and_poll(
             if body.get("errorId"):
                 raise CaptchaSolverError(f"Multibot result error: {body}")
             status = body.get("status")
-            if status == "ready":
+            if not logged_shape:
+                _log(f"first result shape: keys={list(body.keys())} status={status!r}")
+                logged_shape = True
+            if status in ("ready", "success", "solved", "completed"):
                 return body
-            if status == "failed":
+            if status in ("failed", "error"):
                 raise CaptchaSolverError(f"Multibot failed: {body}")
-            _log(f"status={status or 'processing'}…")
+            _log(f"status={status or 'processing'}… ({int(time.time()-(deadline-timeout))}s)")
             break
     raise CaptchaSolverError(f"Multibot timed out after {timeout:.0f}s")
 
@@ -129,7 +141,7 @@ def solve_canvas_or_drag(
     question: str,
     request_type: str,
     examples: list[str] | None = None,
-    timeout: float = 60.0,
+    timeout: float = 150.0,
 ) -> Any:
     """
     request_type: Canvas | Drag | Grid
