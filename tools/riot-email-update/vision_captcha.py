@@ -790,16 +790,23 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
         else:
             backend = "ocr"
     _log(f"planning with backend={backend} image={screenshot}")
-    if backend in ("twocaptcha", "2captcha", "2cap", "2cap_click", "hybrid"):
-        # hybrid → always try local CV first; twocaptcha → oracle only
-        # (set VISION_LOCAL_FIRST=1 to also try local before pure twocaptcha)
+    if backend in (
+        "twocaptcha",
+        "2captcha",
+        "2cap",
+        "2cap_click",
+        "hybrid",
+        "yescaptcha",
+        "yes",
+    ):
+        # hybrid → local CV first; then YesCaptcha Classification; then 2Captcha
         if backend == "hybrid":
             local_first = True
         else:
             local_first = os.getenv("VISION_LOCAL_FIRST", "0") in ("1", "true", "True")
         if local_first:
             if challenge_image_blank(screenshot) or not challenge_content_ready(screenshot):
-                _log("blank/loading challenge image — skip local CV, use 2Captcha")
+                _log("blank/loading challenge image — skip local CV, use remote solvers")
             else:
                 local = plan_ocr(screenshot)
                 # Incomplete letter OCR (e.g. 1 of 2 letters) is worse than 2cap
@@ -814,7 +821,7 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
                         incomplete = True
                 used_as_hint = False
                 if (local.clicks or (local.drags or [])) and not incomplete:
-                    # Letter-grid OCR is often wrong on rotated tiles; prefer 2cap
+                    # Letter-grid OCR is often wrong on rotated tiles; prefer remote
                     # with a CV hint unless VISION_LETTER_TRUST_LOCAL=1.
                     prefer_2cap_letters = os.getenv(
                         "VISION_LETTER_TRUST_LOCAL", "0"
@@ -828,7 +835,7 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
                         used_as_hint = True
                         _log(
                             "local letter-grid plan held as hint — "
-                            "preferring 2Captcha Coordinates"
+                            "preferring remote click solvers"
                         )
                     else:
                         _log(
@@ -837,12 +844,11 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
                         )
                         return local
                 if incomplete:
-                    _log(f"local CV incomplete ({local.notes}) — escalating to 2Captcha")
+                    _log(f"local CV incomplete ({local.notes}) — escalating to remote")
                 elif not used_as_hint:
-                    _log("local CV miss — escalating to 2Captcha Coordinates")
-        from twocaptcha_click import plan_twocaptcha_clicks
+                    _log("local CV miss — escalating to remote click solvers")
 
-        # Don't waste 2cap budget on Riot error chrome / login form screenshots
+        # Don't waste solver budget on Riot error chrome / login form screenshots
         try:
             from PIL import Image as _PILImage
             import pytesseract
@@ -870,16 +876,16 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
                 return VisionPlan(
                     instruction="invalid/error page",
                     clicks=[],
-                    backend="twocaptcha",
-                    notes="refusing 2cap on non-challenge screenshot",
+                    backend=backend,
+                    notes="refusing remote solver on non-challenge screenshot",
                 )
             if w > 700 and h < 500:
                 _log("screenshot aspect looks non-challenge — empty plan")
                 return VisionPlan(
                     instruction="non-challenge",
                     clicks=[],
-                    backend="twocaptcha",
-                    notes="refusing 2cap on odd screenshot",
+                    backend=backend,
+                    notes="refusing remote solver on odd screenshot",
                 )
         except Exception:
             pass
@@ -888,9 +894,45 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
         try:
             extra = letter_grid_solver_hint(screenshot)
             if extra:
-                _log(f"2cap letter-grid hint: {extra[:160]}")
+                _log(f"letter-grid hint: {extra[:160]}")
         except Exception as exc:
             _log(f"letter-grid hint skipped: {exc}")
+
+        # Prefer YesCaptcha Classification when keyed (drag/image/point).
+        use_yes = bool(
+            (
+                os.getenv("YESCAPTCHA_API_KEY")
+                or os.getenv("YES_CAPTCHA_API_KEY")
+                or ""
+            ).strip()
+        ) and backend in ("hybrid", "yescaptcha", "yes", "auto")
+        if backend in ("yescaptcha", "yes"):
+            use_yes = True
+        if use_yes:
+            try:
+                from yescaptcha_click import plan_yescaptcha_clicks
+
+                plan = plan_yescaptcha_clicks(screenshot, extra_comment=extra or None)
+                if plan.clicks or (plan.drags or []):
+                    return plan
+                _log(f"YesCaptcha empty plan ({plan.notes}) — trying 2Captcha")
+            except Exception as exc:
+                _log(f"YesCaptcha failed ({exc}) — falling back to 2Captcha")
+
+        if backend in ("yescaptcha", "yes") and not (
+            os.getenv("TWOCAPTCHA_API_KEY")
+            or os.getenv("TWO_CAPTCHA_API_KEY")
+            or os.getenv("2CAPTCHA_API_KEY")
+        ):
+            return VisionPlan(
+                instruction="yescaptcha miss",
+                clicks=[],
+                backend="yescaptcha",
+                notes="YesCaptcha returned no actions and no 2Captcha fallback key",
+            )
+
+        from twocaptcha_click import plan_twocaptcha_clicks
+
         return plan_twocaptcha_clicks(screenshot, extra_comment=extra or None)
     if backend == "ocr":
         plan = plan_ocr(screenshot)
@@ -1565,6 +1607,7 @@ def solve_visible_captcha(
         if captcha_visible(page):
             break
         page.wait_for_timeout(500)
+    shield_social_login_buttons(page)
     for round_i in range(1, max_rounds + 1):
         if page_has_riot_oops(page):
             _log("Riot Oops page — captcha path failed")
