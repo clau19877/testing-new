@@ -30,6 +30,7 @@ def bezier_points(
     y1: float,
     *,
     steps: int | None = None,
+    allow_overshoot: bool = True,
 ) -> list[tuple[float, float]]:
     """Cubic Bezier from (x0,y0) → (x1,y1) with randomized control points."""
     dist = math.hypot(x1 - x0, y1 - y0)
@@ -37,7 +38,6 @@ def bezier_points(
         steps = max(12, min(48, int(dist / 12) + random.randint(8, 18)))
 
     # Control points offset perpendicular to the travel vector
-    mx, my = (x0 + x1) / 2.0, (y0 + y1) / 2.0
     dx, dy = x1 - x0, y1 - y0
     # Perpendicular unit
     length = dist or 1.0
@@ -48,8 +48,8 @@ def bezier_points(
     c2x = x0 + dx * random.uniform(0.55, 0.85) + px * random.uniform(-spread, spread)
     c2y = y0 + dy * random.uniform(0.55, 0.85) + py * random.uniform(-spread, spread)
 
-    # Occasional slight overshoot then settle
-    overshoot = random.random() < 0.35 and dist > 80
+    # Occasional slight overshoot then settle (disabled for precise drags)
+    overshoot = allow_overshoot and random.random() < 0.35 and dist > 80
     tx, ty = x1, y1
     if overshoot:
         ox = random.uniform(4, 14) * (1 if dx >= 0 else -1)
@@ -156,7 +156,14 @@ def drag_human(
     page.mouse.down()
     page.wait_for_timeout(random.uniform(60, 160))
 
-    pts = bezier_points(x1, y1, x2, y2, steps=max(20, int(math.hypot(x2 - x1, y2 - y1) / 8)))
+    pts = bezier_points(
+        x1,
+        y1,
+        x2,
+        y2,
+        steps=max(20, int(math.hypot(x2 - x1, y2 - y1) / 8)),
+        allow_overshoot=False,
+    )
     total = math.hypot(x2 - x1, y2 - y1) or 1.0
     for px, py in pts[1:]:
         page.mouse.move(px, py)

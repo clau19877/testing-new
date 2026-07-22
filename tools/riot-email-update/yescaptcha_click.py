@@ -590,7 +590,10 @@ def _click_canvas_box(
                   float(canvas_info.get("top") or 0) + y1)
             p2 = (float(canvas_info.get("left") or 0) + x2,
                   float(canvas_info.get("top") or 0) + y2)
-        _log(f"canvas drag #{i+1} ({x1:.0f},{y1:.0f})->({x2:.0f},{y2:.0f})")
+        _log(
+            f"canvas drag #{i+1} ({x1:.0f},{y1:.0f})->({x2:.0f},{y2:.0f}) "
+            f"human={use_human}"
+        )
         if use_human:
             drag_human(page, float(p1[0]), float(p1[1]), float(p2[0]), float(p2[1]))
         else:
