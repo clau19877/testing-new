@@ -1,16 +1,24 @@
 """
-YesCaptcha HCaptchaClassification hybrid for in-browser hCaptcha.
+YesCaptcha HCaptchaClassification for in-browser hCaptcha.
 
-Returns click / drag coordinates (not a token). Apply them in the same
-Playwright session + residential proxy so the widget mints the token in-session.
+Primary path (official Selenium DEMO):
+  https://yescaptcha.atlassian.net/wiki/spaces/YESCAPTCHA/pages/30113813
+  1) read .prompt-text question
+  2) download each .task-image tile → resize 100x100 → base64
+  3) createTask HCaptchaClassification with queries=[tile0..tile8]
+  4) click .task-image indices where solution.objects is true
+  5) click .button-submit / Verify; retry if checkbox not checked
 
-Docs: https://yescaptcha.atlassian.net/wiki/spaces/YESCAPTCHA/pages/909246465
+Fallback path (new styles: drag / point / number-match screenshots):
+  send one full challenge screenshot (+ anchors) and apply box coords.
 """
 
 from __future__ import annotations
 
 import base64
 import os
+import random
+import re
 import time
 from io import BytesIO
 from pathlib import Path
@@ -29,6 +37,8 @@ YESCAPTCHA_RESULT = os.getenv(
 YESCAPTCHA_BALANCE = os.getenv(
     "YESCAPTCHA_BALANCE_URL", "https://api.yescaptcha.com/getBalance"
 )
+
+_URL_IN_STYLE = re.compile(r'url\(["\']?(https?://[^"\')\s]+)["\']?\)', re.I)
 
 
 def _log(msg: str) -> None:
@@ -63,8 +73,22 @@ def get_balance() -> float | None:
         return None
 
 
+def _pil_to_jpeg_b64(img, *, quality: int = 90) -> str:
+    buf = BytesIO()
+    img.convert("RGB").save(buf, format="JPEG", quality=quality, optimize=True)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def resize_bytes_to_b64(data: bytes, size: tuple[int, int] = (100, 100)) -> str:
+    """DEMO helper: resize tile to 100x100 JPEG base64 (no data: prefix)."""
+    from PIL import Image
+
+    img = Image.open(BytesIO(data)).convert("RGB")
+    img = img.resize(size, Image.Resampling.LANCZOS)
+    return _pil_to_jpeg_b64(img, quality=90)
+
+
 def _image_to_jpeg_b64(path: Path, *, max_side: int = 900) -> tuple[str, tuple[int, int]]:
-    """Return (raw_base64_without_prefix, (orig_w, orig_h))."""
     from PIL import Image
 
     img = Image.open(path).convert("RGB")
@@ -73,37 +97,21 @@ def _image_to_jpeg_b64(path: Path, *, max_side: int = 900) -> tuple[str, tuple[i
     if max(w, h) > max_side:
         scale = max_side / max(w, h)
         img = img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
-    buf = BytesIO()
-    img.save(buf, format="JPEG", quality=85, optimize=True)
-    return base64.b64encode(buf.getvalue()).decode(), orig
-
-
-def _pil_to_jpeg_b64(img, *, quality: int = 90) -> str:
-    buf = BytesIO()
-    img.convert("RGB").save(buf, format="JPEG", quality=quality, optimize=True)
-    return base64.b64encode(buf.getvalue()).decode()
+    return _pil_to_jpeg_b64(img, quality=85), orig
 
 
 def extract_anchors(screenshot: Path) -> list[str]:
-    """
-    Crop the requirement/icon strip for challenges that need auxiliary images
-    (e.g. "find ALL objects matching the provided number").
-
-    YesCaptcha docs: anchors are required when the question can only be judged
-    from small reference images above the grid.
-    """
+    """Crop requirement/icon strip when DOM anchors are unavailable."""
     from PIL import Image
 
     img = Image.open(screenshot).convert("RGB")
     w, h = img.size
-    # Prompt strip sits under the teal banner, above the main grid.
     y0, y1 = int(h * 0.12), int(h * 0.36)
     if y1 <= y0 + 20:
         return []
     strip = img.crop((0, y0, w, y1))
     anchors: list[str] = [_pil_to_jpeg_b64(strip)]
     sw, sh = strip.size
-    # Also send individual icon zones (3 common targets).
     for cx in (0.28, 0.55, 0.82):
         x = int(sw * cx) - 36
         crop = strip.crop((max(0, x), 6, min(sw, x + 72), sh - 4))
@@ -121,23 +129,31 @@ def extract_question(screenshot: Path) -> str:
         return "Solve this hCaptcha challenge"
 
 
-def create_classification_task(
-    screenshot: Path,
+def classify_queries(
+    queries: list[str],
+    question: str,
     *,
-    question: str | None = None,
-) -> str:
+    anchors: list[str] | None = None,
+) -> dict[str, Any]:
+    """
+    Call HCaptchaClassification (DEMO createTask shape).
+
+    queries: list of base64 tile JPEGs (classic 3x3) OR one full screenshot.
+    Returns solution dict (objects / box / clicks / type).
+    """
+    if not queries:
+        raise CaptchaSolverError("YesCaptcha queries empty")
     key = _api_key()
-    q = (question or extract_question(screenshot)).strip()
-    b64, _orig = _image_to_jpeg_b64(screenshot)
-    anchors = extract_anchors(screenshot)
-    # Screenshot mode (drag / point / new styles): single JPEG in queries.
     task: dict[str, Any] = {
         "type": "HCaptchaClassification",
-        "queries": [b64],
-        "question": q,
-        "anchors": anchors,
+        "queries": queries,
+        "question": (question or "").strip() or "Please solve this captcha",
+        "anchors": anchors or [],
     }
-    _log(f"createTask question={q[:90]!r} anchors={len(anchors)}")
+    _log(
+        f"createTask question={task['question'][:90]!r} "
+        f"queries={len(queries)} anchors={len(task['anchors'])}"
+    )
     resp = requests.post(
         YESCAPTCHA_CREATE,
         json={"clientKey": key, "task": task},
@@ -146,10 +162,14 @@ def create_classification_task(
     data = resp.json()
     if data.get("errorId"):
         raise CaptchaSolverError(f"YesCaptcha createTask: {data}")
+    if (data.get("status") or "").lower() == "ready" and isinstance(
+        data.get("solution"), dict
+    ):
+        return data["solution"]
     task_id = data.get("taskId")
     if not task_id:
         raise CaptchaSolverError(f"YesCaptcha missing taskId: {data}")
-    return str(task_id)
+    return poll_result(str(task_id))
 
 
 def poll_result(task_id: str, *, timeout: float = 90.0) -> dict[str, Any]:
@@ -178,6 +198,270 @@ def poll_result(task_id: str, *, timeout: float = 90.0) -> dict[str, Any]:
     raise CaptchaSolverError(f"YesCaptcha timeout waiting for {task_id}")
 
 
+def objects_to_indices(objects: Any) -> list[int]:
+    """
+    DEMO: solution.objects is [true,false,…] matching query order.
+    Also accept index lists / int lists.
+    """
+    if not isinstance(objects, list) or not objects:
+        return []
+    if all(isinstance(x, bool) for x in objects):
+        return [i for i, x in enumerate(objects) if x]
+    # Some APIs return indices directly
+    if all(isinstance(x, int) and not isinstance(x, bool) for x in objects):
+        return [int(x) for x in objects if 0 <= int(x) < 16]
+    # Mixed / stringy
+    out: list[int] = []
+    for i, x in enumerate(objects):
+        if x is True or x == 1 or x == "1" or x == "true":
+            out.append(i)
+        elif isinstance(x, (int, float)) and not isinstance(x, bool):
+            xi = int(x)
+            if 0 <= xi < 16:
+                out.append(xi)
+    return sorted(set(out))
+
+
+# ---------------------------------------------------------------------------
+# Playwright: classic 3x3 task-grid path (Selenium DEMO port)
+# ---------------------------------------------------------------------------
+
+def frame_has_task_grid(frame) -> bool:
+    if frame is None:
+        return False
+    try:
+        n = frame.locator(".task-image").count()
+        return n >= 9
+    except Exception:
+        return False
+
+
+def extract_prompt_from_frame(frame) -> str:
+    for sel in (".prompt-text", ".prompt-padding", "[class*='prompt']"):
+        try:
+            loc = frame.locator(sel).first
+            if loc.count():
+                txt = (loc.inner_text(timeout=800) or "").strip()
+                if txt:
+                    return txt
+        except Exception:
+            continue
+    return ""
+
+
+def _download_url_to_b64(url: str, *, size: tuple[int, int] = (100, 100)) -> str | None:
+    try:
+        r = requests.get(url, timeout=30)
+        r.raise_for_status()
+        return resize_bytes_to_b64(r.content, size=size)
+    except Exception as exc:
+        _log(f"tile download failed: {exc}")
+        return None
+
+
+def extract_tile_queries_from_frame(frame) -> list[str]:
+    """
+    DEMO: each .task-image .image has background:url("https://…").
+    Download + resize to 100x100.
+    """
+    styles = frame.evaluate(
+        """() => {
+          const nodes = [...document.querySelectorAll(
+            '.task-image .image-wrapper .image, .task-image .image, .task .image'
+          )];
+          return nodes.map((el) => el.getAttribute('style') || '');
+        }"""
+    )
+    queries: list[str] = []
+    for i, style in enumerate(styles or []):
+        m = _URL_IN_STYLE.search(style or "")
+        if not m:
+            _log(f"tile#{i} missing background url")
+            continue
+        b64 = _download_url_to_b64(m.group(1))
+        if b64:
+            queries.append(b64)
+    # Fallback: screenshot each .task-image if URL scrape failed
+    if len(queries) < 9:
+        queries = []
+        tiles = frame.locator(".task-image")
+        n = min(tiles.count(), 12)
+        for i in range(n):
+            try:
+                png = tiles.nth(i).screenshot(type="png")
+                queries.append(resize_bytes_to_b64(png, size=(100, 100)))
+            except Exception as exc:
+                _log(f"tile screenshot #{i} failed: {exc}")
+    return queries
+
+
+def extract_anchor_queries_from_frame(frame) -> list[str]:
+    """Pull small example/reference images from the prompt area when present."""
+    urls = frame.evaluate(
+        """() => {
+          const sels = [
+            '.challenge-example .image',
+            '.examples .image',
+            '.prompt .image',
+            '[class*="example"] .image',
+            '.crumbs-wrapper .image',
+            '.challenge-header .image',
+          ];
+          const out = [];
+          for (const sel of sels) {
+            for (const el of document.querySelectorAll(sel)) {
+              const st = el.getAttribute('style') || '';
+              const m = /url\\(["']?(https?:\\/\\/[^"')\\s]+)["']?\\)/i.exec(st);
+              if (m) out.push(m[1]);
+              if (el.tagName === 'IMG' && el.src) out.push(el.src);
+            }
+          }
+          return [...new Set(out)];
+        }"""
+    )
+    anchors: list[str] = []
+    for url in urls or []:
+        b64 = _download_url_to_b64(url, size=(100, 100))
+        if b64:
+            anchors.append(b64)
+    return anchors
+
+
+def checkbox_is_checked(page) -> bool:
+    """DEMO get_is_successful: checkbox aria-checked=true."""
+    try:
+        for frame in page.frames:
+            url = (frame.url or "").lower()
+            if "hcaptcha" not in url:
+                continue
+            if "checkbox" not in url and "frame=checkbox" not in url:
+                continue
+            loc = frame.locator("#checkbox, #anchor #checkbox, [role='checkbox']").first
+            if not loc.count():
+                continue
+            checked = (loc.get_attribute("aria-checked") or "").lower()
+            if checked == "true":
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def click_task_indices(frame, indices: list[int]) -> int:
+    """DEMO: click .task-image nodes at recognized indices."""
+    tiles = frame.locator(".task-image")
+    n = tiles.count()
+    applied = 0
+    for idx in indices:
+        if idx < 0 or idx >= n:
+            _log(f"skip index {idx} (n={n})")
+            continue
+        try:
+            tiles.nth(idx).click(timeout=2500)
+            applied += 1
+            _log(f"clicked task-image[{idx}]")
+            time.sleep(0.25 + random.random() * 0.45)
+        except Exception as exc:
+            _log(f"click task-image[{idx}] failed: {exc}")
+    return applied
+
+
+def click_verify_in_frame(frame) -> bool:
+    for sel in (
+        'div.button-submit:has-text("Verify")',
+        'div.button-submit:has-text("Next")',
+        ".button-submit",
+    ):
+        try:
+            loc = frame.locator(sel).first
+            if not loc.count() or not loc.is_visible():
+                continue
+            txt = (loc.inner_text(timeout=400) or "").strip().lower()
+            if "skip" in txt:
+                continue
+            loc.click(timeout=2000)
+            _log(f"clicked verify via {sel!r} text={txt!r}")
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def try_solve_task_grid(page) -> bool | None:
+    """
+    Classic YesCaptcha Selenium DEMO path.
+
+    Returns:
+      True  — checkbox checked / captcha cleared
+      False — ran a round but not cleared yet (caller may retry)
+      None  — no .task-image grid; caller should use screenshot/coord path
+    """
+    from vision_captcha import find_hcaptcha_frame, ensure_challenge_iframe_on_screen
+
+    ensure_challenge_iframe_on_screen(page)
+    frame = find_hcaptcha_frame(page)
+    if not frame_has_task_grid(frame):
+        return None
+
+    question = extract_prompt_from_frame(frame)
+    queries = extract_tile_queries_from_frame(frame)
+    anchors = extract_anchor_queries_from_frame(frame)
+    _log(
+        f"task-grid question={question[:80]!r} tiles={len(queries)} "
+        f"dom_anchors={len(anchors)}"
+    )
+    if len(queries) < 9:
+        _log(f"expected 9 tiles, got {len(queries)} — abort tile path")
+        return None
+
+    sol = classify_queries(queries, question, anchors=anchors)
+    objects = sol.get("objects")
+    # Some responses use top_k indices
+    indices = objects_to_indices(objects)
+    if not indices and isinstance(sol.get("top_k"), list):
+        indices = objects_to_indices(sol["top_k"])
+    labels = sol.get("labels")
+    _log(f"objects={objects} indices={indices} labels={str(labels)[:120]}")
+
+    if not indices:
+        # Empty selection → Skip if available (DEMO: no matches)
+        try:
+            skip = frame.locator('div.button-submit:has-text("Skip")').first
+            if skip.count() and skip.is_visible():
+                skip.click(timeout=1500)
+                _log("no matches — clicked Skip")
+                page.wait_for_timeout(1500)
+                return False
+        except Exception:
+            pass
+        _log("no positive tile indices")
+        return False
+
+    applied = click_task_indices(frame, indices)
+    if applied <= 0:
+        return False
+    page.wait_for_timeout(400)
+    click_verify_in_frame(frame)
+    page.wait_for_timeout(2500)
+
+    if checkbox_is_checked(page):
+        _log("checkbox aria-checked=true — solved")
+        return True
+    # Challenge may advance to another round without clearing yet
+    if not frame_has_task_grid(find_hcaptcha_frame(page)):
+        # Grid gone — maybe cleared or switched challenge type
+        if checkbox_is_checked(page):
+            return True
+        _log("task grid gone after verify — treat as acted")
+        return False
+    _log("task grid still present — need another round")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Screenshot / coordinate fallback (new styles)
+# ---------------------------------------------------------------------------
+
 def _scale_xy(
     x: float, y: float, *, upload_size: tuple[int, int], orig_size: tuple[int, int]
 ) -> tuple[int, int]:
@@ -194,13 +478,11 @@ def _parse_box_clicks(
     upload_size: tuple[int, int],
     orig_size: tuple[int, int],
 ) -> list[dict[str, int]]:
-    """Parse flat [x,y,x,y…] or nested structures into click points."""
     clicks: list[dict[str, int]] = []
     if not box:
         return clicks
-    # Drag objects: [{start:[x,y], end:[x,y]}, ...]
     if isinstance(box, list) and box and isinstance(box[0], dict):
-        return clicks  # handled by drag parser
+        return clicks
     if isinstance(box, list):
         nums: list[float] = []
         for item in box:
@@ -251,7 +533,7 @@ def _parse_box_drags(
 
 
 def plan_yescaptcha_clicks(screenshot: Path, extra_comment: str | None = None):
-    """Return a VisionPlan from YesCaptcha HCaptchaClassification."""
+    """Screenshot-mode Classification (drag / point / new styles)."""
     from PIL import Image
 
     from vision_captcha import ClickTarget, DragTarget, VisionPlan
@@ -265,37 +547,11 @@ def plan_yescaptcha_clicks(screenshot: Path, extra_comment: str | None = None):
     upload_size = up.size
     orig_size = Image.open(screenshot).size
     anchors = extract_anchors(screenshot)
-    _log(f"anchors={len(anchors)}")
+    _log(f"screenshot-mode anchors={len(anchors)}")
 
-    key = _api_key()
-    task = {
-        "type": "HCaptchaClassification",
-        "queries": [b64],
-        "question": question,
-        "anchors": anchors,
-    }
-    _log(f"createTask question={question[:90]!r} upload={upload_size} orig={orig_size}")
-    resp = requests.post(
-        YESCAPTCHA_CREATE,
-        json={"clientKey": key, "task": task},
-        timeout=60,
-    )
-    data = resp.json()
-    # Some createTask responses are already ready (sync Classification).
-    if data.get("errorId"):
-        raise CaptchaSolverError(f"YesCaptcha createTask: {data}")
-    if (data.get("status") or "").lower() == "ready" and isinstance(
-        data.get("solution"), dict
-    ):
-        sol = data["solution"]
-    else:
-        task_id = data.get("taskId")
-        if not task_id:
-            raise CaptchaSolverError(f"YesCaptcha missing taskId: {data}")
-        sol = poll_result(str(task_id))
+    sol = classify_queries([b64], question, anchors=anchors)
     sol_type = (sol.get("type") or "").lower()
     box = sol.get("box")
-    # Newer API also returns structured clicks: [{x,y}, ...]
     if not box and isinstance(sol.get("clicks"), list):
         flat: list[Any] = []
         for item in sol["clicks"]:
@@ -320,6 +576,7 @@ def plan_yescaptcha_clicks(screenshot: Path, extra_comment: str | None = None):
             notes=f"YesCaptcha Classification drag ({len(drags)})",
         )
 
+    # Classic objects[] from a mistakenly-sent multi-tile crop is rare here
     clicks_raw = _parse_box_clicks(box, upload_size=upload_size, orig_size=orig_size)
     clicks = [
         ClickTarget(x=c["x"], y=c["y"], label=f"yes#{i+1}", times=1)

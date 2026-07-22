@@ -898,9 +898,8 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
         except Exception as exc:
             _log(f"letter-grid hint skipped: {exc}")
 
-        # Prefer YesCaptcha Classification when keyed (drag/image/point).
-        # Skip for "matching the provided number" — YesCaptcha is weak there
-        # even with anchors; 2Captcha human workers handle icon refs better.
+        # Screenshot-mode YesCaptcha (drag / point / new styles without .task-image).
+        # Classic 3x3 grids are handled earlier via try_solve_task_grid().
         use_yes = bool(
             (
                 os.getenv("YESCAPTCHA_API_KEY")
@@ -910,27 +909,6 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
         ) and backend in ("hybrid", "yescaptcha", "yes", "auto")
         if backend in ("yescaptcha", "yes"):
             use_yes = True
-        instr_probe = ""
-        try:
-            from twocaptcha_click import extract_instruction
-
-            instr_probe = (extract_instruction(screenshot) or "").lower()
-        except Exception:
-            instr_probe = ""
-        if use_yes and (
-            "matching the provided number" in instr_probe
-            or "objects matching" in instr_probe
-        ):
-            force_yes_numbers = os.getenv("YESCAPTCHA_FORCE_NUMBER_MATCH", "0") in (
-                "1",
-                "true",
-                "True",
-            )
-            if not force_yes_numbers and backend not in ("yescaptcha", "yes"):
-                _log(
-                    "number-match challenge — preferring 2Captcha over YesCaptcha"
-                )
-                use_yes = False
         if use_yes:
             try:
                 from yescaptcha_click import plan_yescaptcha_clicks
@@ -1674,6 +1652,49 @@ def solve_visible_captcha(
             _log("no captcha visible (still on login form) — treating as solved")
             return True
         _log(f"=== vision round {round_i}/{max_rounds} ===")
+        # Official YesCaptcha Selenium DEMO path: 9× .task-image tiles →
+        # HCaptchaClassification objects[] → click indices → Verify.
+        # https://yescaptcha.atlassian.net/wiki/spaces/YESCAPTCHA/pages/30113813
+        yes_key = (
+            os.getenv("YESCAPTCHA_API_KEY")
+            or os.getenv("YES_CAPTCHA_API_KEY")
+            or ""
+        ).strip()
+        if yes_key and backend in ("hybrid", "auto", "yescaptcha", "yes"):
+            try:
+                from yescaptcha_click import try_solve_task_grid
+
+                grid_result = try_solve_task_grid(page)
+            except Exception as exc:
+                _log(f"YesCaptcha task-grid path error: {exc}")
+                grid_result = None
+            if grid_result is True:
+                page.wait_for_timeout(1500)
+                if page_has_riot_oops(page) or page_has_invalid_captcha(page):
+                    _log("Oops/invalid after YesCaptcha tile solve — fail")
+                    return False
+                if page_looks_auth_progress(page) or not captcha_visible(page):
+                    _log("YesCaptcha task-grid cleared captcha")
+                    return True
+                prev_instruction = "yescaptcha-task-grid"
+                continue
+            if grid_result is False:
+                # DEMO retries verify_captcha() when checkbox not checked yet.
+                # After two incomplete tile rounds, fall through to 2Captcha/coords.
+                prev_instruction = "yescaptcha-task-grid"
+                if page_has_riot_oops(page) or page_has_invalid_captcha(page):
+                    _log("Oops/invalid after YesCaptcha tile round — fail")
+                    return False
+                if page_looks_auth_progress(page):
+                    return True
+                if round_i < 2:
+                    _log("YesCaptcha task-grid round incomplete — retry tile path")
+                    continue
+                _log(
+                    "YesCaptcha task-grid still incomplete — "
+                    "falling through to coordinate solvers"
+                )
+            # grid_result is None → no .task-image grid; use screenshot path
         # Verify may appear early while the letter grid is still unsolved — peek first
         if verify_button_visible(page):
             peek = screenshot_challenge(page, tag=f"r{round_i}_peek")
