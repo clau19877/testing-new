@@ -236,8 +236,18 @@ def frame_has_task_grid(frame) -> bool:
         return False
 
 
+def frame_has_challenge_canvas(frame) -> bool:
+    """Riot Enterprise / new-style hCaptcha draws the puzzle on <canvas>."""
+    if frame is None:
+        return False
+    try:
+        return frame.locator("canvas").count() >= 1
+    except Exception:
+        return False
+
+
 def extract_prompt_from_frame(frame) -> str:
-    for sel in (".prompt-text", ".prompt-padding", "[class*='prompt']"):
+    for sel in (".prompt-text", ".prompt-padding", "#prompt-question", "[class*='prompt']"):
         try:
             loc = frame.locator(sel).first
             if loc.count():
@@ -247,6 +257,45 @@ def extract_prompt_from_frame(frame) -> str:
         except Exception:
             continue
     return ""
+
+
+def export_challenge_canvas(frame) -> dict[str, Any] | None:
+    """
+    Export the challenge <canvas> as JPEG base64 + geometry.
+
+    YesCaptcha new-style docs: prefer canvas→jpg; scale clicks by
+    display_width / upload_width.
+    """
+    try:
+        data = frame.evaluate(
+            """() => {
+              const c = document.querySelector('canvas');
+              if (!c) return null;
+              const r = c.getBoundingClientRect();
+              let b64 = '';
+              try { b64 = c.toDataURL('image/jpeg', 0.85); } catch (e) { return {err: String(e)}; }
+              return {
+                dataUrl: b64,
+                width: c.width || 0,
+                height: c.height || 0,
+                displayWidth: r.width || 0,
+                displayHeight: r.height || 0,
+                left: r.left || 0,
+                top: r.top || 0,
+              };
+            }"""
+        )
+    except Exception as exc:
+        _log(f"canvas export failed: {exc}")
+        return None
+    if not data or not data.get("dataUrl"):
+        _log(f"canvas export empty: {data}")
+        return None
+    raw = data["dataUrl"]
+    if raw.startswith("data:"):
+        raw = raw.split(",", 1)[-1]
+    data["b64"] = raw
+    return data
 
 
 def _download_url_to_b64(url: str, *, size: tuple[int, int] = (100, 100)) -> str | None:
@@ -297,33 +346,67 @@ def extract_tile_queries_from_frame(frame) -> list[str]:
 
 def extract_anchor_queries_from_frame(frame) -> list[str]:
     """Pull small example/reference images from the prompt area when present."""
-    urls = frame.evaluate(
+    payload = frame.evaluate(
         """() => {
           const sels = [
             '.challenge-example .image',
+            '.challenge-example',
             '.examples .image',
+            '.example-wrapper .image',
             '.prompt .image',
             '[class*="example"] .image',
             '.crumbs-wrapper .image',
             '.challenge-header .image',
           ];
-          const out = [];
+          const urls = [];
+          const shots = [];
           for (const sel of sels) {
             for (const el of document.querySelectorAll(sel)) {
               const st = el.getAttribute('style') || '';
               const m = /url\\(["']?(https?:\\/\\/[^"')\\s]+)["']?\\)/i.exec(st);
-              if (m) out.push(m[1]);
-              if (el.tagName === 'IMG' && el.src) out.push(el.src);
+              if (m) urls.push(m[1]);
+              if (el.tagName === 'IMG' && el.src && !el.src.startsWith('data:')) urls.push(el.src);
             }
           }
-          return [...new Set(out)];
+          // Screenshot each visible example .image if no URL (canvas-era widgets)
+          for (const el of document.querySelectorAll('.challenge-example .image, .examples .image, .example-wrapper .image')) {
+            const r = el.getBoundingClientRect();
+            if (r.width >= 20 && r.height >= 20) {
+              shots.push({x:r.x, y:r.y, w:r.width, h:r.height});
+            }
+          }
+          return {urls: [...new Set(urls)], shots};
         }"""
     )
     anchors: list[str] = []
-    for url in urls or []:
+    for url in (payload or {}).get("urls") or []:
         b64 = _download_url_to_b64(url, size=(100, 100))
         if b64:
             anchors.append(b64)
+    if anchors:
+        return anchors
+    # Fallback: element screenshots via Playwright locators
+    for sel in (
+        ".challenge-example .image",
+        ".examples .image",
+        ".example-wrapper .image",
+        ".challenge-example",
+    ):
+        try:
+            locs = frame.locator(sel)
+            n = min(locs.count(), 6)
+            for i in range(n):
+                try:
+                    if not locs.nth(i).is_visible():
+                        continue
+                    png = locs.nth(i).screenshot(type="png")
+                    anchors.append(resize_bytes_to_b64(png, size=(100, 100)))
+                except Exception:
+                    continue
+            if anchors:
+                break
+        except Exception:
+            continue
     return anchors
 
 
@@ -387,57 +470,225 @@ def click_verify_in_frame(frame) -> bool:
     return False
 
 
+def _click_canvas_box(
+    page,
+    frame,
+    canvas_info: dict[str, Any],
+    box: Any,
+    *,
+    upload_size: tuple[int, int],
+) -> int:
+    """
+    Apply YesCaptcha box / clicks onto the challenge canvas.
+
+    Scale: display = upload_coord * displaySize / uploadSize
+    (per YesCaptcha new-style docs). Then offset by canvas getBoundingClientRect
+    in the *frame*, converted to page coords via iframe bbox.
+    """
+    from vision_captcha import find_challenge_iframe_locator
+
+    clicks = _parse_box_clicks(box, upload_size=upload_size, orig_size=upload_size)
+    # Prefer structured clicks list
+    if not clicks and isinstance(box, list) is False:
+        pass
+    drags = _parse_box_drags(box, upload_size=upload_size, orig_size=upload_size)
+
+    disp_w = float(canvas_info.get("displayWidth") or 0) or float(
+        canvas_info.get("width") or 1
+    )
+    disp_h = float(canvas_info.get("displayHeight") or 0) or float(
+        canvas_info.get("height") or 1
+    )
+    up_w, up_h = upload_size
+    # If we uploaded the raw canvas bitmap, upload_size == canvas width/height.
+    # Clicks are in that space; scale to display CSS pixels inside the frame.
+    sx = disp_w / max(up_w, 1)
+    sy = disp_h / max(up_h, 1)
+
+    iframe = find_challenge_iframe_locator(page)
+    iframe_box = None
+    if iframe is not None:
+        try:
+            iframe_box = iframe.bounding_box(timeout=2000)
+        except Exception:
+            iframe_box = None
+
+    applied = 0
+    for i, c in enumerate(clicks):
+        # c is in upload/canvas bitmap space
+        local_x = c["x"] * sx
+        local_y = c["y"] * sy
+        # canvas rect inside frame viewport
+        cx = float(canvas_info.get("left") or 0) + local_x
+        cy = float(canvas_info.get("top") or 0) + local_y
+        if iframe_box:
+            px = iframe_box["x"] + cx
+            py = iframe_box["y"] + cy
+        else:
+            px, py = cx, cy
+        try:
+            # Prefer clicking the canvas element at CSS offset
+            frame.locator("canvas").first.click(
+                position={"x": float(local_x), "y": float(local_y)},
+                timeout=2500,
+                force=True,
+            )
+            _log(f"canvas click #{i+1} bitmap=({c['x']},{c['y']}) disp=({local_x:.0f},{local_y:.0f})")
+            applied += 1
+            time.sleep(0.3 + random.random() * 0.35)
+        except Exception as exc:
+            _log(f"canvas element click failed ({exc}); page mouse @ ({px:.0f},{py:.0f})")
+            try:
+                page.mouse.click(px, py)
+                applied += 1
+                time.sleep(0.3)
+            except Exception as exc2:
+                _log(f"page mouse click failed: {exc2}")
+
+    for i, d in enumerate(drags):
+        x1, y1 = d["x1"] * sx, d["y1"] * sy
+        x2, y2 = d["x2"] * sx, d["y2"] * sy
+        if iframe_box:
+            p1 = (iframe_box["x"] + float(canvas_info.get("left") or 0) + x1,
+                  iframe_box["y"] + float(canvas_info.get("top") or 0) + y1)
+            p2 = (iframe_box["x"] + float(canvas_info.get("left") or 0) + x2,
+                  iframe_box["y"] + float(canvas_info.get("top") or 0) + y2)
+        else:
+            p1 = (float(canvas_info.get("left") or 0) + x1,
+                  float(canvas_info.get("top") or 0) + y1)
+            p2 = (float(canvas_info.get("left") or 0) + x2,
+                  float(canvas_info.get("top") or 0) + y2)
+        _log(f"canvas drag #{i+1} ({x1:.0f},{y1:.0f})->({x2:.0f},{y2:.0f})")
+        page.mouse.move(*p1)
+        page.wait_for_timeout(150)
+        page.mouse.down()
+        page.wait_for_timeout(200)
+        steps = 24
+        for s in range(1, steps + 1):
+            page.mouse.move(
+                p1[0] + (p2[0] - p1[0]) * s / steps,
+                p1[1] + (p2[1] - p1[1]) * s / steps,
+            )
+            page.wait_for_timeout(20)
+        page.mouse.up()
+        applied += 1
+        page.wait_for_timeout(600)
+    return applied
+
+
 def try_solve_task_grid(page) -> bool | None:
     """
-    Classic YesCaptcha Selenium DEMO path.
+    YesCaptcha in-browser solve.
+
+    1) Classic DEMO path: 9× .task-image → objects[] → click indices
+    2) Riot / new-style: export <canvas> (+ .examples anchors) → box coords
 
     Returns:
       True  — checkbox checked / captcha cleared
       False — ran a round but not cleared yet (caller may retry)
-      None  — no .task-image grid; caller should use screenshot/coord path
+      None  — neither task-grid nor canvas available
     """
+    from PIL import Image
+
     from vision_captcha import find_hcaptcha_frame, ensure_challenge_iframe_on_screen
 
     ensure_challenge_iframe_on_screen(page)
     frame = find_hcaptcha_frame(page)
-    if not frame_has_task_grid(frame):
+    if frame is None:
         return None
 
-    question = extract_prompt_from_frame(frame)
-    queries = extract_tile_queries_from_frame(frame)
-    anchors = extract_anchor_queries_from_frame(frame)
-    _log(
-        f"task-grid question={question[:80]!r} tiles={len(queries)} "
-        f"dom_anchors={len(anchors)}"
-    )
-    if len(queries) < 9:
-        _log(f"expected 9 tiles, got {len(queries)} — abort tile path")
-        return None
+    # --- Classic 3x3 DEMO path ---
+    if frame_has_task_grid(frame):
+        question = extract_prompt_from_frame(frame)
+        queries = extract_tile_queries_from_frame(frame)
+        anchors = extract_anchor_queries_from_frame(frame)
+        _log(
+            f"task-grid question={question[:80]!r} tiles={len(queries)} "
+            f"dom_anchors={len(anchors)}"
+        )
+        if len(queries) < 9:
+            _log(f"expected 9 tiles, got {len(queries)} — abort tile path")
+            return None
 
-    sol = classify_queries(queries, question, anchors=anchors)
-    objects = sol.get("objects")
-    # Some responses use top_k indices
-    indices = objects_to_indices(objects)
-    if not indices and isinstance(sol.get("top_k"), list):
-        indices = objects_to_indices(sol["top_k"])
-    labels = sol.get("labels")
-    _log(f"objects={objects} indices={indices} labels={str(labels)[:120]}")
+        sol = classify_queries(queries, question, anchors=anchors)
+        objects = sol.get("objects")
+        indices = objects_to_indices(objects)
+        if not indices and isinstance(sol.get("top_k"), list):
+            indices = objects_to_indices(sol["top_k"])
+        _log(f"objects={objects} indices={indices} labels={str(sol.get('labels'))[:120]}")
 
-    if not indices:
-        # Empty selection → Skip if available (DEMO: no matches)
-        try:
-            skip = frame.locator('div.button-submit:has-text("Skip")').first
-            if skip.count() and skip.is_visible():
-                skip.click(timeout=1500)
-                _log("no matches — clicked Skip")
-                page.wait_for_timeout(1500)
-                return False
-        except Exception:
-            pass
-        _log("no positive tile indices")
+        if not indices:
+            try:
+                skip = frame.locator('div.button-submit:has-text("Skip")').first
+                if skip.count() and skip.is_visible():
+                    skip.click(timeout=1500)
+                    _log("no matches — clicked Skip")
+                    page.wait_for_timeout(1500)
+                    return False
+            except Exception:
+                pass
+            _log("no positive tile indices")
+            return False
+
+        applied = click_task_indices(frame, indices)
+        if applied <= 0:
+            return False
+        page.wait_for_timeout(400)
+        click_verify_in_frame(frame)
+        page.wait_for_timeout(2500)
+        if checkbox_is_checked(page):
+            _log("checkbox aria-checked=true — solved")
+            return True
+        _log("task grid round incomplete")
         return False
 
-    applied = click_task_indices(frame, indices)
+    # --- New-style / Riot Enterprise: canvas + optional examples ---
+    if not frame_has_challenge_canvas(frame):
+        return None
+
+    # Wait briefly for canvas paint / examples
+    page.wait_for_timeout(600)
+    question = extract_prompt_from_frame(frame)
+    canvas_info = export_challenge_canvas(frame)
+    if not canvas_info:
+        return None
+    anchors = extract_anchor_queries_from_frame(frame)
+    b64 = canvas_info["b64"]
+    # Decode to know upload pixel size (may match canvas.width/height)
+    try:
+        up = Image.open(BytesIO(base64.b64decode(b64)))
+        upload_size = up.size
+    except Exception:
+        upload_size = (
+            int(canvas_info.get("width") or 0),
+            int(canvas_info.get("height") or 0),
+        )
+    _log(
+        f"canvas-mode question={question[:80]!r} "
+        f"bitmap={canvas_info.get('width')}x{canvas_info.get('height')} "
+        f"display={canvas_info.get('displayWidth'):.0f}x{canvas_info.get('displayHeight'):.0f} "
+        f"upload={upload_size} anchors={len(anchors)}"
+    )
+
+    sol = classify_queries([b64], question, anchors=anchors)
+    sol_type = (sol.get("type") or "").lower()
+    box = sol.get("box")
+    if not box and isinstance(sol.get("clicks"), list):
+        flat: list[Any] = []
+        for item in sol["clicks"]:
+            if isinstance(item, dict) and "x" in item and "y" in item:
+                flat.extend([item["x"], item["y"]])
+        box = flat
+    _log(f"canvas solution type={sol_type or 'click'} box={str(box)[:140]}")
+
+    # Rare: classifier returns objects for a reconstructed grid — ignore here
+    if not box:
+        _log("canvas-mode empty box")
+        return False
+
+    applied = _click_canvas_box(
+        page, frame, canvas_info, box, upload_size=upload_size
+    )
     if applied <= 0:
         return False
     page.wait_for_timeout(400)
@@ -447,14 +698,7 @@ def try_solve_task_grid(page) -> bool | None:
     if checkbox_is_checked(page):
         _log("checkbox aria-checked=true — solved")
         return True
-    # Challenge may advance to another round without clearing yet
-    if not frame_has_task_grid(find_hcaptcha_frame(page)):
-        # Grid gone — maybe cleared or switched challenge type
-        if checkbox_is_checked(page):
-            return True
-        _log("task grid gone after verify — treat as acted")
-        return False
-    _log("task grid still present — need another round")
+    _log("canvas-mode round incomplete")
     return False
 
 
