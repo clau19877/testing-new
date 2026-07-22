@@ -346,6 +346,50 @@ def plan_letter_grid_cv(screenshot: Path) -> VisionPlan | None:
     )
 
 
+def letter_grid_solver_hint(screenshot: Path) -> str:
+    """
+    Compact CV summary for 2Captcha workers: required letters + grid map.
+    Safe to call even when local solving is incomplete.
+    """
+    img = cv2.imread(str(screenshot))
+    if img is None:
+        return ""
+    h, w = img.shape[:2]
+    tiles = _detect_teal_tiles(img)
+    if len(tiles) < 4:
+        return ""
+    med_area = float(np.median([t["area"] for t in tiles]))
+    grid_candidates = [t for t in tiles if t["cy"] > h * 0.38 and t["area"] >= med_area * 0.85]
+    if len(grid_candidates) < 6:
+        grid_candidates = [t for t in tiles if t["cy"] > h * 0.35]
+    if not grid_candidates:
+        return ""
+    grid_top = min(t["y"] for t in grid_candidates) - 8
+    req_tiles = [
+        t
+        for t in tiles
+        if t["y"] + t["h"] < grid_top and t["cy"] > h * 0.12 and t["letter"]
+    ]
+    grid_tiles = [t for t in tiles if t["y"] >= grid_top - 5 and t["letter"]]
+    parts: list[str] = []
+    if req_tiles:
+        req_bits = []
+        for t in sorted(req_tiles, key=lambda z: z["cx"]):
+            times = _parse_req_times_near(img, t)
+            req_bits.append(f"{times}x {t['letter']}")
+        parts.append("Required: " + ", ".join(req_bits))
+    if grid_tiles:
+        # Approximate row grouping for the worker comment
+        grid_tiles = sorted(grid_tiles, key=lambda t: (round(t["cy"] / 40), t["cx"]))
+        letters = [t["letter"] for t in grid_tiles]
+        parts.append("Grid letters L→R, T→B: " + " ".join(letters))
+        parts.append(
+            "Click ONLY the required letter tiles the listed times; "
+            "ignore Skip/Verify."
+        )
+    return " | ".join(parts)
+
+
 def plan_drag_cv(screenshot: Path, instruction: str = "") -> VisionPlan | None:
     """
     Locate the draggable tile (astronaut / '+ Move') and destination icon
@@ -759,19 +803,42 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
             else:
                 local = plan_ocr(screenshot)
                 # Incomplete letter OCR (e.g. 1 of 2 letters) is worse than 2cap
-                incomplete = "not found" in (local.notes or "").lower() or (
-                    "letter" in (local.instruction or "").lower()
-                    and len(local.clicks) < 2
-                )
+                notes_l = (local.notes or "").lower()
+                instr_l = (local.instruction or "").lower()
+                incomplete = "not found" in notes_l or "miss" in notes_l
+                if ("letter" in instr_l or "click each" in instr_l) and local.clicks:
+                    # Prefer escalating when we clicked fewer times than Nx sum
+                    nx = [int(n) for n in re.findall(r"(\d)\s*[xX]", local.instruction or "")]
+                    need = sum(nx) if nx else 0
+                    if need and len(local.clicks) < need:
+                        incomplete = True
+                used_as_hint = False
                 if (local.clicks or (local.drags or [])) and not incomplete:
-                    _log(
-                        f"local CV hit backend={local.backend} "
-                        f"clicks={len(local.clicks)} drags={len(local.drags or [])}"
+                    # Letter-grid OCR is often wrong on rotated tiles; prefer 2cap
+                    # with a CV hint unless VISION_LETTER_TRUST_LOCAL=1.
+                    prefer_2cap_letters = os.getenv(
+                        "VISION_LETTER_TRUST_LOCAL", "0"
+                    ) not in ("1", "true", "True")
+                    is_letter = (
+                        "letter" in instr_l
+                        or "click each" in instr_l
+                        or "teal-tile" in notes_l
                     )
-                    return local
+                    if prefer_2cap_letters and is_letter and local.clicks:
+                        used_as_hint = True
+                        _log(
+                            "local letter-grid plan held as hint — "
+                            "preferring 2Captcha Coordinates"
+                        )
+                    else:
+                        _log(
+                            f"local CV hit backend={local.backend} "
+                            f"clicks={len(local.clicks)} drags={len(local.drags or [])}"
+                        )
+                        return local
                 if incomplete:
                     _log(f"local CV incomplete ({local.notes}) — escalating to 2Captcha")
-                else:
+                elif not used_as_hint:
                     _log("local CV miss — escalating to 2Captcha Coordinates")
         from twocaptcha_click import plan_twocaptcha_clicks
 
@@ -817,7 +884,14 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
         except Exception:
             pass
 
-        return plan_twocaptcha_clicks(screenshot)
+        extra = ""
+        try:
+            extra = letter_grid_solver_hint(screenshot)
+            if extra:
+                _log(f"2cap letter-grid hint: {extra[:160]}")
+        except Exception as exc:
+            _log(f"letter-grid hint skipped: {exc}")
+        return plan_twocaptcha_clicks(screenshot, extra_comment=extra or None)
     if backend == "ocr":
         plan = plan_ocr(screenshot)
         # Optional agent fallback when local CV/OCR cannot produce actions

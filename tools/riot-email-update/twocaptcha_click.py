@@ -222,22 +222,26 @@ def collect_training_sample(
     return folder
 
 
-def plan_twocaptcha_clicks(screenshot: Path):
+def plan_twocaptcha_clicks(screenshot: Path, extra_comment: str | None = None):
     """Return a VisionPlan built from 2Captcha coordinate workers."""
     from vision_captcha import ClickTarget, DragTarget, VisionPlan
 
     instruction = extract_instruction(screenshot)
     lower = instruction.lower()
+    extra = (extra_comment or "").strip()
 
     # Drag challenges: ask worker for two points (source then destination)
     if "drag" in lower:
+        drag_comment = (
+            f"{instruction}. "
+            "Click FIRST on the object to drag (source), "
+            "THEN on the destination target."
+        )
+        if extra:
+            drag_comment = f"{drag_comment} {extra}"
         coords = solve_coordinates(
             screenshot,
-            comment=(
-                f"{instruction}. "
-                "Click FIRST on the object to drag (source), "
-                "THEN on the destination target."
-            ),
+            comment=drag_comment,
             min_clicks=2,
             max_clicks=2,
         )
@@ -276,10 +280,14 @@ def plan_twocaptcha_clicks(screenshot: Path):
 
     if "letter" in lower or "click each" in lower:
         comment, min_clicks = letter_grid_click_hint(screenshot)
+        if extra:
+            comment = f"{comment} {extra}"
     else:
         comment = instruction or (
             "Click the required tiles/letters for this hCaptcha challenge."
         )
+        if extra:
+            comment = f"{comment} {extra}"
         min_clicks = 1
     coords = solve_coordinates(
         screenshot,
