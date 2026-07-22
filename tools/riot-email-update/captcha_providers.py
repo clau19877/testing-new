@@ -29,6 +29,7 @@ CAPMONSTER_RESULT = "https://api.capmonster.cloud/getTaskResult"
 TWOCAPTCHA_CREATE = "https://api.2captcha.com/createTask"
 TWOCAPTCHA_RESULT = "https://api.2captcha.com/getTaskResult"
 NONECAP_SOLVE = "https://api.nonecap.com/v1/solves"
+NOPECHA_TOKEN = "https://api.nopecha.com/token/"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -234,6 +235,93 @@ def solve_nonecap(
     return token
 
 
+def solve_nopecha(
+    api_key: str,
+    *,
+    website_url: str,
+    website_key: str,
+    rqdata: str | None = None,
+    user_agent: str = DEFAULT_UA,
+    proxy: str | None = None,
+    timeout: float = 180.0,
+    require_proxy: bool = False,
+    require_rqdata: bool = False,
+) -> str:
+    """
+    NopeCHA Token API — supports Enterprise via data.rqdata + matching proxy.
+    https://developers.nopecha.com/token/hcaptcha/
+    """
+    if require_rqdata and not rqdata:
+        raise CaptchaSolverError("NopeCHA enterprise strict: rqdata required")
+    if require_proxy and not proxy:
+        raise CaptchaSolverError("NopeCHA enterprise strict: proxy required")
+
+    payload: dict[str, Any] = {
+        "key": api_key,
+        "type": "hcaptcha",
+        "sitekey": website_key,
+        "url": website_url,
+        "useragent": user_agent,
+    }
+    if rqdata:
+        payload["data"] = {"rqdata": rqdata}
+    if proxy:
+        url = to_http_url(proxy)
+        without = url.split("://", 1)[1]
+        creds, hostport = without.rsplit("@", 1)
+        user, password = creds.split(":", 1)
+        host, port = hostport.rsplit(":", 1)
+        payload["proxy"] = {
+            "scheme": "http",
+            "host": host,
+            "port": str(port),
+            "username": user,
+            "password": password,
+        }
+
+    print(
+        f"  NopeCHA: token rqdata={'yes' if rqdata else 'no'} "
+        f"proxy={'yes' if proxy else 'no'}…",
+        flush=True,
+    )
+    create = requests.post(NOPECHA_TOKEN, json=payload, timeout=60)
+    try:
+        body = create.json()
+    except Exception:
+        raise CaptchaSolverError(f"NopeCHA HTTP {create.status_code}: {create.text[:300]}")
+    if body.get("error"):
+        raise CaptchaSolverError(f"NopeCHA create error: {body}")
+    job_id = body.get("data")
+    if not job_id:
+        # Some responses return the token inline
+        if isinstance(body.get("data"), str) and body["data"].startswith("P1_"):
+            return body["data"]
+        raise CaptchaSolverError(f"NopeCHA no job id: {body}")
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(2.0)
+        r = requests.get(
+            NOPECHA_TOKEN,
+            params={"key": api_key, "id": job_id},
+            timeout=60,
+        )
+        try:
+            result = r.json()
+        except Exception:
+            continue
+        if result.get("error") == 14 or result.get("message") == "Incomplete job":
+            print("  NopeCHA status=processing…", flush=True)
+            continue
+        if result.get("error"):
+            raise CaptchaSolverError(f"NopeCHA result error: {result}")
+        token = result.get("data")
+        if token and isinstance(token, str) and len(token) > 20:
+            return token
+        print(f"  NopeCHA status={result}…", flush=True)
+    raise CaptchaSolverError(f"NopeCHA timed out after {timeout:.0f}s")
+
+
 def solve_with_provider(
     provider: str,
     api_key: str,
@@ -287,6 +375,18 @@ def solve_with_provider(
             require_proxy=require_proxy,
             require_rqdata=require_rqdata,
         )
+    if p in ("nopecha", "nope"):
+        return solve_nopecha(
+            api_key,
+            website_url=website_url,
+            website_key=website_key,
+            rqdata=rqdata,
+            user_agent=user_agent,
+            proxy=proxy,
+            timeout=timeout,
+            require_proxy=require_proxy,
+            require_rqdata=require_rqdata,
+        )
     if p == "capless":
         from captcha import solve_capless
 
@@ -312,7 +412,84 @@ def solve_with_provider(
             proxy=proxy,
             timeout=timeout,
         )
+    if p in ("multibot", "multibot_token"):
+        return solve_multibot_token(
+            api_key,
+            website_url=website_url,
+            website_key=website_key,
+            rqdata=rqdata,
+            proxy=proxy,
+            timeout=timeout,
+            require_proxy=require_proxy,
+            require_rqdata=require_rqdata,
+        )
     raise CaptchaSolverError(f"Unknown captcha provider: {provider}")
+
+
+def solve_multibot_token(
+    api_key: str,
+    *,
+    website_url: str,
+    website_key: str,
+    rqdata: str | None = None,
+    proxy: str | None = None,
+    timeout: float = 180.0,
+    require_proxy: bool = False,
+    require_rqdata: bool = False,
+) -> str:
+    """Multibot classic hCaptcha token API (enterprise=1 + data=rqdata)."""
+    if require_rqdata and not rqdata:
+        raise CaptchaSolverError("Multibot enterprise strict: rqdata required")
+    if require_proxy and not proxy:
+        raise CaptchaSolverError("Multibot enterprise strict: proxy required")
+    params: dict[str, Any] = {
+        "key": api_key,
+        "method": "hcaptcha",
+        "pageurl": website_url,
+        "sitekey": website_key,
+        "enterprise": "1" if rqdata else "0",
+        "json": "1",
+    }
+    if rqdata:
+        params["data"] = rqdata
+    if proxy:
+        params["proxy"] = to_http_url(proxy)
+    print(
+        f"  Multibot token: enterprise={params['enterprise']} "
+        f"proxy={'yes' if proxy else 'no'}…",
+        flush=True,
+    )
+    files = {k: (None, str(v)) for k, v in params.items()}
+    create = requests.post("https://api.multibot.cloud/in.php", files=files, timeout=30)
+    try:
+        body = create.json()
+    except Exception:
+        raise CaptchaSolverError(f"Multibot token HTTP {create.status_code}: {create.text[:300]}")
+    if body.get("status") != 1 and not body.get("request"):
+        raise CaptchaSolverError(f"Multibot token create failed: {body}")
+    req_id = body.get("request")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(3.0)
+        r = requests.get(
+            "https://api.multibot.cloud/res.php",
+            params={"key": api_key, "action": "get", "id": req_id, "json": 1},
+            timeout=30,
+        )
+        try:
+            result = r.json()
+        except Exception:
+            continue
+        if result.get("status") == 1 and result.get("request"):
+            return str(result["request"])
+        if result.get("request") == "CAPCHA_NOT_READY" or result.get("request") == "CAPTCHA_NOT_READY":
+            print("  Multibot token status=processing…", flush=True)
+            continue
+        if result.get("status") == 0 and "NOT_READY" in str(result.get("request", "")).upper():
+            print("  Multibot token status=processing…", flush=True)
+            continue
+        raise CaptchaSolverError(f"Multibot token result: {result}")
+    raise CaptchaSolverError(f"Multibot token timed out after {timeout:.0f}s")
 
 
 def proxy_egress_ip(proxy: str, *, timeout: float = 30.0) -> str | None:

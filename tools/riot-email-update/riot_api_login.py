@@ -208,23 +208,38 @@ def login_with_solver(
         f"len={len(rqdata or '')}",
         flush=True,
     )
-    # Open-source Riot auth commonly uses https://auth.riotgames.com as websiteURL
+    # Capless allowlist requires authenticate.riotgames.com/*
     solve_url = website_url or os.getenv("HCAPTCHA_WEBSITE_URL") or "https://authenticate.riotgames.com/"
     if provider == "capless":
-        # Capless allowlist uses authenticate.riotgames.com/*
         solve_url = f"{AUTH_BASE}/"
 
-    token = solve_with_provider(
-        provider,
-        api_key,
-        website_url=solve_url,
-        website_key=sitekey,
-        rqdata=rqdata,
-        user_agent=user_agent,
-        proxy=proxy,
-        require_proxy=require_proxy,
-        require_rqdata=require_rqdata,
-    )
+    solver_ua = user_agent
+    if provider == "capless":
+        from captcha import solve_capless_full
+
+        token, returned_ua = solve_capless_full(
+            api_key,
+            website_url=solve_url,
+            website_key=sitekey,
+            proxy=proxy,
+            rqdata=rqdata,
+        )
+        if returned_ua:
+            solver_ua = returned_ua
+            session.headers["User-Agent"] = returned_ua
+            print(f"  Capless UA synced → {returned_ua[:56]}…", flush=True)
+    else:
+        token = solve_with_provider(
+            provider,
+            api_key,
+            website_url=solve_url,
+            website_key=sitekey,
+            rqdata=rqdata,
+            user_agent=user_agent,
+            proxy=proxy,
+            require_proxy=require_proxy,
+            require_rqdata=require_rqdata,
+        )
     print(f"  {provider} token ok ({len(token)} chars) — submitting login…", flush=True)
 
     payload = {
@@ -249,6 +264,30 @@ def login_with_solver(
         flush=True,
     )
 
+    # New RSO flow: success.login_token → auth.riotgames.com/api/v1/login-token
+    if result.get("type") == "success" or (result.get("success") or {}).get("login_token"):
+        login_token = (result.get("success") or {}).get("login_token")
+        if login_token:
+            print("  exchanging login_token with auth.riotgames.com…", flush=True)
+            try:
+                exch = session.post(
+                    f"{AUTH_RIOT}/api/v1/login-token",
+                    json={
+                        "authentication_type": "RiotAuth",
+                        "code_verifier": "",
+                        "login_token": login_token,
+                        "persist_login": False,
+                    },
+                    timeout=60,
+                )
+                result["_login_token_exchange"] = {
+                    "http": exch.status_code,
+                    "body": (exch.text or "")[:400],
+                }
+                print(f"  login-token exchange HTTP {exch.status_code}", flush=True)
+            except Exception as exc:
+                result["_login_token_exchange_error"] = str(exc)[:200]
+
     result["_cookies"] = requests.utils.dict_from_cookiejar(session.cookies)
     result["_cookie_list"] = [
         {"name": c.name, "value": c.value, "domain": c.domain, "path": c.path}
@@ -256,7 +295,7 @@ def login_with_solver(
     ]
     result["_session"] = session
     result["_meta"] = {
-        "user_agent": user_agent,
+        "user_agent": solver_ua,
         "website_url": solve_url,
         "sitekey": sitekey,
         "rqdata_len": len(rqdata or ""),
