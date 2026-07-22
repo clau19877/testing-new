@@ -150,18 +150,29 @@ def solve_canvas_or_drag(
     return answers
 
 
+def _grid_index_to_center(idx: int, w: int, h: int, cols: int = 3, rows: int = 3):
+    """Map a 0-based tile index in a rows x cols grid to its pixel center."""
+    r = idx // cols
+    c = idx % cols
+    cx = int((c + 0.5) * w / cols)
+    cy = int((r + 0.5) * h / rows)
+    return cx, cy
+
+
 def plan_multibot_from_screenshot(
     screenshot: Path,
     *,
     instruction: str = "",
     request_type: str | None = None,
+    examples: list[str] | None = None,
 ):
-    """Build a VisionPlan from Multibot Canvas/Drag classification."""
+    """Build a VisionPlan from Multibot Grid/Canvas/Drag classification."""
     from vision_captcha import ClickTarget, DragTarget, VisionPlan
 
     from PIL import Image
 
     img = Image.open(screenshot).convert("RGB")
+    w, h = img.size
     buf = BytesIO()
     img.save(buf, format="JPEG", quality=90)
     b64 = base64.b64encode(buf.getvalue()).decode()
@@ -170,56 +181,65 @@ def plan_multibot_from_screenshot(
     if not rtype:
         rtype = "Drag" if "drag" in lower else "Canvas"
     answers = solve_canvas_or_drag(
-        image_b64=b64, question=instruction or "Solve the captcha", request_type=rtype
+        image_b64=b64,
+        question=instruction or "Solve the captcha",
+        request_type=rtype,
+        examples=examples,
     )
+    _log(f"raw answers ({rtype}): {str(answers)[:200]}")
 
     clicks: list[ClickTarget] = []
     drags: list[DragTarget] = []
 
-    # Normalize common answer shapes
     seq = answers
     if isinstance(answers, dict):
-        seq = answers.get("actions") or answers.get("answers") or answers.get("box") or []
+        seq = (
+            answers.get("actions")
+            or answers.get("answers")
+            or answers.get("box")
+            or answers.get("points")
+            or []
+        )
+
+    def _as_xy(p):
+        if isinstance(p, dict) and "x" in p and "y" in p:
+            return int(p["x"]), int(p["y"])
+        if isinstance(p, (list, tuple)) and len(p) >= 2:
+            return int(p[0]), int(p[1])
+        return None
 
     if rtype == "Drag" and isinstance(seq, list) and seq:
-        # pairs of points or {start,end}
         if isinstance(seq[0], dict) and ("start" in seq[0] or "x1" in seq[0]):
             for i, d in enumerate(seq):
                 if "start" in d and "end" in d:
                     s, e = d["start"], d["end"]
-                    drags.append(
-                        DragTarget(
-                            x1=int(s[0]), y1=int(s[1]), x2=int(e[0]), y2=int(e[1]),
-                            label=f"mb-drag#{i+1}",
-                        )
-                    )
+                    drags.append(DragTarget(x1=int(s[0]), y1=int(s[1]),
+                                            x2=int(e[0]), y2=int(e[1]),
+                                            label=f"mb-drag#{i+1}"))
                 elif "x1" in d:
-                    drags.append(
-                        DragTarget(
-                            x1=int(d["x1"]), y1=int(d["y1"]),
-                            x2=int(d["x2"]), y2=int(d["y2"]),
-                            label=f"mb-drag#{i+1}",
-                        )
-                    )
-        elif isinstance(seq[0], (list, tuple)) and len(seq) >= 2:
-            # flat list of points → pair them
-            pts = [(int(p[0]), int(p[1])) for p in seq if isinstance(p, (list, tuple))]
+                    drags.append(DragTarget(x1=int(d["x1"]), y1=int(d["y1"]),
+                                            x2=int(d["x2"]), y2=int(d["y2"]),
+                                            label=f"mb-drag#{i+1}"))
+        elif isinstance(seq[0], (list, tuple)):
+            pts = [xy for xy in (_as_xy(p) for p in seq) if xy]
             for i in range(0, len(pts) - 1, 2):
-                drags.append(
-                    DragTarget(
-                        x1=pts[i][0], y1=pts[i][1],
-                        x2=pts[i + 1][0], y2=pts[i + 1][1],
-                        label=f"mb-drag#{i//2+1}",
-                    )
-                )
-    else:
-        # Canvas clicks: list of [x,y] or {x,y}
-        if isinstance(seq, list):
+                drags.append(DragTarget(x1=pts[i][0], y1=pts[i][1],
+                                        x2=pts[i + 1][0], y2=pts[i + 1][1],
+                                        label=f"mb-drag#{i//2+1}"))
+    elif isinstance(seq, list) and seq:
+        # Grid → integer tile indices; Canvas → pixel points
+        if all(isinstance(v, int) for v in seq) or (
+            all(isinstance(v, (int, float)) and float(v).is_integer() for v in seq)
+            and rtype == "Grid"
+        ):
+            for i, idx in enumerate(seq):
+                cx, cy = _grid_index_to_center(int(idx), w, h)
+                clicks.append(ClickTarget(x=cx, y=cy, label=f"mb-tile{int(idx)}"))
+        else:
             for i, p in enumerate(seq):
-                if isinstance(p, dict) and "x" in p:
-                    clicks.append(ClickTarget(x=int(p["x"]), y=int(p["y"]), label=f"mb#{i+1}"))
-                elif isinstance(p, (list, tuple)) and len(p) >= 2:
-                    clicks.append(ClickTarget(x=int(p[0]), y=int(p[1]), label=f"mb#{i+1}"))
+                xy = _as_xy(p)
+                if xy:
+                    clicks.append(ClickTarget(x=xy[0], y=xy[1], label=f"mb#{i+1}"))
 
     return VisionPlan(
         instruction=instruction or rtype,

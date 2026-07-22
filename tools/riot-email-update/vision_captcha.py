@@ -966,6 +966,28 @@ def plan_for_screenshot(
         elif use_yes and is_drag:
             _log("remote order: YesCaptcha first (drag challenge)")
 
+        has_multibot = bool(
+            (os.getenv("MULTIBOT_API_KEY") or os.getenv("MULTIBOT_KEY") or "").strip()
+        ) and backend in ("hybrid", "auto", "multibot")
+
+        def _try_multibot() -> VisionPlan | None:
+            if not has_multibot:
+                return None
+            try:
+                from multibot_click import plan_multibot_from_screenshot
+
+                instr = (prompt_override or probe or "").strip()
+                rtype = "Drag" if prompt_is_drag(instr) else "Canvas"
+                plan = plan_multibot_from_screenshot(
+                    screenshot, instruction=instr, request_type=rtype
+                )
+                if plan.clicks or (plan.drags or []):
+                    return plan
+                _log(f"Multibot empty plan ({plan.notes})")
+            except Exception as exc:
+                _log(f"Multibot failed ({exc})")
+            return None
+
         def _try_yescaptcha() -> VisionPlan | None:
             if not use_yes:
                 return None
@@ -995,6 +1017,13 @@ def plan_for_screenshot(
                 _log(f"2Captcha failed ({exc})")
                 return None
 
+        # Multibot is purpose-built for adversarial Grid/Canvas/Drag — try it first.
+        if has_multibot:
+            plan = _try_multibot()
+            if plan and (plan.clicks or (plan.drags or [])):
+                return plan
+            _log("Multibot empty/failed — falling back to other solvers")
+
         if twocap_first:
             plan = _try_twocaptcha()
             if plan and (plan.clicks or (plan.drags or [])):
@@ -1007,7 +1036,7 @@ def plan_for_screenshot(
                 instruction=probe[:120] or "remote miss",
                 clicks=[],
                 backend=backend,
-                notes="2Captcha + YesCaptcha returned no actions",
+                notes="Multibot + 2Captcha + YesCaptcha returned no actions",
             )
 
         # Drag / YesCaptcha-forced: YesCaptcha first, then 2Captcha
@@ -1798,7 +1827,10 @@ def solve_visible_captcha(
         mb_key = (
             os.getenv("MULTIBOT_API_KEY") or os.getenv("MULTIBOT_KEY") or ""
         ).strip()
-        if mb_key and backend in ("hybrid", "auto", "multibot"):
+        # Direct canvas-box Multibot path is opt-in; default routes Multibot
+        # through plan_for_screenshot (cleaner coordinate handling).
+        mb_direct = os.getenv("MULTIBOT_CANVAS_DIRECT", "0") in ("1", "true", "True")
+        if mb_key and mb_direct and backend in ("hybrid", "auto", "multibot"):
             try:
                 from multibot_click import try_solve_with_multibot
 
