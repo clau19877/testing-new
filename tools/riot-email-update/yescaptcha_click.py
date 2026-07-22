@@ -385,22 +385,37 @@ def extract_anchor_queries_from_frame(frame) -> list[str]:
             anchors.append(b64)
     if anchors:
         return anchors
-    # Fallback: element screenshots via Playwright locators
+    # Fallback: element screenshots via Playwright locators.
+    # Riot often paints examples into the header; grab the whole strip too.
     for sel in (
         ".challenge-example .image",
         ".examples .image",
         ".example-wrapper .image",
         ".challenge-example",
+        ".examples",
+        ".example-wrapper",
+        ".challenge-prompt",
     ):
         try:
             locs = frame.locator(sel)
             n = min(locs.count(), 6)
             for i in range(n):
                 try:
-                    if not locs.nth(i).is_visible():
+                    el = locs.nth(i)
+                    if not el.is_visible():
                         continue
-                    png = locs.nth(i).screenshot(type="png")
-                    anchors.append(resize_bytes_to_b64(png, size=(100, 100)))
+                    box = el.bounding_box(timeout=800)
+                    if not box or box["width"] < 30 or box["height"] < 20:
+                        continue
+                    png = el.screenshot(type="png")
+                    # Keep prompt-strip larger; individual icons at 100x100
+                    if box["width"] >= 160:
+                        from PIL import Image
+
+                        img = Image.open(BytesIO(png)).convert("RGB")
+                        anchors.append(_pil_to_jpeg_b64(img, quality=90))
+                    else:
+                        anchors.append(resize_bytes_to_b64(png, size=(100, 100)))
                 except Exception:
                     continue
             if anchors:
