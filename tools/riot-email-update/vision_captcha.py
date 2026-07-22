@@ -542,7 +542,7 @@ def plan_ocr(screenshot: Path) -> VisionPlan:
         )
 
     # Drag-style challenges (common on Riot / hCaptcha enterprise)
-    if "drag" in lower and ("to the" in lower or " onto " in lower or "astronaut" in lower):
+    if "drag" in lower:
         cv_drag = plan_drag_cv(screenshot, instruction=text.strip())
         if cv_drag and cv_drag.drags:
             return cv_drag
@@ -775,27 +775,45 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
                     _log("local CV miss — escalating to 2Captcha Coordinates")
         from twocaptcha_click import plan_twocaptcha_clicks
 
-        # Don't waste 2cap budget on Riot error chrome screenshots
+        # Don't waste 2cap budget on Riot error chrome / login form screenshots
         try:
             from PIL import Image as _PILImage
             import pytesseract
 
             w, h = _PILImage.open(screenshot).size
-            if w > 700 or h < 400:
-                probe = pytesseract.image_to_string(_PILImage.open(screenshot)).lower()
-                if "invalid" in probe or (
-                    "sign in" in probe
-                    and "letter" not in probe
-                    and "drag" not in probe
-                    and "click each" not in probe
-                ):
-                    _log("screenshot looks like login/error page — empty plan")
-                    return VisionPlan(
-                        instruction="invalid/error page",
-                        clicks=[],
-                        backend="twocaptcha",
-                        notes="refusing 2cap on non-challenge screenshot",
-                    )
+            probe = pytesseract.image_to_string(_PILImage.open(screenshot)).lower()
+            bad_markers = (
+                "invalid",
+                "facebook",
+                "google",
+                "xbox",
+                "playstation",
+                "stay signed in",
+                "captcha selection",
+            )
+            looks_login = (
+                ("sign in" in probe or "username" in probe or "password" in probe)
+                and "letter" not in probe
+                and "drag" not in probe
+                and "click each" not in probe
+                and "click on" not in probe
+            )
+            if looks_login or any(m in probe for m in bad_markers):
+                _log("screenshot looks like login/error page — empty plan")
+                return VisionPlan(
+                    instruction="invalid/error page",
+                    clicks=[],
+                    backend="twocaptcha",
+                    notes="refusing 2cap on non-challenge screenshot",
+                )
+            if w > 700 and h < 500:
+                _log("screenshot aspect looks non-challenge — empty plan")
+                return VisionPlan(
+                    instruction="non-challenge",
+                    clicks=[],
+                    backend="twocaptcha",
+                    notes="refusing 2cap on odd screenshot",
+                )
         except Exception:
             pass
 
@@ -1250,26 +1268,28 @@ def click_challenge_next(page) -> bool:
                 aria = (loc.get_attribute("aria-label") or "").strip().lower()
                 if "skip" in txt or "skip" in aria:
                     continue
-                loc.click(timeout=2000)
+                # force=True: iframe may be repositioned; never fall back to page
+                # bbox clicks (those were hitting Riot's Facebook/Google buttons).
+                loc.click(timeout=2500, force=True)
                 _log(f"challenge Next/Verify via frame {sel}")
                 return True
         except Exception:
             continue
-    # Fallback: only when visible Verify/Next text exists (never Skip)
-    try:
-        for label in ("Verify", "Next"):
-            if frame.locator(f"text={label}").count():
-                loc = page.locator('iframe[src*="hcaptcha.com"]').last
-                box = loc.bounding_box(timeout=2000) if loc.count() else None
-                if box and box["y"] >= 0:
-                    px = box["x"] + box["width"] * 0.88
-                    py = box["y"] + box["height"] * 0.94
-                    page.mouse.click(px, py)
-                    _log(f"challenge {label} via bbox click ({px:.0f},{py:.0f})")
-                    return True
-    except Exception as exc:
-        _log(f"challenge Next/Verify fallback fail: {exc}")
+    _log("challenge Next/Verify button not clickable in frame")
     return False
+
+
+def page_has_invalid_captcha(page) -> bool:
+    try:
+        body = page.content().lower()
+    except Exception:
+        return False
+    return (
+        "captcha selection was invalid" in body
+        or "captcha attempt has timed out" in body
+        or "please try again" in body
+        and "captcha" in body
+    )
 
 
 def page_has_riot_oops(page) -> bool:
@@ -1329,15 +1349,23 @@ def solve_visible_captcha(
         if page_has_riot_oops(page):
             _log("Riot Oops page — captcha path failed")
             return False
+        if page_has_invalid_captcha(page):
+            _log("CAPTCHA selection invalid — fail this session")
+            return False
         if not captcha_visible(page):
             # Give Riot a moment to navigate to MFA / account / Oops
             page.wait_for_timeout(2500)
-            if page_has_riot_oops(page):
-                _log("Riot Oops after captcha disappeared — fail")
+            if page_has_riot_oops(page) or page_has_invalid_captcha(page):
+                _log("Riot Oops/invalid after captcha disappeared — fail")
                 return False
             if page_looks_auth_progress(page):
                 _log("captcha cleared — MFA/account progress")
                 return True
+            # If we landed on a social OAuth page, that was a misclick — fail
+            u = (page.url or "").lower()
+            if "facebook.com" in u or "accounts.google" in u or "apple.com" in u:
+                _log(f"misclick navigated to social login ({u[:80]}) — fail")
+                return False
             _log("no captcha visible (still on login form) — treating as solved")
             return True
         _log(f"=== vision round {round_i}/{max_rounds} ===")
