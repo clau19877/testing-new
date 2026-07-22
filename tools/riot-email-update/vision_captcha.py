@@ -60,6 +60,42 @@ def _log(msg: str) -> None:
     print(f"[vision] {msg}", flush=True)
 
 
+def prompt_is_drag(text: str) -> bool:
+    """True for drag/move challenges where YesCaptcha box-drags tend to work."""
+    lower = (text or "").lower()
+    return any(
+        k in lower
+        for k in (
+            "please drag",
+            "drag the",
+            "drag ",
+            "move the",
+            "+ move",
+        )
+    )
+
+
+def prompt_is_click_grid(text: str) -> bool:
+    """True for image/number/letter click challenges (prefer 2Captcha Coordinates)."""
+    lower = (text or "").lower()
+    if prompt_is_drag(lower):
+        return False
+    return any(
+        k in lower
+        for k in (
+            "click on",
+            "click each",
+            "click the",
+            "select all",
+            "pick the",
+            "letter",
+            "which of",
+            "find the",
+            "match",
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # OCR letter-grid solver (Riot-style: "Click each letter N times")
 # ---------------------------------------------------------------------------
@@ -799,7 +835,9 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
         "yescaptcha",
         "yes",
     ):
-        # hybrid → local CV first; then YesCaptcha Classification; then 2Captcha
+        # hybrid → local CV first; then remote solvers by challenge type:
+        #   drag        → YesCaptcha first, 2Captcha fallback
+        #   image/number→ 2Captcha Coordinates first, YesCaptcha fallback
         if backend == "hybrid":
             local_first = True
         else:
@@ -849,6 +887,7 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
                     _log("local CV miss — escalating to remote click solvers")
 
         # Don't waste solver budget on Riot error chrome / login form screenshots
+        probe = ""
         try:
             from PIL import Image as _PILImage
             import pytesseract
@@ -898,8 +937,11 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
         except Exception as exc:
             _log(f"letter-grid hint skipped: {exc}")
 
-        # Screenshot-mode YesCaptcha (drag / point / new styles without .task-image).
-        # Classic 3x3 grids are handled earlier via try_solve_task_grid().
+        has_2cap = bool(
+            os.getenv("TWOCAPTCHA_API_KEY")
+            or os.getenv("TWO_CAPTCHA_API_KEY")
+            or os.getenv("2CAPTCHA_API_KEY")
+        )
         use_yes = bool(
             (
                 os.getenv("YESCAPTCHA_API_KEY")
@@ -909,32 +951,86 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
         ) and backend in ("hybrid", "yescaptcha", "yes", "auto")
         if backend in ("yescaptcha", "yes"):
             use_yes = True
-        if use_yes:
+
+        # Challenge-type routing (hybrid/auto):
+        # YesCaptcha is strong on drag boxes; weak on image/number-match clicks.
+        is_drag = prompt_is_drag(probe)
+        twocap_first = (
+            backend in ("hybrid", "auto", "twocaptcha", "2captcha", "2cap", "2cap_click")
+            and has_2cap
+            and not is_drag
+            and backend not in ("yescaptcha", "yes")
+        )
+        if twocap_first:
+            _log(
+                "remote order: 2Captcha Coordinates first "
+                f"(click/image/number; drag={is_drag})"
+            )
+        elif use_yes and is_drag:
+            _log("remote order: YesCaptcha first (drag challenge)")
+
+        def _try_yescaptcha() -> VisionPlan | None:
+            if not use_yes:
+                return None
             try:
                 from yescaptcha_click import plan_yescaptcha_clicks
 
                 plan = plan_yescaptcha_clicks(screenshot, extra_comment=extra or None)
                 if plan.clicks or (plan.drags or []):
                     return plan
-                _log(f"YesCaptcha empty plan ({plan.notes}) — trying 2Captcha")
+                _log(f"YesCaptcha empty plan ({plan.notes})")
             except Exception as exc:
-                _log(f"YesCaptcha failed ({exc}) — falling back to 2Captcha")
+                _log(f"YesCaptcha failed ({exc})")
+            return None
 
-        if backend in ("yescaptcha", "yes") and not (
-            os.getenv("TWOCAPTCHA_API_KEY")
-            or os.getenv("TWO_CAPTCHA_API_KEY")
-            or os.getenv("2CAPTCHA_API_KEY")
-        ):
+        def _try_twocaptcha() -> VisionPlan | None:
+            if not has_2cap:
+                return None
+            try:
+                from twocaptcha_click import plan_twocaptcha_clicks
+
+                return plan_twocaptcha_clicks(screenshot, extra_comment=extra or None)
+            except Exception as exc:
+                _log(f"2Captcha failed ({exc})")
+                return None
+
+        if twocap_first:
+            plan = _try_twocaptcha()
+            if plan and (plan.clicks or (plan.drags or [])):
+                return plan
+            _log("2Captcha empty/failed — trying YesCaptcha fallback")
+            plan = _try_yescaptcha()
+            if plan and (plan.clicks or (plan.drags or [])):
+                return plan
+            return plan or VisionPlan(
+                instruction=probe[:120] or "remote miss",
+                clicks=[],
+                backend=backend,
+                notes="2Captcha + YesCaptcha returned no actions",
+            )
+
+        # Drag / YesCaptcha-forced: YesCaptcha first, then 2Captcha
+        plan = _try_yescaptcha()
+        if plan and (plan.clicks or (plan.drags or [])):
+            return plan
+        if use_yes and has_2cap:
+            _log("YesCaptcha empty/failed — trying 2Captcha")
+        if backend in ("yescaptcha", "yes") and not has_2cap:
             return VisionPlan(
                 instruction="yescaptcha miss",
                 clicks=[],
                 backend="yescaptcha",
                 notes="YesCaptcha returned no actions and no 2Captcha fallback key",
             )
-
-        from twocaptcha_click import plan_twocaptcha_clicks
-
-        return plan_twocaptcha_clicks(screenshot, extra_comment=extra or None)
+        plan = _try_twocaptcha()
+        if plan is not None:
+            return plan
+        return VisionPlan(
+            instruction=probe[:120] or "remote miss",
+            clicks=[],
+            backend=backend,
+            notes="no remote click solver available",
+        )
     if backend == "ocr":
         plan = plan_ocr(screenshot)
         # Optional agent fallback when local CV/OCR cannot produce actions
@@ -1652,23 +1748,49 @@ def solve_visible_captcha(
             _log("no captcha visible (still on login form) — treating as solved")
             return True
         _log(f"=== vision round {round_i}/{max_rounds} ===")
-        # YesCaptcha DEMO / new-style path (prefer over screenshot OCR):
-        # classic 9× .task-image → objects[]; Riot Enterprise → canvas export
-        # + anchors → box clicks. Docs:
-        # https://yescaptcha.atlassian.net/wiki/spaces/YESCAPTCHA/pages/30113813
+        # YesCaptcha DEMO / canvas path:
+        #   - classic 9× .task-image grids: always OK
+        #   - Riot canvas drag: YesCaptcha first (strong box-drag answers)
+        #   - Riot canvas image/number-match: skip — 2Captcha Coordinates is stronger
+        # Docs: https://yescaptcha.atlassian.net/wiki/spaces/YESCAPTCHA/pages/30113813
         yes_key = (
             os.getenv("YESCAPTCHA_API_KEY")
             or os.getenv("YES_CAPTCHA_API_KEY")
             or ""
         ).strip()
         if yes_key and backend in ("hybrid", "auto", "yescaptcha", "yes"):
+            run_yes_demo = True
             try:
-                from yescaptcha_click import try_solve_task_grid
+                from yescaptcha_click import (
+                    extract_prompt_from_frame,
+                    frame_has_challenge_canvas,
+                    frame_has_task_grid,
+                )
 
-                grid_result = try_solve_task_grid(page)
+                ensure_challenge_iframe_on_screen(page)
+                frame = find_hcaptcha_frame(page)
+                if frame is not None and not frame_has_task_grid(frame):
+                    q = extract_prompt_from_frame(frame) or ""
+                    if frame_has_challenge_canvas(frame) and q and not prompt_is_drag(q):
+                        run_yes_demo = False
+                        _log(
+                            "non-drag canvas prompt — skipping YesCaptcha DEMO/canvas; "
+                            f"2Captcha Coordinates first ({q[:70]!r})"
+                        )
+                    elif prompt_is_drag(q):
+                        _log(f"drag canvas prompt — YesCaptcha DEMO/canvas first ({q[:70]!r})")
             except Exception as exc:
-                _log(f"YesCaptcha DEMO/canvas path error: {exc}")
-                grid_result = None
+                _log(f"prompt peek for YesCaptcha routing failed: {exc}")
+
+            grid_result = None
+            if run_yes_demo:
+                try:
+                    from yescaptcha_click import try_solve_task_grid
+
+                    grid_result = try_solve_task_grid(page)
+                except Exception as exc:
+                    _log(f"YesCaptcha DEMO/canvas path error: {exc}")
+                    grid_result = None
             if grid_result is True:
                 page.wait_for_timeout(1500)
                 if page_has_riot_oops(page) or page_has_invalid_captcha(page):
@@ -1695,7 +1817,7 @@ def solve_visible_captcha(
                     "YesCaptcha DEMO/canvas still incomplete — "
                     "falling through to coordinate solvers"
                 )
-            # grid_result is None → no grid/canvas; use screenshot path
+            # grid_result is None → skipped / no grid/canvas; use screenshot path
         # Verify may appear early while the letter grid is still unsolved — peek first
         if verify_button_visible(page):
             peek = screenshot_challenge(page, tag=f"r{round_i}_peek")
