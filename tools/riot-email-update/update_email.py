@@ -88,9 +88,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--captcha-provider",
-        choices=("vision", "hybrid", "capless", "capsolver", "capmonster", "twocaptcha", "nonecap"),
+        choices=(
+            "manual", "vision", "hybrid", "capless", "capsolver",
+            "capmonster", "twocaptcha", "nonecap",
+        ),
         default=None,
-        help="Captcha provider (default: CAPTCHA_PROVIDER or vision/hybrid)",
+        help="Captcha provider (default: CAPTCHA_PROVIDER or vision). "
+        "'manual' pauses for a human to solve while the rest stays automated.",
     )
     parser.add_argument(
         "--captcha-key",
@@ -251,6 +255,68 @@ def click_riot_signin(page) -> bool:
     return False
 
 
+def wait_for_manual_captcha(page, *, timeout_s: float = 300.0) -> bool:
+    """
+    Human-in-the-loop: pause while a person solves the hCaptcha in the browser
+    window, then resume automatically. Success is detected when the challenge
+    clears / the page progresses to MFA or the account. Everything before
+    (credential fill, sign-in) and after (MFA via IMAP, email update) stays
+    automated.
+    """
+    from vision_captcha import (
+        captcha_visible,
+        page_has_riot_oops,
+        page_looks_auth_progress,
+        page_looks_mfa,
+    )
+
+    # Wait for the challenge to mount after sign-in
+    for _ in range(24):
+        if (
+            captcha_visible(page)
+            or page_has_riot_oops(page)
+            or page_looks_auth_progress(page)
+        ):
+            break
+        page.wait_for_timeout(500)
+
+    if page_has_riot_oops(page):
+        print("  Riot Oops before manual solve — will rotate")
+        return False
+    if not captcha_visible(page):
+        print("  No hCaptcha challenge visible — nothing to solve manually")
+        return True
+
+    print("\n" + "=" * 68, flush=True)
+    print("  MANUAL CAPTCHA — solve the hCaptcha in the browser window now.", flush=True)
+    print("  Automation will continue on its own the moment it clears.", flush=True)
+    print(f"  Waiting up to {int(timeout_s)}s…", flush=True)
+    print("=" * 68 + "\n", flush=True)
+
+    deadline = time.time() + timeout_s
+    last_log = 0.0
+    while time.time() < deadline:
+        page.wait_for_timeout(1000)
+        if page_has_riot_oops(page):
+            print("  Riot Oops during manual solve — will rotate")
+            return False
+        if not captcha_visible(page):
+            page.wait_for_timeout(1500)
+            if page_has_riot_oops(page):
+                return False
+            print("  Captcha cleared — resuming automation.")
+            return True
+        if page_looks_auth_progress(page) or page_looks_mfa(page):
+            print("  Auth progressing — resuming automation.")
+            return True
+        remaining = deadline - time.time()
+        if time.time() - last_log > 20:
+            print(f"  …still waiting for manual solve ({int(remaining)}s left)", flush=True)
+            last_log = time.time()
+    print("  Manual captcha wait timed out.")
+    return False
+
+
 def try_solve_hcaptcha(
     page,
     *,
@@ -259,6 +325,9 @@ def try_solve_hcaptcha(
     proxy: str | None,
 ) -> bool:
     provider = (provider or "").strip().lower()
+    if provider in ("manual", "human"):
+        timeout_s = float(os.getenv("MANUAL_CAPTCHA_TIMEOUT") or "300")
+        return wait_for_manual_captcha(page, timeout_s=timeout_s)
     if provider in ("vision", "hybrid", "2cap_click"):
         from vision_captcha import (
             captcha_visible,
@@ -444,7 +513,7 @@ def run_login(
         print("  Riot Oops right after sign-in")
         return "oops"
 
-    use_vision = captcha_provider in ("vision", "hybrid", "2cap_click")
+    use_vision = captcha_provider in ("vision", "hybrid", "2cap_click", "manual", "human")
     solved = False
 
     if use_vision:
@@ -713,7 +782,16 @@ def main() -> int:
     if captcha_provider == "hybrid":
         captcha_provider = "vision"
     captcha_key = None
-    if not args.no_captcha_solver:
+    if captcha_provider in ("manual", "human"):
+        # Human solves the captcha; no solver key needed. Force headed and a
+        # single session so we don't rotate the proxy mid-solve.
+        headed = True
+        os.environ.setdefault("PROXY_ATTEMPTS", "1")
+        print(
+            "[mode] MANUAL captcha — a human solves hCaptcha in the browser; "
+            "login form, MFA (IMAP) and email update stay automated."
+        )
+    if not args.no_captcha_solver and captcha_provider not in ("manual", "human"):
         key_env = {
             "capless": "CAPLESS_API_KEY",
             "capsolver": "CAPSOLVER_API_KEY",
