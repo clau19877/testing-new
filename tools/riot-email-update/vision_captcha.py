@@ -1652,8 +1652,9 @@ def solve_visible_captcha(
             _log("no captcha visible (still on login form) — treating as solved")
             return True
         _log(f"=== vision round {round_i}/{max_rounds} ===")
-        # Official YesCaptcha Selenium DEMO path: 9× .task-image tiles →
-        # HCaptchaClassification objects[] → click indices → Verify.
+        # YesCaptcha DEMO / new-style path (prefer over screenshot OCR):
+        # classic 9× .task-image → objects[]; Riot Enterprise → canvas export
+        # + anchors → box clicks. Docs:
         # https://yescaptcha.atlassian.net/wiki/spaces/YESCAPTCHA/pages/30113813
         yes_key = (
             os.getenv("YESCAPTCHA_API_KEY")
@@ -1666,35 +1667,35 @@ def solve_visible_captcha(
 
                 grid_result = try_solve_task_grid(page)
             except Exception as exc:
-                _log(f"YesCaptcha task-grid path error: {exc}")
+                _log(f"YesCaptcha DEMO/canvas path error: {exc}")
                 grid_result = None
             if grid_result is True:
                 page.wait_for_timeout(1500)
                 if page_has_riot_oops(page) or page_has_invalid_captcha(page):
-                    _log("Oops/invalid after YesCaptcha tile solve — fail")
+                    _log("Oops/invalid after YesCaptcha solve — fail")
                     return False
                 if page_looks_auth_progress(page) or not captcha_visible(page):
-                    _log("YesCaptcha task-grid cleared captcha")
+                    _log("YesCaptcha DEMO/canvas cleared captcha")
                     return True
-                prev_instruction = "yescaptcha-task-grid"
+                prev_instruction = "yescaptcha-demo"
                 continue
             if grid_result is False:
-                # DEMO retries verify_captcha() when checkbox not checked yet.
-                # After two incomplete tile rounds, fall through to 2Captcha/coords.
-                prev_instruction = "yescaptcha-task-grid"
+                # DEMO retries when checkbox not checked yet.
+                # After two incomplete rounds, fall through to 2Captcha/coords.
+                prev_instruction = "yescaptcha-demo"
                 if page_has_riot_oops(page) or page_has_invalid_captcha(page):
-                    _log("Oops/invalid after YesCaptcha tile round — fail")
+                    _log("Oops/invalid after YesCaptcha round — fail")
                     return False
                 if page_looks_auth_progress(page):
                     return True
                 if round_i < 2:
-                    _log("YesCaptcha task-grid round incomplete — retry tile path")
+                    _log("YesCaptcha DEMO/canvas incomplete — retry")
                     continue
                 _log(
-                    "YesCaptcha task-grid still incomplete — "
+                    "YesCaptcha DEMO/canvas still incomplete — "
                     "falling through to coordinate solvers"
                 )
-            # grid_result is None → no .task-image grid; use screenshot path
+            # grid_result is None → no grid/canvas; use screenshot path
         # Verify may appear early while the letter grid is still unsolved — peek first
         if verify_button_visible(page):
             peek = screenshot_challenge(page, tag=f"r{round_i}_peek")
