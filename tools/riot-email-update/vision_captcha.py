@@ -1192,10 +1192,75 @@ def ensure_challenge_iframe_on_screen(page) -> bool:
         if moved:
             _log(f"repositioned {moved} off-screen hCaptcha iframe(s)")
             page.wait_for_timeout(400)
+            shield_social_login_buttons(page)
             return True
     except Exception as exc:
         _log(f"iframe reposition failed: {exc}")
     return False
+
+
+def shield_social_login_buttons(page) -> int:
+    """
+    Disable pointer events on Riot social OAuth buttons so captcha clicks
+    cannot fall through to Facebook / Apple / Xbox / PlayStation.
+    """
+    try:
+        n = page.evaluate(
+            """() => {
+              const needles = [
+                'facebook', 'google', 'apple', 'xbox', 'playstation', 'sony',
+                'live.com', 'microsoft', 'steam', 'twitter', 'discord'
+              ];
+              let hit = 0;
+              const nodes = [
+                ...document.querySelectorAll('a, button, [role="button"], div[tabindex]')
+              ];
+              for (const el of nodes) {
+                const blob = (
+                  (el.getAttribute('href') || '') + ' ' +
+                  (el.getAttribute('aria-label') || '') + ' ' +
+                  (el.getAttribute('data-testid') || '') + ' ' +
+                  (el.id || '') + ' ' +
+                  (el.className || '') + ' ' +
+                  (el.innerText || '')
+                ).toLowerCase();
+                if (!needles.some((n) => blob.includes(n))) continue;
+                // Never shield hCaptcha controls
+                if (blob.includes('hcaptcha') || blob.includes('challenge')) continue;
+                el.style.setProperty('pointer-events', 'none', 'important');
+                el.setAttribute('data-riot-social-shielded', '1');
+                hit += 1;
+              }
+              return hit;
+            }"""
+        )
+        if n:
+            _log(f"shielded {n} social login controls (pointer-events:none)")
+        return int(n or 0)
+    except Exception as exc:
+        _log(f"social shield failed: {exc}")
+        return 0
+
+
+def click_point_is_on_hcaptcha(page, x: float, y: float) -> bool:
+    """True when document.elementFromPoint is the hCaptcha iframe (or inside it)."""
+    try:
+        return bool(
+            page.evaluate(
+                """([x, y]) => {
+                  const el = document.elementFromPoint(x, y);
+                  if (!el) return false;
+                  if (el.tagName === 'IFRAME') {
+                    const src = (el.getAttribute('src') || '').toLowerCase();
+                    return src.includes('hcaptcha');
+                  }
+                  return false;
+                }""",
+                [x, y],
+            )
+        )
+    except Exception:
+        return False
 
 
 def verify_button_visible(page) -> bool:
@@ -1339,6 +1404,7 @@ def _apply_clicks_in_frame(page, plan: VisionPlan) -> int:
         _log(f"frame-local clicks: no challenge-sized box (got {box})")
         return 0
 
+    shield_social_login_buttons(page)
     _log(
         f"frame-local box x={box['x']:.0f} y={box['y']:.0f} "
         f"w={box['width']:.0f} h={box['height']:.0f}"
@@ -1351,6 +1417,12 @@ def _apply_clicks_in_frame(page, plan: VisionPlan) -> int:
                 continue
             px = box["x"] + c.x
             py = box["y"] + c.y
+            if not click_point_is_on_hcaptcha(page, px, py):
+                _log(
+                    f"skip click {c.label} page=({px:.0f},{py:.0f}) — "
+                    "not over hCaptcha iframe (would hit page chrome)"
+                )
+                continue
             _log(f"frame click {c.label} local=({c.x},{c.y}) page=({px:.0f},{py:.0f})")
             page.mouse.click(px, py)
             applied += 1
@@ -1364,8 +1436,12 @@ def _apply_clicks_in_frame(page, plan: VisionPlan) -> int:
             if max(d.x1, d.x2) > box["width"] + 5 or max(d.y1, d.y2) > box["height"] + 5:
                 _log(f"skip out-of-frame drag {d.label}")
                 continue
+            sx, sy = box["x"] + d.x1, box["y"] + d.y1
+            if not click_point_is_on_hcaptcha(page, sx, sy):
+                _log(f"skip drag {d.label} — source not over hCaptcha iframe")
+                continue
             _log(f"frame drag {d.label} ({d.x1},{d.y1})->({d.x2},{d.y2})")
-            page.mouse.move(box["x"] + d.x1, box["y"] + d.y1)
+            page.mouse.move(sx, sy)
             page.wait_for_timeout(200)
             page.mouse.down()
             page.wait_for_timeout(300)
