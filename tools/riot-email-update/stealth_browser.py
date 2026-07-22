@@ -64,12 +64,24 @@ def launch_stealth_browser(
             "headless": not headed,
             "humanize": True,
             "os": ["windows"],
+            "window": (int(vp["width"]), int(vp["height"])),
         }
+        # Match fingerprint geo to residential proxy egress when possible
         if proxy_dict:
             kw["proxy"] = proxy_dict
+            kw["geoip"] = True
+        print(
+            f"[stealth] engine=camoufox headed={headed} "
+            f"proxy={'yes' if proxy else 'no'} humanize=True",
+            flush=True,
+        )
         # Camoufox manages its own fingerprint; avoid forcing Chrome UA on Firefox
         with Camoufox(**kw) as browser:
-            context = browser.new_context(viewport=vp, locale="en-US")
+            # Prefer the default persistent context when available
+            try:
+                context = browser.new_context(locale="en-US")
+            except TypeError:
+                context = browser.new_context()
             try:
                 yield None, browser, context
             finally:
