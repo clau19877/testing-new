@@ -866,16 +866,65 @@ def plan_for_screenshot(screenshot: Path, backend: str | None = None) -> VisionP
 # ---------------------------------------------------------------------------
 
 def find_hcaptcha_frame(page):
-    """Return the Playwright frame that hosts the hCaptcha challenge, if any."""
+    """Return the Playwright frame that hosts the hCaptcha challenge (not checkbox)."""
+    challenge = []
+    checkbox = []
+    other = []
     for frame in page.frames:
-        url = frame.url or ""
-        if "hcaptcha.com" in url and ("frame=" in url or "challenge" in url or "checkbox" in url):
-            return frame
-    # fallback: any hcaptcha frame
-    for frame in page.frames:
-        if "hcaptcha" in (frame.url or ""):
-            return frame
-    return None
+        url = (frame.url or "").lower()
+        if "hcaptcha.com" not in url and "hcaptcha" not in url:
+            continue
+        if "frame=checkbox" in url or ("checkbox" in url and "challenge" not in url):
+            checkbox.append(frame)
+        elif "frame=challenge" in url or "/challenge" in url:
+            challenge.append(frame)
+        elif "frame=" in url or "challenge" in url:
+            challenge.append(frame)
+        else:
+            other.append(frame)
+
+    def _score(frame) -> tuple:
+        # Prefer larger challenge documents (checkbox is ~300x75).
+        try:
+            box = frame.locator("body").bounding_box(timeout=800)
+        except Exception:
+            box = None
+        area = (box["width"] * box["height"]) if box else 0
+        return (area, )
+
+    if challenge:
+        return max(challenge, key=_score)
+    if other:
+        return max(other, key=_score)
+    # Last resort: never use tiny checkbox for letter-grid clicks if avoidable
+    return checkbox[0] if checkbox else None
+
+
+def find_challenge_iframe_locator(page):
+    """Locator for the challenge-sized hCaptcha iframe element on the page."""
+    frames = page.locator('iframe[src*="hcaptcha.com"]')
+    best = None
+    best_area = 0
+    try:
+        n = frames.count()
+    except Exception:
+        return None
+    for i in range(n):
+        fr = frames.nth(i)
+        try:
+            src = (fr.get_attribute("src") or "").lower()
+        except Exception:
+            src = ""
+        try:
+            box = fr.bounding_box(timeout=1000)
+        except Exception:
+            box = None
+        area = (box["width"] * box["height"]) if box else 0
+        is_challenge = "frame=challenge" in src or "/challenge" in src or area >= 300 * 300
+        if is_challenge and area >= best_area:
+            best = fr
+            best_area = area
+    return best
 
 
 def captcha_visible(page) -> bool:
@@ -1191,49 +1240,75 @@ def apply_clicks(page, plan: VisionPlan, screenshot: Path) -> int:
 
 
 def _apply_clicks_in_frame(page, plan: VisionPlan) -> int:
-    """Click via the hCaptcha frame's own coordinate space."""
+    """
+    Click inside the challenge iframe using iframe bounding-box + screenshot
+    offsets. Avoid body.click(force=True) — if the wrong (checkbox) frame is
+    selected, out-of-bounds force clicks land on Riot social OAuth buttons.
+    """
+    ensure_challenge_iframe_on_screen(page)
+    iframe = find_challenge_iframe_locator(page)
     frame = find_hcaptcha_frame(page)
-    if not frame:
-        _log("frame-local clicks: no hCaptcha frame")
+    if frame:
+        _log(f"frame-local target url={(frame.url or '')[:90]}")
+    box = None
+    if iframe is not None:
+        try:
+            box = iframe.bounding_box(timeout=3000)
+        except Exception:
+            box = None
+    if (not box or box["width"] < 200) and frame is not None:
+        try:
+            box = frame.locator("body").bounding_box(timeout=2000)
+        except Exception:
+            box = None
+    if not box or box["width"] < 200 or box["height"] < 200:
+        _log(f"frame-local clicks: no challenge-sized box (got {box})")
         return 0
+
+    _log(
+        f"frame-local box x={box['x']:.0f} y={box['y']:.0f} "
+        f"w={box['width']:.0f} h={box['height']:.0f}"
+    )
     applied = 0
     try:
-        # Prefer the challenge document element for hit-testing
-        root = frame.locator("body").first
         for c in plan.clicks:
-            _log(f"frame click {c.label} ({c.x},{c.y})")
-            root.click(position={"x": float(c.x), "y": float(c.y)}, force=True, timeout=4000)
+            if c.x < 0 or c.y < 0 or c.x > box["width"] + 5 or c.y > box["height"] + 5:
+                _log(f"skip out-of-frame click {c.label} ({c.x},{c.y})")
+                continue
+            px = box["x"] + c.x
+            py = box["y"] + c.y
+            _log(f"frame click {c.label} local=({c.x},{c.y}) page=({px:.0f},{py:.0f})")
+            page.mouse.click(px, py)
             applied += 1
             page.wait_for_timeout(350)
+            if page_looks_social_oauth(page):
+                _log("abort clicks — navigated to social OAuth")
+                return applied
         for d in plan.drags or []:
+            if min(d.x1, d.y1, d.x2, d.y2) < 0:
+                continue
+            if max(d.x1, d.x2) > box["width"] + 5 or max(d.y1, d.y2) > box["height"] + 5:
+                _log(f"skip out-of-frame drag {d.label}")
+                continue
             _log(f"frame drag {d.label} ({d.x1},{d.y1})->({d.x2},{d.y2})")
-            # Playwright frame drag: mouse down/move/up in page coords of the
-            # element's box — use locator.drag_to when possible.
-            src = frame.locator("body")
-            try:
-                box = src.bounding_box(timeout=2000)
-            except Exception:
-                box = None
-            if box:
-                page.mouse.move(box["x"] + d.x1, box["y"] + d.y1)
-                page.wait_for_timeout(200)
-                page.mouse.down()
-                page.wait_for_timeout(300)
-                steps = 24
-                for i in range(1, steps + 1):
-                    page.mouse.move(
-                        box["x"] + d.x1 + (d.x2 - d.x1) * i / steps,
-                        box["y"] + d.y1 + (d.y2 - d.y1) * i / steps,
-                    )
-                    page.wait_for_timeout(25)
-                page.wait_for_timeout(200)
-                page.mouse.up()
-            else:
-                src.click(position={"x": float(d.x1), "y": float(d.y1)}, force=True)
-                page.wait_for_timeout(200)
-                src.click(position={"x": float(d.x2), "y": float(d.y2)}, force=True)
+            page.mouse.move(box["x"] + d.x1, box["y"] + d.y1)
+            page.wait_for_timeout(200)
+            page.mouse.down()
+            page.wait_for_timeout(300)
+            steps = 24
+            for i in range(1, steps + 1):
+                page.mouse.move(
+                    box["x"] + d.x1 + (d.x2 - d.x1) * i / steps,
+                    box["y"] + d.y1 + (d.y2 - d.y1) * i / steps,
+                )
+                page.wait_for_timeout(25)
+            page.wait_for_timeout(200)
+            page.mouse.up()
             applied += 1
             page.wait_for_timeout(800)
+            if page_looks_social_oauth(page):
+                _log("abort drag — navigated to social OAuth")
+                return applied
     except Exception as exc:
         _log(f"frame-local clicks failed: {exc}")
     return applied
@@ -1261,9 +1336,11 @@ def click_challenge_next(page) -> bool:
                 aria = (loc.get_attribute("aria-label") or "").strip().lower()
                 if "skip" in txt or "skip" in aria:
                     continue
-                # force=True: iframe may be repositioned; never fall back to page
-                # bbox clicks (those were hitting Riot's Facebook/Google buttons).
-                loc.click(timeout=2500, force=True)
+                # Prefer normal click; force only if covered after iframe CSS nudge.
+                try:
+                    loc.click(timeout=2500)
+                except Exception:
+                    loc.click(timeout=2500, force=True)
                 _log(f"challenge Next/Verify via frame {sel}")
                 return True
         except Exception:
