@@ -4,7 +4,8 @@
   "description": "Template project to start building IBC enabled Solidity contracts, with Hardhat and Foundry support",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test utils/address-normalizer/*.test.js",
+    "test:address-normalizer": "node --test utils/address-normalizer/*.test.js"
   },
   "repository": {
     "type": "git",
