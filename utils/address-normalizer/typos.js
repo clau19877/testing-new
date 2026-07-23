@@ -1,0 +1,87 @@
+/**
+ * Common UK / postal address typo and abbreviation corrections.
+ * Keys must be lowercase. Values are canonical lowercase forms.
+ * Longer / more specific keys are preferred when multiple could match.
+ */
+const COMMON_TYPOS = {
+  // Unit / suite style
+  unt: "unit",
+  uint: "unit",
+  unti: "unit",
+  sute: "suite",
+  suíte: "suite",
+  aparment: "apartment",
+  apartmnt: "apartment",
+  aptment: "apartment",
+  flat: "flat",
+  flt: "flat",
+
+  // Business / centre
+  bussiness: "business",
+  busines: "business",
+  busness: "business",
+  buisness: "business",
+  businesse: "business",
+  biz: "business",
+  centr: "centre",
+  center: "centre",
+  cetre: "centre",
+  cente: "centre",
+  cntr: "centre",
+  cnetre: "centre",
+
+  // Street types
+  rd: "road",
+  raod: "road",
+  rod: "road",
+  rode: "road",
+  st: "street",
+  str: "street",
+  strt: "street",
+  stret: "street",
+  steet: "street",
+  ave: "avenue",
+  av: "avenue",
+  aveneu: "avenue",
+  avenure: "avenue",
+  ln: "lane",
+  laen: "lane",
+  dr: "drive",
+  drv: "drive",
+  driv: "drive",
+  ct: "court",
+  crt: "court",
+  pl: "place",
+  plc: "place",
+  cres: "crescent",
+  crscnt: "crescent",
+  blvd: "boulevard",
+  bvd: "boulevard",
+  hwy: "highway",
+  sq: "square",
+  ter: "terrace",
+  terr: "terrace",
+  tce: "terrace",
+  wy: "way",
+  cl: "close",
+  gdns: "gardens",
+  gdn: "garden",
+  pk: "park",
+  pde: "parade",
+
+  // Common word typos
+  bulding: "building",
+  buidling: "building",
+  bldg: "building",
+  industial: "industrial",
+  industrail: "industrial",
+  estate: "estate",
+  estae: "estate",
+  offrice: "office",
+  ofice: "office",
+  ofc: "office",
+  hous: "house",
+  hoouse: "house",
+};
+
+module.exports = { COMMON_TYPOS };
