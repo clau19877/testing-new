@@ -20,7 +20,8 @@ tools/riot-email-update/__pycache__/
 
 # Foundry files
 /out
-/cache_forgetools/riot-email-update/debug/
+/cache
 
+tools/riot-email-update/debug/
 tools/riot-email-update/data/*
 !tools/riot-email-update/data/tasks.csv.example
