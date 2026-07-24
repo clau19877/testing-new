@@ -3,12 +3,13 @@ Alternate hCaptcha enterprise solvers for Riot.
 
 Approaches (all need fresh per-challenge rqdata + same egress IP as submit):
 
-  1. capmonster  — CapMonster Cloud HCaptchaTask + customData=rqdata
+  1. aycd        — AYCD AutoSolve hub (OneClick / AI / 3rd-party on AYCD side)
+  2. capmonster  — CapMonster Cloud HCaptchaTask + customData=rqdata
                    (used by open-source Valorant/Riot auth scripts)
-  2. twocaptcha  — 2Captcha HCaptchaTask + data=rqdata + matching userAgent
-  3. nonecap     — NoneCap type=hcaptcha_enterprise + rqdata
-  4. capless     — Capless /solve (already integrated; soft-fails on Riot verify)
-  5. capsolver   — CapSolver (hard-rejects Riot sitekey)
+  3. twocaptcha  — 2Captcha HCaptchaTask + data=rqdata + matching userAgent
+  4. nonecap     — NoneCap type=hcaptcha_enterprise + rqdata
+  5. capless     — Capless /solve (already integrated; soft-fails on Riot verify)
+  6. capsolver   — CapSolver (hard-rejects Riot sitekey)
 
 Token APIs mint a P1_… response bound to rqdata. In-browser vision clicking
 is a separate path (vision_captcha.py) and does not produce enterprise tokens.
@@ -334,8 +335,11 @@ def solve_with_provider(
     timeout: float = 180.0,
     require_proxy: bool = False,
     require_rqdata: bool = False,
+    is_invisible: bool = False,
 ) -> str:
     """Dispatch to a named provider."""
+    import os
+
     p = (provider or "").strip().lower()
     if require_rqdata and not (rqdata or "").strip():
         raise CaptchaSolverError(f"{p or provider}: enterprise strict requires rqdata")
@@ -422,6 +426,20 @@ def solve_with_provider(
             timeout=timeout,
             require_proxy=require_proxy,
             require_rqdata=require_rqdata,
+        )
+    if p in ("aycd", "autosolve", "aycd_autosolve"):
+        from aycd_autosolve import solve_aycd
+
+        aycd_timeout = float(os.getenv("AYCD_TIMEOUT") or timeout or 300)
+        return solve_aycd(
+            api_key,
+            website_url=website_url,
+            website_key=website_key,
+            rqdata=rqdata,
+            user_agent=user_agent,
+            proxy=proxy,
+            is_invisible=is_invisible,
+            timeout=aycd_timeout,
         )
     raise CaptchaSolverError(f"Unknown captcha provider: {provider}")
 

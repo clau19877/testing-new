@@ -112,6 +112,7 @@ def build_env(row: dict[str, str], *, headed: bool) -> dict[str, str]:
             "IMAP_PASSWORD": row["imap_app_password"],
             "IMAP_FOLDER": row.get("imap_folder") or "INBOX",
             "IMAP_SSL": "true",
+            # Prefer .env CAPTCHA_PROVIDER (aycd / manual / vision / …)
             "CAPTCHA_PROVIDER": env.get("CAPTCHA_PROVIDER") or "manual",
             "NONINTERACTIVE": "1",
             "HEADED": "true" if headed else "false",

@@ -7,6 +7,7 @@ the submit session.
 Approaches implemented in this package
 --------------------------------------
 Token APIs (captcha.py / captcha_providers.py):
+  - aycd        — AYCD AutoSolve hub (OneClick / AI / 3rd-party on AYCD side)
   - capmonster  — HCaptchaTask + customData=rqdata (common in Riot auth scripts)
   - twocaptcha  — HCaptchaTask + data=rqdata + matching User-Agent
   - nonecap     — type=hcaptcha_enterprise + rqdata
@@ -514,7 +515,7 @@ def solve_and_inject(
 ) -> bool:
     """
     Detect hCaptcha on the current page, solve, inject token.
-    provider: capless | capsolver | capmonster | twocaptcha | nonecap
+    provider: aycd | capless | capsolver | capmonster | twocaptcha | nonecap
 
     Enterprise-strict (default ON via ENTERPRISE_STRICT=1):
       require rqdata + proxy; match page User-Agent to solver task.
@@ -534,6 +535,7 @@ def solve_and_inject(
     params = extract_hcaptcha_params(page)
     sitekey = params.get("sitekey") or known_sitekey_for_url(page.url)
     rqdata = params.get("rqdata")
+    is_invisible = bool(params.get("isInvisible"))
 
     # Network capture + page globals (fresh enterprise blob)
     if not rqdata:
@@ -606,6 +608,7 @@ def solve_and_inject(
         proxy=proxy,
         require_proxy=strict,
         require_rqdata=strict,
+        is_invisible=is_invisible,
     )
 
     print(f"  Token received ({len(token)} chars) — injecting…", flush=True)

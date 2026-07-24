@@ -29,7 +29,8 @@ RiotEmailUpdate.exe --headless
 or set `HEADED=false` in `.env`.
 
 Manual captcha needs a visible window (`HEADED=true`). For unattended
-headless runs use `CAPTCHA_PROVIDER=vision` plus your solver API keys.
+headless runs use `CAPTCHA_PROVIDER=vision` plus your solver API keys, or
+`CAPTCHA_PROVIDER=aycd` with `AYCD_API_KEY` and OneClick AutoSolve running.
 
 ## Alternatives
 

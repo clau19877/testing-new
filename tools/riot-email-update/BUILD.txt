@@ -1,7 +1,7 @@
-TOOL_BUILD=2026-07-24d-headless
+TOOL_BUILD=2026-07-24e-aycd
 
 If RiotEmailUpdate.exe does not print:
-  Tool build: 2026-07-24d-headless
+  Tool build: 2026-07-24e-aycd
 then update_email.py was NOT replaced.
 
 Headless:
@@ -9,4 +9,10 @@ Headless:
   or set HEADED=false in .env
 
 Manual captcha still needs a visible window (HEADED=true).
-Unattended headless → CAPTCHA_PROVIDER=vision + solver API keys.
+Unattended headless → CAPTCHA_PROVIDER=vision + solver API keys
+  or CAPTCHA_PROVIDER=aycd + AYCD_API_KEY (OneClick AutoSolve running).
+
+AYCD setup:
+  1. AutoSolve dashboard → create Bot API Key → AYCD_API_KEY=
+  2. CAPTCHA_PROVIDER=aycd
+  3. Start AutoSolve on OneClick solvers (or enable a 3rd-party route)

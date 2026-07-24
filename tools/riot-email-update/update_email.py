@@ -40,7 +40,7 @@ ACCOUNT_URL = "https://account.riotgames.com/"
 AUTH_HOST_HINT = "auth.riotgames.com"
 
 # Printed at startup so you can confirm Windows replaced the right files.
-TOOL_BUILD = "2026-07-24d-headless"
+TOOL_BUILD = "2026-07-24e-aycd"
 
 # Default entry: Tencent Docs scenario interstitial → click Continue → account.riotgames.com.
 # Opening Riot via this click-through is more reliable than deep-linking authenticate URLs.
@@ -345,16 +345,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--captcha-provider",
         choices=(
-            "manual", "vision", "hybrid", "capless", "capsolver",
-            "capmonster", "twocaptcha", "nonecap",
+            "manual", "vision", "hybrid", "aycd", "autosolve",
+            "capless", "capsolver", "capmonster", "twocaptcha", "nonecap",
         ),
         default=None,
         help="Captcha provider (default: CAPTCHA_PROVIDER or vision). "
-        "'manual' pauses for a human to solve while the rest stays automated.",
+        "'aycd' sends hCaptcha to AYCD AutoSolve; 'manual' pauses for a human.",
     )
     parser.add_argument(
         "--captcha-key",
-        help="Captcha API key (or set CAPLESS/CAPMONSTER/TWOCAPTCHA/NONECAP/CAPSOLVER_API_KEY)",
+        help="Captcha API key (AYCD_API_KEY / CAPLESS / TWOCAPTCHA / …)",
     )
     parser.add_argument(
         "--no-captcha-solver",
@@ -1212,29 +1212,45 @@ def main() -> int:
                 "Use HEADED=true for manual, or CAPTCHA_PROVIDER=vision for unattended.",
                 flush=True,
             )
+    if captcha_provider in ("autosolve", "aycd_autosolve"):
+        captcha_provider = "aycd"
     if not args.no_captcha_solver and captcha_provider not in ("manual", "human"):
-        key_env = {
-            "capless": "CAPLESS_API_KEY",
-            "capsolver": "CAPSOLVER_API_KEY",
-            "capmonster": "CAPMONSTER_API_KEY",
-            "twocaptcha": "TWOCAPTCHA_API_KEY",
-            "nonecap": "NONECAP_API_KEY",
-            "vision": "TWOCAPTCHA_API_KEY",
-        }.get(captcha_provider)
-        captcha_key = (
-            args.captcha_key
-            or (os.getenv(key_env) if key_env else None)
-            or os.getenv("TWOCAPTCHA_API_KEY")
-            or os.getenv("TWO_CAPTCHA_API_KEY")
-            or os.getenv("CAPLESS_API_KEY")
-            or os.getenv("CAPTCHA_API_KEY")
-            or os.getenv("CAPMONSTER_API_KEY")
-            or os.getenv("NONECAP_API_KEY")
-            or os.getenv("CAPSOLVER_API_KEY")
-            or None
-        )
+        if captcha_provider == "aycd":
+            captcha_key = (
+                args.captcha_key
+                or os.getenv("AYCD_API_KEY")
+                or os.getenv("AUTOSOLVE_API_KEY")
+                or None
+            )
+        else:
+            key_env = {
+                "capless": "CAPLESS_API_KEY",
+                "capsolver": "CAPSOLVER_API_KEY",
+                "capmonster": "CAPMONSTER_API_KEY",
+                "twocaptcha": "TWOCAPTCHA_API_KEY",
+                "nonecap": "NONECAP_API_KEY",
+                "vision": "TWOCAPTCHA_API_KEY",
+            }.get(captcha_provider)
+            captcha_key = (
+                args.captcha_key
+                or (os.getenv(key_env) if key_env else None)
+                or os.getenv("TWOCAPTCHA_API_KEY")
+                or os.getenv("TWO_CAPTCHA_API_KEY")
+                or os.getenv("CAPLESS_API_KEY")
+                or os.getenv("CAPTCHA_API_KEY")
+                or os.getenv("CAPMONSTER_API_KEY")
+                or os.getenv("NONECAP_API_KEY")
+                or os.getenv("CAPSOLVER_API_KEY")
+                or None
+            )
     if captcha_key:
         captcha_key = captcha_key.strip() or None
+    if captcha_provider == "aycd" and not captcha_key:
+        print(
+            "[error] CAPTCHA_PROVIDER=aycd but AYCD_API_KEY is missing.\n"
+            "        Create a Bot API Key in the AutoSolve dashboard and set AYCD_API_KEY=…",
+            flush=True,
+        )
 
     from proxyutil import pick_proxy, proxy_count, to_playwright
 
@@ -1300,7 +1316,14 @@ def main() -> int:
     if captcha_provider == "capsolver":
         print(
             "NOTE: CapSolver currently rejects Riot's hCaptcha sitekey.\n"
-            "      Prefer CAPTCHA_PROVIDER=vision + TWOCAPTCHA_API_KEY.\n"
+            "      Prefer CAPTCHA_PROVIDER=aycd or vision + TWOCAPTCHA_API_KEY.\n"
+        )
+    if captcha_provider == "aycd":
+        print(
+            "NOTE: AYCD AutoSolve — start OneClick solvers (Start AutoSolve) or\n"
+            "      enable a 3rd-party route in the AYCD dashboard before running.\n"
+            "      Use the same residential proxy on the browser + AYCD task when\n"
+            "      ENTERPRISE_STRICT=1 so the token IP matches Riot's session.\n"
         )
 
     if current_inbox:
