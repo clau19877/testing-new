@@ -188,7 +188,9 @@ def main(argv: list[str] | None = None) -> int:
     if not ensure_tasks_csv(tasks_csv):
         return 0
 
-    os.environ.setdefault("CAPTCHA_PROVIDER", "manual")
+    # In-bot AI: OCR/CV + YesCaptcha/2Captcha Coordinates inside Playwright.
+    os.environ.setdefault("CAPTCHA_PROVIDER", "vision")
+    os.environ.setdefault("VISION_BACKEND", "hybrid")
     if want_headless or (os.getenv("HEADED") or "").strip().lower() in {
         "0", "false", "no", "off", "headless",
     }:
@@ -197,6 +199,21 @@ def main(argv: list[str] | None = None) -> int:
     else:
         os.environ.setdefault("HEADED", "true")
         ensure_display()
+
+    captcha = (os.getenv("CAPTCHA_PROVIDER") or "vision").strip().lower()
+    print(
+        f"[captcha] in-bot AI provider={captcha} "
+        f"VISION_BACKEND={os.getenv('VISION_BACKEND') or 'hybrid'}",
+        flush=True,
+    )
+    if captcha in ("vision", "hybrid") and not (
+        os.getenv("TWOCAPTCHA_API_KEY") or os.getenv("TWO_CAPTCHA_API_KEY")
+    ):
+        print(
+            "[warn] TWOCAPTCHA_API_KEY missing — hybrid vision works best with it "
+            "for Coordinates fallback when local CV misses.",
+            flush=True,
+        )
 
     print(f"[run] starting tasks from {tasks_csv}", flush=True)
     cmd = [str(py), str(ROOT / "run_tasks.py"), str(tasks_csv), *extra]

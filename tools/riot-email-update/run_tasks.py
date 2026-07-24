@@ -112,8 +112,9 @@ def build_env(row: dict[str, str], *, headed: bool) -> dict[str, str]:
             "IMAP_PASSWORD": row["imap_app_password"],
             "IMAP_FOLDER": row.get("imap_folder") or "INBOX",
             "IMAP_SSL": "true",
-            # Prefer .env CAPTCHA_PROVIDER (manual / vision / …)
-            "CAPTCHA_PROVIDER": env.get("CAPTCHA_PROVIDER") or "manual",
+            # Prefer .env CAPTCHA_PROVIDER (vision = in-bot AI default)
+            "CAPTCHA_PROVIDER": env.get("CAPTCHA_PROVIDER") or "vision",
+            "VISION_BACKEND": env.get("VISION_BACKEND") or "hybrid",
             "NONINTERACTIVE": "1",
             "HEADED": "true" if headed else "false",
             "PROXY_ATTEMPTS": env.get("PROXY_ATTEMPTS") or "1",
@@ -176,7 +177,9 @@ def main() -> int:
         print(f"# TASK {i}/{len(tasks)}: {row['riot_username']} → {row['new_email']}")
         print("#" * 70, flush=True)
         env = build_env(row, headed=headed)
-        captcha = (env.get("CAPTCHA_PROVIDER") or "manual").strip().lower()
+        captcha = (env.get("CAPTCHA_PROVIDER") or "vision").strip().lower()
+        if captcha == "hybrid":
+            captcha = "vision"
         cmd = [
             sys.executable,
             str(ROOT / "update_email.py"),

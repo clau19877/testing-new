@@ -7,7 +7,9 @@
 2. Put `RiotEmailUpdate.exe` in this folder (same place as `launch.py`).
 3. Double-click **`RiotEmailUpdate.exe`**.
 4. On first run it creates `data/tasks.csv` and opens it — fill the rows, save, run again.
-5. A real Chromium window opens; solve each hCaptcha when prompted. MFA + email change stay automated.
+5. Default captcha is **in-bot AI** (`vision` / hybrid). Put `TWOCAPTCHA_API_KEY`
+   in `.env` (optional `YESCAPTCHA_API_KEY`). MFA + email change stay automated.
+   For human solving instead: `CAPTCHA_PROVIDER=manual` + `HEADED=true`.
 
 Optional: copy `.env.example` → `.env` and add `data/proxies.txt` if you use proxies.
 
@@ -28,10 +30,8 @@ RiotEmailUpdate.exe --headless
 ```
 or set `HEADED=false` in `.env`.
 
-Manual captcha needs a visible window (`HEADED=true`). For unattended
-headless runs use `CAPTCHA_PROVIDER=vision` plus `TWOCAPTCHA_API_KEY`
-(optional `YESCAPTCHA_API_KEY`). hCaptcha is solved in-bot (browser clicks /
-OCR/AI), not via AYCD token harvesting.
+Default is in-bot AI (`CAPTCHA_PROVIDER=vision`). Works headed or headless.
+Manual mode still needs `HEADED=true`.
 
 ## Alternatives
 

@@ -1,14 +1,15 @@
-TOOL_BUILD=2026-07-24f-inbot
+TOOL_BUILD=2026-07-24g-vision
 
 If RiotEmailUpdate.exe does not print:
-  Tool build: 2026-07-24f-inbot
+  Tool build: 2026-07-24g-vision
 then update_email.py was NOT replaced.
 
-Captcha strategy (in-bot, not AYCD):
-  CAPTCHA_PROVIDER=manual  → human solves in the browser window
-  CAPTCHA_PROVIDER=vision  → OCR/AI + 2Captcha Coordinates clicks (unattended)
+Default captcha = in-bot AI:
+  CAPTCHA_PROVIDER=vision
+  VISION_BACKEND=hybrid
+  TWOCAPTCHA_API_KEY=…     (recommended)
+  YESCAPTCHA_API_KEY=…     (optional)
 
 Headless:
   RiotEmailUpdate.exe --headless
-  or set HEADED=false in .env
-  (manual still needs HEADED=true)
+  or HEADED=false in .env

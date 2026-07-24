@@ -40,7 +40,7 @@ ACCOUNT_URL = "https://account.riotgames.com/"
 AUTH_HOST_HINT = "auth.riotgames.com"
 
 # Printed at startup so you can confirm Windows replaced the right files.
-TOOL_BUILD = "2026-07-24f-inbot"
+TOOL_BUILD = "2026-07-24g-vision"
 
 # Default entry: Tencent Docs scenario interstitial → click Continue → account.riotgames.com.
 # Opening Riot via this click-through is more reliable than deep-linking authenticate URLs.
