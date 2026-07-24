@@ -39,6 +39,9 @@ ACCOUNT_URL = "https://account.riotgames.com/"
 # Override with EMAIL_CHANGE_URL / --email-change-url / CSV email_change_url.
 AUTH_HOST_HINT = "auth.riotgames.com"
 
+# Printed at startup so you can confirm Windows replaced the right files.
+TOOL_BUILD = "2026-07-24c-docs-hostfix"
+
 # Default entry: Tencent Docs scenario interstitial → click Continue → account.riotgames.com.
 # Opening Riot via this click-through is more reliable than deep-linking authenticate URLs.
 DEFAULT_LOGIN_ENTRY_URL = (
@@ -236,34 +239,47 @@ def click_through_login_entry(page, *, timeout_ms: int = 45_000) -> bool:
 
 def open_riot_login(page, *, timeout_ms: int = 45_000) -> None:
     """
-    Open the login entry (docs.qq.com by default), click Continue into
-    account.riotgames.com, and wait for the Riot auth form.
+    Open the login entry (docs.qq.com by default), then land on Riot auth.
+
+    For docs.qq.com (and similar) interstitials we:
+      1) open the entry URL (preserves the intended referrer/click path)
+      2) immediately follow the embedded ?url= target (same as Continue)
+      3) if that fails, click Continue / fall back to account.riotgames.com
     """
     from session_log import log
 
     entry = resolve_login_url()
-    log("login", f"entry URL: {entry}")
+    log("login", f"build={TOOL_BUILD} entry URL: {entry}")
+    print(f"  Tool build: {TOOL_BUILD}", flush=True)
     page.goto(entry, wait_until="domcontentloaded")
-    page.wait_for_timeout(1_200)
+    page.wait_for_timeout(800)
     log("login", f"after entry goto → {page.url} host={url_host(page.url)}")
 
-    # Always click through when still on a non-Riot host (e.g. docs.qq.com).
-    # Do NOT use a substring check — the entry URL embeds account.riotgames.com
-    # inside ?url=, which previously skipped this step.
+    # Always leave non-Riot hosts. Prefer the embedded ?url= target (fast + reliable).
     if not _on_riot_auth_or_account(page.url or ""):
-        ok = click_through_login_entry(page, timeout_ms=timeout_ms)
-        log("login", f"click-through ok={ok} url={page.url} host={url_host(page.url)}")
-        if not ok:
-            print("  Entry click-through failed — trying account.riotgames.com directly…")
-            page.goto(ACCOUNT_URL, wait_until="domcontentloaded")
-            log("login", f"direct account goto → {page.url}")
+        target = entry_target_from_url(page.url or "") or entry_target_from_url(entry) or ACCOUNT_URL
+        print(f"  Leaving interstitial → {target}", flush=True)
+        log("login", f"interstitial follow → {target}")
+        try:
+            page.goto(target, wait_until="domcontentloaded")
+            page.wait_for_timeout(500)
+        except Exception as exc:
+            log("login", f"interstitial follow failed: {exc}", level="WARN")
+
+        if not _on_riot_auth_or_account(page.url or ""):
+            ok = click_through_login_entry(page, timeout_ms=timeout_ms)
+            log("login", f"click-through ok={ok} url={page.url} host={url_host(page.url)}")
+            if not ok:
+                print("  Entry click-through failed — trying account.riotgames.com directly…")
+                page.goto(ACCOUNT_URL, wait_until="domcontentloaded")
+                log("login", f"direct account goto → {page.url}")
 
     # Wait for Riot auth host or a visible username/password form.
     deadline = time.time() + min(25.0, timeout_ms / 1000.0)
     while time.time() < deadline:
         host = url_host(page.url or "")
         if (
-            host in {"auth.riotgames.com", "authenticate.riotgames.com"}
+            host in {"auth.riotgames.com", "authenticate.riotgames.com", "account.riotgames.com"}
             or host.endswith(".riotgames.com")
             or login_form_visible(page)
         ):
@@ -772,15 +788,22 @@ def run_login(
         f"logged_in={page_looks_logged_in(page)}",
     )
 
+    # Hard rule: never skip login while still on a non-Riot host (e.g. docs.qq.com).
+    host_now = url_host(page.url or "")
+    if not host_now.endswith("riotgames.com"):
+        print(f"  Still on non-Riot host ({host_now}) — forcing account.riotgames.com…")
+        log("login", f"forcing account from host={host_now}", level="WARN")
+        page.goto(ACCOUNT_URL, wait_until="domcontentloaded")
+        page.wait_for_timeout(1_500)
+
     # Only skip credential fill when the account portal is truly signed-in.
-    # account.riotgames.com/oauth2/log-in used to false-trigger "already signed in".
     if page_looks_logged_in(page) and not login_form_visible(page):
         print("  Appears already signed in.")
         log("login", "skipping form fill — already signed in")
         return "logged_in"
 
-    if not login_form_visible(page) and not _on_riot_auth_or_account(page.url or ""):
-        print("  Login form not visible yet — retrying account.riotgames.com…")
+    if not login_form_visible(page):
+        print("  Login form not visible yet — opening Riot auth…")
         page.goto(ACCOUNT_URL, wait_until="domcontentloaded")
         page.wait_for_timeout(2_000)
         log("login", f"retry account → {page.url} form={login_form_visible(page)}")
@@ -1155,7 +1178,9 @@ def main() -> int:
 
     tag = (args.username or os.getenv("RIOT_USERNAME") or "run").strip()
     log_path = start_session_log(tag=tag)
+    print(f"  Tool build: {TOOL_BUILD}", flush=True)
     print(f"  Session log: {log_path}", flush=True)
+    log("session", f"tool_build={TOOL_BUILD}")
 
     headed = args.headed if args.headed is not None else env_bool("HEADED", True)
     # Default: in-browser hybrid (local CV + 2Captcha Coordinates). Token APIs
