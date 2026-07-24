@@ -42,3 +42,34 @@ osascript safari_riot_email.applescript \
 6. Optional verify code via IMAP / prompt  
 
 If hCaptcha still appears, the script pauses so you can solve it in Safari.
+
+## Batch from CSV → success.txt / failed.txt
+
+CSV format (same as `data/tasks.csv.example`):
+
+```csv
+riot_username,riot_password,imap_email,imap_app_password,new_email,imap_host,imap_port,proxy_index,email_change_url
+5bethowen59553,Reject123a,chunghin.lau@icloud.com,gvys-iypa-qkxj-gmmx,audio_facings_4u@icloud.com,imap.mail.me.com,993,,
+```
+
+On your Mac:
+
+```bash
+cd tools/riot-email-update
+# put rows in data/tasks.csv
+chmod +x run_safari_batch.sh
+./run_safari_batch.sh data/tasks.csv
+```
+
+Results (appended, tab-separated):
+
+| File | Contents |
+|------|----------|
+| `success.txt` | `username  password  imap_email  imap_app_password  new_email  imap_host` |
+| `failed.txt`  | same fields + `reason` |
+
+Dry-run (validate CSV only):
+
+```bash
+python3 run_safari_batch.py data/tasks.csv --dry-run
+```

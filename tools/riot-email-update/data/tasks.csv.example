@@ -7,9 +7,14 @@ riot_username,riot_password,imap_email,imap_app_password,new_email,imap_host,ima
 #   new_email          Email address you want to change the account to
 #   imap_host          (optional) IMAP server; blank = auto from the email domain
 #   imap_port          (optional) default 993
-#   proxy_index        (optional) which proxy from data/proxies.txt to use
-#   email_change_url   (optional) post-login page to edit email; blank = account.riotgames.com
-#                      (login itself always uses authenticate…accountodactyl-prod with email.edit)
+#   proxy_index        (optional) Playwright only — ignored by Safari batch
+#   email_change_url   (optional) post-login page; blank = account.riotgames.com
+#
+# macOS Safari batch (usually no captcha):
+#   ./run_safari_batch.sh data/tasks.csv
+#   → success.txt  (ok accounts)
+#   → failed.txt   (failed accounts + reason)
+#
 # iCloud app passwords: appleid.apple.com > Sign-In and Security > App-Specific Passwords
 # Gmail app passwords:  myaccount.google.com/apppasswords (requires 2FA)
 example-login@icloud.com,RiotPassw0rd!,codes-inbox@icloud.com,abcd-efgh-ijkl-mnop,my-new-email@gmail.com,,,,

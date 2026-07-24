@@ -25,6 +25,7 @@
     --mfa-code CODE     skip MFA prompt if you already have the code
     --verify-code CODE  new-email verify code (skip prompt)
     --skip-email-change only login, do not change email
+    --batch             no dialogs; fail if MFA/IMAP/captcha needs a human
 *)
 
 on run argv
@@ -37,16 +38,28 @@ on run argv
 	set mfaCode to optValue(opts, "mfa-code", "")
 	set verifyCode to optValue(opts, "verify-code", "")
 	set skipEmail to optFlag(opts, "skip-email-change")
+	set batchMode to optFlag(opts, "batch")
 
-	if riotUser is "" then set riotUser to text returned of (display dialog "Riot username or email:" default answer "")
-	if riotPass is "" then set riotPass to text returned of (display dialog "Riot password:" default answer "" with hidden answer)
-	if (not skipEmail) and newEmail is "" then set newEmail to text returned of (display dialog "New email address:" default answer "")
+	if riotUser is "" then
+		if batchMode then error "batch mode requires --username"
+		set riotUser to text returned of (display dialog "Riot username or email:" default answer "")
+	end if
+	if riotPass is "" then
+		if batchMode then error "batch mode requires --password"
+		set riotPass to text returned of (display dialog "Riot password:" default answer "" with hidden answer)
+	end if
+	if (not skipEmail) and newEmail is "" then
+		if batchMode then error "batch mode requires --new-email (or --skip-email-change)"
+		set newEmail to text returned of (display dialog "New email address:" default answer "")
+	end if
 
 	logLine("Opening Safari → docs.qq.com entry…")
 	tell application "Safari"
 		activate
-		if (count of windows) is 0 then make new document
-		set URL of document 1 to entryURL
+		try
+			close every window
+		end try
+		make new document with properties {URL:entryURL}
 	end tell
 	delay 2.5
 
@@ -125,6 +138,7 @@ on run argv
 	logLine("Post-login phase: " & phase)
 
 	if phase is "captcha" then
+		if batchMode then error "hCaptcha appeared (batch mode will not wait for manual solve)"
 		display dialog "hCaptcha appeared in Safari. Solve it in the Safari window, then click OK." buttons {"OK"} default button 1
 		set phase to waitForPostLogin(120)
 		logLine("After manual captcha phase: " & phase)
@@ -139,6 +153,7 @@ on run argv
 			set mfaCode to fetchImapCode("IMAP")
 		end if
 		if mfaCode is "" then
+			if batchMode then error "MFA required but no IMAP code (set IMAP_* / imap columns)"
 			set mfaCode to text returned of (display dialog "Enter Riot MFA / email code:" default answer "")
 		end if
 		logLine("Submitting MFA code…")
@@ -176,7 +191,7 @@ on run argv
 
 	if skipEmail then
 		logLine("Skipping email change (--skip-email-change).")
-		display dialog "Logged in via Safari. Email change skipped." buttons {"OK"} default button 1
+		if not batchMode then display dialog "Logged in via Safari. Email change skipped." buttons {"OK"} default button 1
 		return "login_ok"
 	end if
 
@@ -223,13 +238,31 @@ on run argv
 	")
 	logLine(emailFill)
 
-	display dialog "Review the Safari window: confirm the new email looks right, submit the change if needed, then click OK here to continue (or enter a verify code next)." buttons {"OK"} default button 1
+	-- Submit email change if a save/submit button is visible
+	safariJS("
+		(function () {
+		  const buttons = Array.from(document.querySelectorAll('button, input[type=\"submit\"]'));
+		  for (const el of buttons) {
+		    const t = ((el.textContent || el.value || '') + '').toLowerCase();
+		    if (/save|submit|continue|confirm|send|update|change/.test(t)) {
+		      el.click();
+		      return 'clicked:' + t.slice(0, 40);
+		    }
+		  }
+		  return 'no-submit';
+		})();
+	")
+	delay 2.5
+
+	if not batchMode then
+		display dialog "Review the Safari window: confirm the new email looks right, then click OK to continue (verify code next if needed)." buttons {"OK"} default button 1
+	end if
 
 	if verifyCode is "" then
 		set verifyCode to fetchImapCode("NEW_IMAP")
 		if verifyCode is "" then set verifyCode to fetchImapCode("IMAP")
 	end if
-	if verifyCode is "" then
+	if verifyCode is "" and not batchMode then
 		try
 			set verifyCode to text returned of (display dialog "New-email verify code (leave blank to finish manually in Safari):" default answer "")
 		on error
@@ -258,9 +291,14 @@ on run argv
 			})(" & jsonString(verifyCode) & ");
 		")
 		delay 2
+	else if batchMode then
+		logLine("No verify code from IMAP — assuming save without code / check manually later")
 	end if
 
-	display dialog "Safari flow finished. Confirm the email change completed in the Safari window." buttons {"OK"} default button 1
+	if not batchMode then
+		display dialog "Safari flow finished. Confirm the email change completed in the Safari window." buttons {"OK"} default button 1
+	end if
+	logLine("SUCCESS")
 	return "done"
 end run
 
@@ -359,7 +397,7 @@ on parseArgs(argv)
 		set a to item i of argv as text
 		if a starts with "--" then
 			set key to text 3 thru -1 of a
-			if key is "skip-email-change" then
+			if key is "skip-email-change" or key is "batch" then
 				set end of opts to {key, "1"}
 			else if i < (count of argv) then
 				set i to i + 1
