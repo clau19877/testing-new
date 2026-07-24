@@ -181,7 +181,8 @@ end defaultEntryURL
 on logLine(msg)
 	log msg
 	try
-		do shell script "printf '%s\\n' " & quoted form of ("[safari-riot] " & msg) & " >&2"
+		-- AppleScript "\n" is backslash + n, which printf interprets as newline.
+		do shell script "printf '%s\n' " & quoted form of ("[safari-riot] " & msg) & " >&2"
 	end try
 end logLine
 
