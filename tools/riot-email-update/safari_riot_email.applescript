@@ -26,6 +26,10 @@
     --verify-code CODE  new-email verify code (skip prompt)
     --skip-email-change only login, do not change email
     --batch             no dialogs; fail if MFA/IMAP/captcha needs a human
+
+  Quoting note: AppleScript strings use "" for a literal quote. Never use \"
+  inside AppleScript string literals (that breaks compile with errors like
+  预期的是表示式，但找到的是「st」).
 *)
 
 on run argv
@@ -65,73 +69,17 @@ on run argv
 
 	-- Click Continue on the Tencent Docs interstitial
 	logLine("Clicking Continue on interstitial…")
-	safariJS("
-		(function () {
-		  const sels = [
-		    'a[href*=\"account.riotgames.com\"]',
-		    'a[href*=\"authenticate.riotgames.com\"]',
-		    'a:has-text(\"Continue\")',
-		    'button:has-text(\"Continue\")'
-		  ];
-		  // :has-text is Playwright-only — use text match in DOM
-		  const candidates = Array.from(document.querySelectorAll('a,button'));
-		  for (const el of candidates) {
-		    const t = (el.textContent || '').trim();
-		    const href = (el.getAttribute('href') || '');
-		    if (/account\\.riotgames\\.com|authenticate\\.riotgames\\.com/i.test(href)
-		        || /^Continue/i.test(t) || t.includes('继续')) {
-		      el.click();
-		      return 'clicked:' + (t || href).slice(0, 80);
-		    }
-		  }
-		  // Fallback: follow ?url=
-		  try {
-		    const u = new URL(location.href);
-		    const target = u.searchParams.get('url');
-		    if (target) { location.href = target; return 'goto:' + target; }
-		  } catch (e) {}
-		  return 'no-continue';
-		})();
-	")
+	safariJS(jsClickContinue())
 	delay 3.5
 	waitForRiotLogin(45)
 
 	logLine("Filling Riot login form…")
-	set fillResult to safariJS("
-		(function (user, pass) {
-		  function setNative(el, value) {
-		    if (!el) return false;
-		    const proto = window.HTMLInputElement.prototype;
-		    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-		    if (desc && desc.set) desc.set.call(el, value);
-		    else el.value = value;
-		    el.dispatchEvent(new Event('input', { bubbles: true }));
-		    el.dispatchEvent(new Event('change', { bubbles: true }));
-		    return true;
-		  }
-		  const userEl = document.querySelector('input[name=\"username\"], input[type=\"text\"], input[autocomplete=\"username\"]');
-		  const passEl = document.querySelector('input[name=\"password\"], input[type=\"password\"]');
-		  const okUser = setNative(userEl, user);
-		  const okPass = setNative(passEl, pass);
-		  // dismiss cookie banner if present
-		  const cookie = document.querySelector('button.osano-cm-dialog__close, button[aria-label*=\"Close\"]');
-		  if (cookie) try { cookie.click(); } catch (e) {}
-		  return JSON.stringify({ user: okUser, pass: okPass, href: location.href });
-		})(" & jsonString(riotUser) & ", " & jsonString(riotPass) & ");
-	")
+	set fillResult to safariJS(jsFillLogin(riotUser, riotPass))
 	logLine("Fill result: " & fillResult)
 	delay 0.6
 
 	logLine("Clicking Sign in…")
-	safariJS("
-		(function () {
-		  const btn = document.querySelector('button[data-testid=\"btn-signin-submit\"], button[type=\"submit\"]');
-		  if (btn) { btn.click(); return 'clicked-signin'; }
-		  const form = document.querySelector('form');
-		  if (form) { form.requestSubmit ? form.requestSubmit() : form.submit(); return 'submitted-form'; }
-		  return 'no-signin';
-		})();
-	")
+	safariJS(jsClickSignIn())
 
 	-- Wait for MFA, captcha, account, or error
 	set phase to waitForPostLogin(90)
@@ -157,25 +105,7 @@ on run argv
 			set mfaCode to text returned of (display dialog "Enter Riot MFA / email code:" default answer "")
 		end if
 		logLine("Submitting MFA code…")
-		safariJS("
-			(function (code) {
-			  function setNative(el, value) {
-			    if (!el) return false;
-			    const proto = window.HTMLInputElement.prototype;
-			    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-			    if (desc && desc.set) desc.set.call(el, value);
-			    else el.value = value;
-			    el.dispatchEvent(new Event('input', { bubbles: true }));
-			    el.dispatchEvent(new Event('change', { bubbles: true }));
-			    return true;
-			  }
-			  const el = document.querySelector('input[name=\"code\"], input[autocomplete=\"one-time-code\"], input[inputmode=\"numeric\"], input[type=\"tel\"], input[type=\"text\"]');
-			  setNative(el, code);
-			  const btn = document.querySelector('button[type=\"submit\"], button[data-testid*=\"submit\"], button');
-			  if (btn) btn.click();
-			  return el ? 'mfa-filled' : 'mfa-input-missing';
-			})(" & jsonString(mfaCode) & ");
-		")
+		safariJS(jsSubmitCode(mfaCode, "mfa"))
 		delay 3
 		set phase to waitForPostLogin(60)
 		logLine("After MFA phase: " & phase)
@@ -200,58 +130,15 @@ on run argv
 	delay 3
 
 	-- Try to open email edit UI
-	safariJS("
-		(function () {
-		  const links = Array.from(document.querySelectorAll('a,button,[role=\"button\"]'));
-		  for (const el of links) {
-		    const t = (el.textContent || '').toLowerCase();
-		    if (t.includes('email') || t.includes('change email') || t.includes('edit')) {
-		      el.click();
-		      return 'clicked:' + t.slice(0, 60);
-		    }
-		  }
-		  return 'no-email-control';
-		})();
-	")
+	safariJS(jsClickEmailControl())
 	delay 2
 
 	logLine("Filling new email: " & newEmail)
-	set emailFill to safariJS("
-		(function (email) {
-		  function setNative(el, value) {
-		    if (!el) return false;
-		    const proto = window.HTMLInputElement.prototype;
-		    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-		    if (desc && desc.set) desc.set.call(el, value);
-		    else el.value = value;
-		    el.dispatchEvent(new Event('input', { bubbles: true }));
-		    el.dispatchEvent(new Event('change', { bubbles: true }));
-		    return true;
-		  }
-		  const inputs = Array.from(document.querySelectorAll('input[type=\"email\"], input[name*=\"email\" i], input[id*=\"email\" i]'));
-		  let n = 0;
-		  for (const el of inputs) {
-		    if (setNative(el, email)) n++;
-		  }
-		  return 'filled=' + n;
-		})(" & jsonString(newEmail) & ");
-	")
+	set emailFill to safariJS(jsFillEmail(newEmail))
 	logLine(emailFill)
 
 	-- Submit email change if a save/submit button is visible
-	safariJS("
-		(function () {
-		  const buttons = Array.from(document.querySelectorAll('button, input[type=\"submit\"]'));
-		  for (const el of buttons) {
-		    const t = ((el.textContent || el.value || '') + '').toLowerCase();
-		    if (/save|submit|continue|confirm|send|update|change/.test(t)) {
-		      el.click();
-		      return 'clicked:' + t.slice(0, 40);
-		    }
-		  }
-		  return 'no-submit';
-		})();
-	")
+	safariJS(jsClickSubmitEmail())
 	delay 2.5
 
 	if not batchMode then
@@ -271,25 +158,7 @@ on run argv
 	end if
 
 	if verifyCode is not "" then
-		safariJS("
-			(function (code) {
-			  function setNative(el, value) {
-			    if (!el) return false;
-			    const proto = window.HTMLInputElement.prototype;
-			    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-			    if (desc && desc.set) desc.set.call(el, value);
-			    else el.value = value;
-			    el.dispatchEvent(new Event('input', { bubbles: true }));
-			    el.dispatchEvent(new Event('change', { bubbles: true }));
-			    return true;
-			  }
-			  const el = document.querySelector('input[name=\"code\"], input[autocomplete=\"one-time-code\"], input[inputmode=\"numeric\"], input[type=\"tel\"], input[type=\"text\"]');
-			  setNative(el, code);
-			  const btn = document.querySelector('button[type=\"submit\"], button[data-testid*=\"submit\"]');
-			  if (btn) btn.click();
-			  return el ? 'verify-filled' : 'verify-missing';
-			})(" & jsonString(verifyCode) & ");
-		")
+		safariJS(jsSubmitCode(verifyCode, "verify"))
 		delay 2
 	else if batchMode then
 		logLine("No verify code from IMAP — assuming save without code / check manually later")
@@ -317,13 +186,15 @@ on logLine(msg)
 end logLine
 
 on jsonString(s)
-	-- Produce a JS string literal
+	-- Produce a JS string literal safely for embedding in do JavaScript.
+	-- AppleScript: "\" = one backslash; "\\" = two backslashes; quote = ".
+	-- "\n" is backslash + n (AppleScript has no C-style escapes).
 	set s to s as text
-	set s to replaceText(s, "\\", "\\\\")
-	set s to replaceText(s, "\"", "\\\"")
-	set s to replaceText(s, return, "\\n")
-	set s to replaceText(s, linefeed, "\\n")
-	return "\"" & s & "\""
+	set s to replaceText(s, "\", "\\")
+	set s to replaceText(s, quote, "\" & quote)
+	set s to replaceText(s, return, "\n")
+	set s to replaceText(s, linefeed, "\n")
+	return quote & s & quote
 end jsonString
 
 on replaceText(theText, oldString, newString)
@@ -348,6 +219,152 @@ on safariJS(js)
 	end tell
 end safariJS
 
+-- JS builders: keep double-quotes out of AppleScript string literals.
+-- Use only single quotes in the JS source text below.
+
+on jsClickContinue()
+	return "(function () {" & ¬
+		"  const candidates = Array.from(document.querySelectorAll('a,button'));" & ¬
+		"  for (const el of candidates) {" & ¬
+		"    const t = (el.textContent || '').trim();" & ¬
+		"    const href = (el.getAttribute('href') || '');" & ¬
+		"    if (/account\\.riotgames\\.com|authenticate\\.riotgames\\.com/i.test(href)" & ¬
+		"        || /^Continue/i.test(t) || t.includes('\\u7ee7\\u7eed')) {" & ¬
+		"      el.click();" & ¬
+		"      return 'clicked:' + (t || href).slice(0, 80);" & ¬
+		"    }" & ¬
+		"  }" & ¬
+		"  try {" & ¬
+		"    const u = new URL(location.href);" & ¬
+		"    const target = u.searchParams.get('url');" & ¬
+		"    if (target) { location.href = target; return 'goto:' + target; }" & ¬
+		"  } catch (e) {}" & ¬
+		"  return 'no-continue';" & ¬
+		"})();"
+end jsClickContinue
+
+on jsFillLogin(userName, passText)
+	return "(function (user, pass) {" & ¬
+		"  function setNative(el, value) {" & ¬
+		"    if (!el) return false;" & ¬
+		"    const proto = window.HTMLInputElement.prototype;" & ¬
+		"    const desc = Object.getOwnPropertyDescriptor(proto, 'value');" & ¬
+		"    if (desc && desc.set) desc.set.call(el, value);" & ¬
+		"    else el.value = value;" & ¬
+		"    el.dispatchEvent(new Event('input', { bubbles: true }));" & ¬
+		"    el.dispatchEvent(new Event('change', { bubbles: true }));" & ¬
+		"    return true;" & ¬
+		"  }" & ¬
+		"  const userEl = document.querySelector('input[name=username], input[type=text], input[autocomplete=username]');" & ¬
+		"  const passEl = document.querySelector('input[name=password], input[type=password]');" & ¬
+		"  const okUser = setNative(userEl, user);" & ¬
+		"  const okPass = setNative(passEl, pass);" & ¬
+		"  const cookie = document.querySelector('button.osano-cm-dialog__close, button[aria-label*=Close]');" & ¬
+		"  if (cookie) try { cookie.click(); } catch (e) {}" & ¬
+		"  return JSON.stringify({ user: okUser, pass: okPass, href: location.href });" & ¬
+		"})(" & jsonString(userName) & ", " & jsonString(passText) & ");"
+end jsFillLogin
+
+on jsClickSignIn()
+	return "(function () {" & ¬
+		"  const btn = document.querySelector('button[data-testid=btn-signin-submit], button[type=submit]');" & ¬
+		"  if (btn) { btn.click(); return 'clicked-signin'; }" & ¬
+		"  const form = document.querySelector('form');" & ¬
+		"  if (form) { form.requestSubmit ? form.requestSubmit() : form.submit(); return 'submitted-form'; }" & ¬
+		"  return 'no-signin';" & ¬
+		"})();"
+end jsClickSignIn
+
+on jsProbePhase()
+	return "(function () {" & ¬
+		"  const href = location.href || '';" & ¬
+		"  const body = (document.body && document.body.innerText || '').toLowerCase();" & ¬
+		"  if (/incorrect|check your details|try again/.test(body) && /password|username|sign in/.test(body))" & ¬
+		"    return 'bad_creds';" & ¬
+		"  if (document.querySelector('iframe[src*=hcaptcha.com]'))" & ¬
+		"    return 'captcha';" & ¬
+		"  if (/code|verification|authenticate|two-factor|2fa|email you/.test(body)" & ¬
+		"      && document.querySelector('input[name=code], input[autocomplete=one-time-code], input[inputmode=numeric]'))" & ¬
+		"    return 'mfa';" & ¬
+		"  if (/account\\.riotgames\\.com/.test(href) && !/log-in|login|oauth2\\/log-in/.test(href))" & ¬
+		"    return 'account';" & ¬
+		"  if (/account\\.riotgames\\.com/.test(href))" & ¬
+		"    return 'logged_in';" & ¬
+		"  if (document.querySelector('input[name=username], input[type=password]'))" & ¬
+		"    return 'login';" & ¬
+		"  return 'unknown';" & ¬
+		"})();"
+end jsProbePhase
+
+on jsSubmitCode(codeText, kindText)
+	return "(function (code) {" & ¬
+		"  function setNative(el, value) {" & ¬
+		"    if (!el) return false;" & ¬
+		"    const proto = window.HTMLInputElement.prototype;" & ¬
+		"    const desc = Object.getOwnPropertyDescriptor(proto, 'value');" & ¬
+		"    if (desc && desc.set) desc.set.call(el, value);" & ¬
+		"    else el.value = value;" & ¬
+		"    el.dispatchEvent(new Event('input', { bubbles: true }));" & ¬
+		"    el.dispatchEvent(new Event('change', { bubbles: true }));" & ¬
+		"    return true;" & ¬
+		"  }" & ¬
+		"  const el = document.querySelector('input[name=code], input[autocomplete=one-time-code], input[inputmode=numeric], input[type=tel], input[type=text]');" & ¬
+		"  setNative(el, code);" & ¬
+		"  const btn = document.querySelector('button[type=submit], button[data-testid*=submit], button');" & ¬
+		"  if (btn) btn.click();" & ¬
+		"  return el ? '" & kindText & "-filled' : '" & kindText & "-input-missing';" & ¬
+		"})(" & jsonString(codeText) & ");"
+end jsSubmitCode
+
+on jsClickEmailControl()
+	return "(function () {" & ¬
+		"  const links = Array.from(document.querySelectorAll('a,button,[role=button]'));" & ¬
+		"  for (const el of links) {" & ¬
+		"    const t = (el.textContent || '').toLowerCase();" & ¬
+		"    if (t.includes('email') || t.includes('change email') || t.includes('edit')) {" & ¬
+		"      el.click();" & ¬
+		"      return 'clicked:' + t.slice(0, 60);" & ¬
+		"    }" & ¬
+		"  }" & ¬
+		"  return 'no-email-control';" & ¬
+		"})();"
+end jsClickEmailControl
+
+on jsFillEmail(emailText)
+	return "(function (email) {" & ¬
+		"  function setNative(el, value) {" & ¬
+		"    if (!el) return false;" & ¬
+		"    const proto = window.HTMLInputElement.prototype;" & ¬
+		"    const desc = Object.getOwnPropertyDescriptor(proto, 'value');" & ¬
+		"    if (desc && desc.set) desc.set.call(el, value);" & ¬
+		"    else el.value = value;" & ¬
+		"    el.dispatchEvent(new Event('input', { bubbles: true }));" & ¬
+		"    el.dispatchEvent(new Event('change', { bubbles: true }));" & ¬
+		"    return true;" & ¬
+		"  }" & ¬
+		"  const inputs = Array.from(document.querySelectorAll('input[type=email], input[name*=email i], input[id*=email i]'));" & ¬
+		"  let n = 0;" & ¬
+		"  for (const el of inputs) {" & ¬
+		"    if (setNative(el, email)) n++;" & ¬
+		"  }" & ¬
+		"  return 'filled=' + n;" & ¬
+		"})(" & jsonString(emailText) & ");"
+end jsFillEmail
+
+on jsClickSubmitEmail()
+	return "(function () {" & ¬
+		"  const buttons = Array.from(document.querySelectorAll('button, input[type=submit]'));" & ¬
+		"  for (const el of buttons) {" & ¬
+		"    const t = ((el.textContent || el.value || '') + '').toLowerCase();" & ¬
+		"    if (/save|submit|continue|confirm|send|update|change/.test(t)) {" & ¬
+		"      el.click();" & ¬
+		"      return 'clicked:' + t.slice(0, 40);" & ¬
+		"    }" & ¬
+		"  }" & ¬
+		"  return 'no-submit';" & ¬
+		"})();"
+end jsClickSubmitEmail
+
 on waitForRiotLogin(timeoutSec)
 	set deadline to (current date) + timeoutSec
 	repeat while (current date) < deadline
@@ -364,27 +381,8 @@ end waitForRiotLogin
 on waitForPostLogin(timeoutSec)
 	set deadline to (current date) + timeoutSec
 	repeat while (current date) < deadline
-		set st to safariJS("
-			(function () {
-			  const href = location.href || '';
-			  const body = (document.body && document.body.innerText || '').toLowerCase();
-			  if (/incorrect|check your details|try again/.test(body) && /password|username|sign in/.test(body))
-			    return 'bad_creds';
-			  if (document.querySelector('iframe[src*=\"hcaptcha.com\"]'))
-			    return 'captcha';
-			  if (/code|verification|authenticate|two-factor|2fa|email you/.test(body)
-			      && document.querySelector('input[name=\"code\"], input[autocomplete=\"one-time-code\"], input[inputmode=\"numeric\"]'))
-			    return 'mfa';
-			  if (/account\\.riotgames\\.com/.test(href) && !/log-in|login|oauth2\\/log-in/.test(href))
-			    return 'account';
-			  if (/account\\.riotgames\\.com/.test(href))
-			    return 'logged_in';
-			  if (document.querySelector('input[name=\"username\"], input[type=\"password\"]'))
-			    return 'login';
-			  return 'unknown';
-			})();
-		")
-		if st is in {"bad_creds", "captcha", "mfa", "account", "logged_in"} then return st
+		set phaseState to safariJS(jsProbePhase())
+		if phaseState is in {"bad_creds", "captcha", "mfa", "account", "logged_in"} then return phaseState
 		delay 0.8
 	end repeat
 	return "timeout"
@@ -424,11 +422,13 @@ end optFlag
 
 on scriptDir()
 	try
-		set p to POSIX path of (path to me)
-		-- When run as .applescript text via osascript, path to me may be osascript itself.
-		-- Prefer TOOL_DIR env from the launcher.
-		set envDir to do shell script "printf '%s' \"${TOOL_DIR:-}\""
+		-- Prefer TOOL_DIR env from the launcher (path to me is often osascript itself).
+		set envDir to ""
+		try
+			set envDir to system attribute "TOOL_DIR"
+		end try
 		if envDir is not "" then return envDir
+		set p to POSIX path of (path to me)
 		return do shell script "dirname " & quoted form of p
 	on error
 		return do shell script "pwd"
