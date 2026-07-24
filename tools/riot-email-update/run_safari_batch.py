@@ -140,6 +140,7 @@ def run_one(row: dict[str, str], *, entry_url: str, skip_email: bool) -> tuple[b
     cmd = [
         "osascript",
         str(ROOT / "safari_riot_email.applescript"),
+        "--",  # end osascript options; pass the rest to the script
         "--batch",
         "--entry-url",
         entry_url,
@@ -152,6 +153,8 @@ def run_one(row: dict[str, str], *, entry_url: str, skip_email: bool) -> tuple[b
     ]
     if skip_email:
         cmd.append("--skip-email-change")
+
+    env["SAFARI_BATCH"] = "1"
 
     print(
         f"\n{'=' * 60}\n"

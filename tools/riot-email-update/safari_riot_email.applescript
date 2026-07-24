@@ -29,20 +29,37 @@ on run argv
 	set skipEmail to optFlag(opts, "skip-email-change")
 	set batchMode to optFlag(opts, "batch")
 
+	-- Fall back to env (batch runner sets these from tasks.csv).
+	-- osascript sometimes drops --flags; env is the reliable path.
+	if riotUser is "" then set riotUser to envOrEmpty("RIOT_USERNAME")
+	if riotPass is "" then set riotPass to envOrEmpty("RIOT_PASSWORD")
+	if newEmail is "" then set newEmail to envOrEmpty("NEW_EMAIL")
+	if entryURL is defaultEntryURL() then
+		set envEntry to envOrEmpty("LOGIN_ENTRY_URL")
+		if envEntry is "" then set envEntry to envOrEmpty("LOGIN_URL")
+		if envEntry is not "" then set entryURL to envEntry
+	end if
+	-- If still batch-ish env from CSV runner, stay non-interactive
+	if (not batchMode) and (envOrEmpty("RIOT_USERNAME") is not "") and (envOrEmpty("SAFARI_BATCH") is "1") then
+		set batchMode to true
+	end if
+
 	if riotUser is "" then
-		if batchMode then error "batch mode requires --username"
+		if batchMode then error "batch mode requires username (CSV riot_username / RIOT_USERNAME)"
 		set riotUser to text returned of (display dialog "Riot username or email:" default answer "")
 	end if
 	if riotPass is "" then
-		if batchMode then error "batch mode requires --password"
+		if batchMode then error "batch mode requires password (CSV riot_password / RIOT_PASSWORD)"
 		set riotPass to text returned of (display dialog "Riot password:" default answer "" with hidden answer)
 	end if
 	if (not skipEmail) and newEmail is "" then
-		if batchMode then error "batch mode requires --new-email (or --skip-email-change)"
+		if batchMode then error "batch mode requires new email (CSV new_email / NEW_EMAIL)"
 		set newEmail to text returned of (display dialog "New email address:" default answer "")
 	end if
 
+	logLine("Account: " & riotUser & " -> " & newEmail)
 	logLine("Opening Safari → docs.qq.com entry…")
+
 	tell application "Safari"
 		activate
 		try
@@ -384,7 +401,10 @@ on parseArgs(argv)
 	set i to 1
 	repeat while i <= (count of argv)
 		set a to item i of argv as text
-		if a starts with "--" then
+		-- Skip osascript's end-of-options marker if present
+		if a is "--" then
+			set i to i + 1
+		else if a starts with "--" then
 			set key to text 3 thru -1 of a
 			if key is "skip-email-change" or key is "batch" then
 				set end of opts to {key, "1"}
@@ -394,15 +414,18 @@ on parseArgs(argv)
 			else
 				set end of opts to {key, "1"}
 			end if
+			set i to i + 1
+		else
+			set i to i + 1
 		end if
-		set i to i + 1
 	end repeat
 	return opts
 end parseArgs
 
 on optValue(opts, key, defaultValue)
 	repeat with p in opts
-		if item 1 of p is key then return item 2 of p
+		set k to item 1 of p as text
+		if k is key then return item 2 of p as text
 	end repeat
 	return defaultValue
 end optValue
@@ -410,6 +433,16 @@ end optValue
 on optFlag(opts, key)
 	return optValue(opts, key, "") is "1"
 end optFlag
+
+on envOrEmpty(varName)
+	try
+		set v to system attribute varName
+		if v is missing value then return ""
+		return v as text
+	on error
+		return ""
+	end try
+end envOrEmpty
 
 on scriptDir()
 	try
