@@ -49,7 +49,7 @@ CSV format (same as `data/tasks.csv.example`):
 
 ```csv
 riot_username,riot_password,imap_email,imap_app_password,new_email,imap_host,imap_port,proxy_index,email_change_url
-5bethowen59553,Reject123a,chunghin.lau@icloud.com,gvys-iypa-qkxj-gmmx,audio_facings_4u@icloud.com,imap.mail.me.com,993,,
+RiotUser,YourRiotPass,you@icloud.com,xxxx-xxxx-xxxx-xxxx,new@icloud.com,imap.mail.me.com,993,,
 ```
 
 On your Mac:
