@@ -19,6 +19,9 @@ During manual captcha the browser starts maximized and the challenge popup is
 pinned/enlarged so the **full hCaptcha tile table** is visible. Tune with
 `HCAPTCHA_VIEW_SCALE=1.4` in `.env` if you still need it larger.
 
+Each run writes a full session log under `debug/logs/` (console + navigations).
+Send that file when something fails so the flow can be improved.
+
 ## Alternatives
 
 | File | When to use |

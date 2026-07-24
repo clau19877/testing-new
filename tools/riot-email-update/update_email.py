@@ -215,27 +215,38 @@ def open_riot_login(page, *, timeout_ms: int = 45_000) -> None:
     Open the login entry (docs.qq.com by default), click Continue into
     account.riotgames.com, and wait for the Riot auth form.
     """
+    from session_log import log
+
     entry = resolve_login_url()
-    print(f"  Entry URL: {entry[:120]}", flush=True)
+    log("login", f"entry URL: {entry}")
     page.goto(entry, wait_until="domcontentloaded")
-    page.wait_for_timeout(1_000)
+    page.wait_for_timeout(1_200)
+    log("login", f"after entry goto → {page.url}")
 
     if not _on_riot_auth_or_account(page.url or ""):
         ok = click_through_login_entry(page, timeout_ms=timeout_ms)
+        log("login", f"click-through ok={ok} url={page.url}")
         if not ok:
             print("  Entry click-through failed — trying account.riotgames.com directly…")
             page.goto(ACCOUNT_URL, wait_until="domcontentloaded")
+            log("login", f"direct account goto → {page.url}")
 
-    # account.riotgames.com usually redirects into authenticate / auth.
-    try:
-        page.wait_for_url(
-            lambda u: "auth.riotgames.com" in u or "authenticate.riotgames.com" in u,
-            timeout=min(20_000, timeout_ms),
-        )
-    except Exception:
-        if page_looks_logged_in(page):
-            return
-        # Still on account portal without auth form — stay; caller may pause.
+    # Wait for Riot auth host or a visible username/password form.
+    deadline = time.time() + min(25.0, timeout_ms / 1000.0)
+    while time.time() < deadline:
+        u = (page.url or "").lower()
+        if (
+            "auth.riotgames.com" in u
+            or "authenticate.riotgames.com" in u
+            or login_form_visible(page)
+        ):
+            break
+        page.wait_for_timeout(400)
+    log(
+        "login",
+        f"open_riot_login done url={page.url} "
+        f"form={login_form_visible(page)} logged_in={page_looks_logged_in(page)}",
+    )
 
 
 def prompt(label: str, *, secret: bool = False, default: str | None = None) -> str:
@@ -358,25 +369,64 @@ def click_first_matching(page, selectors: list[str], action_name: str) -> bool:
     return False
 
 
+def login_form_visible(page) -> bool:
+    """True when Riot username/password fields are on screen."""
+    selectors = [
+        'input[name="password"]',
+        'input[type="password"]',
+        'input[name="username"]',
+        "#username",
+        "#password",
+    ]
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            if loc.count() > 0 and loc.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def page_looks_logged_in(page) -> bool:
-    href = page.url
-    return (
-        "account.riotgames.com" in href
-        and "auth.riotgames.com" not in href
-        and "authenticate.riotgames.com" not in href
-        and "/login" not in href
+    """
+    True only when we are on the Riot account portal AND not on an auth/login
+    URL AND the login form is not visible.
+
+    Important: account.riotgames.com/oauth2/log-in is NOT logged-in (note the
+    hyphen in log-in — a naive '/login' check misses it).
+    """
+    href = (page.url or "").lower()
+    if "account.riotgames.com" not in href:
+        return False
+    blocked = (
+        "auth.riotgames.com",
+        "authenticate.riotgames.com",
+        "/login",
+        "log-in",
+        "oauth2",
+        "sign-in",
+        "signin",
     )
+    if any(b in href for b in blocked):
+        return False
+    if login_form_visible(page):
+        return False
+    return True
 
 
 def wait_until_logged_in(page, timeout_ms: int) -> None:
     print("  Waiting for successful login…")
     page.wait_for_function(
         """() => {
-            const href = window.location.href;
-            return href.includes('account.riotgames.com')
-                && !href.includes('auth.riotgames.com')
-                && !href.includes('authenticate.riotgames.com')
-                && !href.includes('/login');
+            const href = window.location.href.toLowerCase();
+            if (!href.includes('account.riotgames.com')) return false;
+            const blocked = ['auth.riotgames.com','authenticate.riotgames.com',
+                             '/login','log-in','oauth2','sign-in','signin'];
+            if (blocked.some(b => href.includes(b))) return false;
+            const pass = document.querySelector('input[type="password"], input[name="password"]');
+            if (pass && pass.offsetParent !== null) return false;
+            return true;
         }""",
         timeout=timeout_ms,
     )
@@ -686,17 +736,34 @@ def run_login(
     """
     from vision_captcha import captcha_visible, page_has_riot_oops
 
+    from session_log import log
+
     print("\n[1/3] Opening Riot login via entry link (click-through)…")
     login_started = time.time()
     used_codes: set[str] = set()
     open_riot_login(page, timeout_ms=max(timeout_ms, 45_000))
+    log(
+        "login",
+        f"post-entry url={page.url} form={login_form_visible(page)} "
+        f"logged_in={page_looks_logged_in(page)}",
+    )
 
-    if page_looks_logged_in(page):
+    # Only skip credential fill when the account portal is truly signed-in.
+    # account.riotgames.com/oauth2/log-in used to false-trigger "already signed in".
+    if page_looks_logged_in(page) and not login_form_visible(page):
         print("  Appears already signed in.")
+        log("login", "skipping form fill — already signed in")
         return "logged_in"
+
+    if not login_form_visible(page) and not _on_riot_auth_or_account(page.url or ""):
+        print("  Login form not visible yet — retrying account.riotgames.com…")
+        page.goto(ACCOUNT_URL, wait_until="domcontentloaded")
+        page.wait_for_timeout(2_000)
+        log("login", f"retry account → {page.url} form={login_form_visible(page)}")
 
     dismiss_cookie_banner(page)
     print("[1/3] Filling login form…")
+    log("login", f"filling credentials on {page.url}")
     filled_user = fill_first_matching(
         page,
         [
@@ -885,27 +952,46 @@ def run_email_update(
     new_inbox: ImapInbox | None,
     imap_timeout: float,
     email_change_url: str | None = None,
-) -> None:
+) -> bool:
+    """
+    Drive the email-change UI. Returns True only when the account page was
+    reachable while signed-in and the new-email field was filled (or saved).
+    """
+    from session_log import log
+
     print("\n[2/3] Opening email-change page…")
     navigated = False
     for url in email_change_candidates(email_change_url):
         try:
             print(f"  Trying {url}")
+            log("email", f"goto {url}")
             page.goto(url, wait_until="domcontentloaded")
             page.wait_for_timeout(1_500)
-            if AUTH_HOST_HINT in page.url or "authenticate.riotgames.com" in page.url:
+            log("email", f"landed {page.url}")
+            if (
+                AUTH_HOST_HINT in page.url
+                or "authenticate.riotgames.com" in page.url
+                or "log-in" in page.url.lower()
+                or "oauth2" in page.url.lower()
+                or login_form_visible(page)
+            ):
                 raise RuntimeError("Session expired — redirected to login")
+            if not page_looks_logged_in(page):
+                raise RuntimeError(f"Not signed in on account page ({page.url})")
             navigated = True
             print(f"  Opened: {page.url}")
             break
         except Exception as exc:
             print(f"  Navigation note: {exc}")
+            log("email", f"nav failed: {exc}", level="WARN")
 
     if not navigated:
-        pause(
-            "Open the Riot email-change page manually in the browser "
-            "(set EMAIL_CHANGE_URL if you have a direct link)."
+        log("email", "could not open email-change page while signed in", level="ERROR")
+        print(
+            "  Email-change aborted — not signed in. "
+            "Login must complete (captcha + MFA) before email can be changed."
         )
+        return False
 
     print("[2/3] Looking for email / Personal Information controls…")
     opened_editor = click_first_matching(
@@ -923,6 +1009,7 @@ def run_email_update(
         ],
         "email edit",
     )
+    log("email", f"opened_editor={opened_editor}")
 
     if not opened_editor:
         pause(
@@ -945,6 +1032,7 @@ def run_email_update(
         new_email,
         "new email",
     )
+    log("email", f"filled_new_email={filled}")
     if not filled:
         pause(f"Type the new email manually: {new_email}")
 
@@ -972,6 +1060,7 @@ def run_email_update(
         ],
         "save / continue",
     )
+    log("email", f"saved={saved}")
     if not saved:
         pause("Click Save / Continue / Send verification yourself.")
 
@@ -1020,11 +1109,29 @@ def run_email_update(
             "When Riot confirms the email change, press Enter here."
         )
         print("\nDone. Confirm the new email on account.riotgames.com if you have not already.")
+    # Success if we filled or the user was asked to (manual path); require fill in NONINTERACTIVE
+    noninteractive = os.getenv("NONINTERACTIVE", "").strip().lower() in {"1", "true", "yes"}
+    ok = bool(filled or saved or not noninteractive)
+    log("email", f"run_email_update result={ok}")
+    return ok
 
 
 def main() -> int:
     load_dotenv(Path(__file__).resolve().parent / ".env")
     args = parse_args()
+
+    from session_log import (
+        attach_page_logging,
+        get_log_path,
+        log,
+        log_exception,
+        start_session_log,
+        stop_session_log,
+    )
+
+    tag = (args.username or os.getenv("RIOT_USERNAME") or "run").strip()
+    log_path = start_session_log(tag=tag)
+    print(f"  Session log: {log_path}", flush=True)
 
     headed = args.headed if args.headed is not None else env_bool("HEADED", True)
     # Default: in-browser hybrid (local CV + 2Captcha Coordinates). Token APIs
@@ -1193,12 +1300,14 @@ def main() -> int:
                 f"(no proxy) ==="
             )
 
+        email_ok = False
         try:
             with launch_stealth_browser(
                 headed=headed, proxy=session_proxy
             ) as (_p, _browser, context):
                 page = context.new_page()
                 page.set_default_timeout(args.timeout_ms)
+                attach_page_logging(page)
                 # Capture fresh enterprise rqdata from Riot API responses for token path
                 install_rqdata_network_capture(page)
 
@@ -1214,9 +1323,10 @@ def main() -> int:
                     imap_timeout=args.imap_timeout,
                 )
                 print(f"  Login status: {last_status}")
+                log("login", f"status={last_status}")
                 if last_status in ("logged_in", "mfa_done"):
                     login_ok = True
-                    run_email_update(
+                    email_ok = run_email_update(
                         page,
                         new_email,
                         args.timeout_ms,
@@ -1225,6 +1335,10 @@ def main() -> int:
                         imap_timeout=args.imap_timeout,
                         email_change_url=email_change_url,
                     )
+                    if not email_ok:
+                        login_ok = False
+                        last_status = "email_update_failed"
+                        log("email", "email update failed — will not mark task ok", level="ERROR")
                 elif last_status in ("oops", "captcha_fail"):
                     print(
                         "  Captcha/session soft-fail — rotating proxy + fresh browser context"
@@ -1233,24 +1347,33 @@ def main() -> int:
                     print(f"  Login incomplete ({last_status}) — rotating proxy")
         except KeyboardInterrupt:
             print("\nCancelled.")
+            stop_session_log()
             return 130
         except Exception as exc:
             print(f"\nError: {exc}", file=sys.stderr)
+            log_exception("session", exc)
             pause("Inspect the browser window if it is still open, then press Enter to exit.")
             last_status = "error"
 
-        if login_ok:
+        if login_ok and email_ok:
             break
         # fall through to next proxy attempt
 
+    final_log = get_log_path()
     if not login_ok:
         print(
-            f"\nLogin did not succeed after {max_proxy_attempts} proxy attempt(s) "
-            f"(last={last_status}).",
+            f"\nLogin/email-update did not succeed after {max_proxy_attempts} "
+            f"proxy attempt(s) (last={last_status}).",
             file=sys.stderr,
         )
+        if final_log:
+            print(f"  Session log saved: {final_log}", flush=True)
+        stop_session_log()
         return 1
 
+    if final_log:
+        print(f"\nSession log saved: {final_log}", flush=True)
+    stop_session_log()
     return 0
 
 
