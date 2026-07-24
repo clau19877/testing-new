@@ -7,7 +7,6 @@ export TOOL_DIR="$ROOT"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "This batch runner must be run on macOS (Safari)." >&2
-  echo "  python3 run_safari_batch.py data/tasks.csv" >&2
   exit 1
 fi
 
@@ -18,6 +17,24 @@ if [[ -f .env ]]; then
   set +a
 fi
 
-CSV="${1:-data/tasks.csv}"
-shift || true
+CSV="${1:-}"
+if [[ -z "$CSV" ]]; then
+  if [[ -f "$ROOT/data/tasks.csv" ]]; then
+    CSV="$ROOT/data/tasks.csv"
+  elif [[ -f "$ROOT/tasks.csv" ]]; then
+    CSV="$ROOT/tasks.csv"
+  else
+    echo "CSV not found. Put accounts in: $ROOT/data/tasks.csv" >&2
+    exit 2
+  fi
+  shift || true
+else
+  shift || true
+  if [[ ! -f "$CSV" && -f "$ROOT/$CSV" ]]; then
+    CSV="$ROOT/$CSV"
+  fi
+fi
+
+echo "script folder: $ROOT"
+echo "csv: $CSV"
 exec python3 "$ROOT/run_safari_batch.py" "$CSV" "$@"
