@@ -1,3 +1,7 @@
 TOOL_BUILD=2026-07-24i-qq-continue
 
 Login entry: docs.qq.com Continue → account.riotgames.com
+
+macOS Safari (local, usually no captcha):
+  see MAC_SAFARI.md
+  ./run_safari_mac.sh
