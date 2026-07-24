@@ -165,13 +165,24 @@ def attach_page_logging(page, *, topic: str = "page") -> None:
     except Exception:
         pass
     try:
-        page.on(
-            "requestfailed",
-            lambda req: log(
+        def _on_fail(req) -> None:
+            u = req.url or ""
+            # Noise from ads/extensions/CSP probes — keep the log readable.
+            if any(
+                x in u
+                for x in (
+                    "chrome-extension://",
+                    "ql.njmapp.com",
+                    "gtimg.com/lib/js/dark_mode",
+                )
+            ):
+                return
+            log(
                 topic,
-                f"requestfailed {req.method} {req.url} → {req.failure}",
+                f"requestfailed {req.method} {u} → {req.failure}",
                 level="WARN",
-            ),
-        )
+            )
+
+        page.on("requestfailed", _on_fail)
     except Exception:
         pass

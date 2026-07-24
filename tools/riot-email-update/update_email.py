@@ -23,7 +23,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 from dotenv import load_dotenv
 
@@ -127,16 +127,33 @@ def resolve_login_url() -> str:
     return DEFAULT_LOGIN_ENTRY_URL
 
 
+def url_host(url: str) -> str:
+    """Hostname only — never match hosts that appear inside query strings."""
+    try:
+        return (urlparse(url or "").hostname or "").lower()
+    except Exception:
+        return ""
+
+
 def _on_riot_auth_or_account(url: str) -> bool:
-    u = (url or "").lower()
-    return any(
-        h in u
-        for h in (
-            "account.riotgames.com",
-            "auth.riotgames.com",
-            "authenticate.riotgames.com",
-        )
-    )
+    host = url_host(url)
+    return host in {
+        "account.riotgames.com",
+        "auth.riotgames.com",
+        "authenticate.riotgames.com",
+    } or host.endswith(".riotgames.com")
+
+
+def entry_target_from_url(url: str) -> str:
+    """Extract ?url= target from a docs.qq.com (or similar) interstitial."""
+    try:
+        qs = parse_qs(urlparse(url or "").query)
+        target = unquote((qs.get("url") or [""])[0]).strip()
+        if target.startswith("http"):
+            return target
+    except Exception:
+        pass
+    return ""
 
 
 def click_through_login_entry(page, *, timeout_ms: int = 45_000) -> bool:
@@ -144,11 +161,17 @@ def click_through_login_entry(page, *, timeout_ms: int = 45_000) -> bool:
     If we're on a docs.qq.com (or similar) interstitial, click Continue /
     the account.riotgames.com link so Riot's real login loads.
     """
+    from session_log import log
+
     url = page.url or ""
+    host = url_host(url)
     if _on_riot_auth_or_account(url):
+        log("login", f"already on Riot host={host}")
         return True
 
     print(f"  Entry interstitial: {url[:120]}", flush=True)
+    log("login", f"click-through from host={host}")
+
     # Prefer an explicit link to Riot account.
     selectors = [
         'a[href*="account.riotgames.com"]',
@@ -169,6 +192,7 @@ def click_through_login_entry(page, *, timeout_ms: int = 45_000) -> bool:
                 continue
             loc.wait_for(state="visible", timeout=3_000)
             print(f"  Clicking through via: {sel}", flush=True)
+            log("login", f"click selector={sel}")
             with page.expect_navigation(timeout=timeout_ms, wait_until="domcontentloaded"):
                 loc.click(timeout=5_000)
             clicked = True
@@ -186,16 +210,14 @@ def click_through_login_entry(page, *, timeout_ms: int = 45_000) -> bool:
     if not clicked:
         # Last resort: pull target from the entry URL's ?url= query and go there.
         try:
-            from urllib.parse import parse_qs, urlparse, unquote
-
-            qs = parse_qs(urlparse(url).query)
-            target = unquote((qs.get("url") or [""])[0])
-            if target.startswith("http"):
-                print(f"  Falling back to entry url= param → {target}", flush=True)
-                page.goto(target, wait_until="domcontentloaded")
-                clicked = True
+            target = entry_target_from_url(url) or ACCOUNT_URL
+            print(f"  Falling back to entry url= param → {target}", flush=True)
+            log("login", f"fallback goto {target}")
+            page.goto(target, wait_until="domcontentloaded")
+            clicked = True
         except Exception as exc:
             print(f"  Entry click-through note: {exc}", flush=True)
+            log("login", f"fallback failed: {exc}", level="ERROR")
 
     try:
         page.wait_for_url(_on_riot_auth_or_account, timeout=timeout_ms)
@@ -204,9 +226,11 @@ def click_through_login_entry(page, *, timeout_ms: int = 45_000) -> bool:
 
     if _on_riot_auth_or_account(page.url or ""):
         print(f"  Landed on Riot: {page.url}", flush=True)
+        log("login", f"landed host={url_host(page.url)}")
         return True
 
     print(f"  Still not on Riot after entry click (url={page.url})", flush=True)
+    log("login", f"still not on Riot url={page.url}", level="WARN")
     return False
 
 
@@ -221,11 +245,14 @@ def open_riot_login(page, *, timeout_ms: int = 45_000) -> None:
     log("login", f"entry URL: {entry}")
     page.goto(entry, wait_until="domcontentloaded")
     page.wait_for_timeout(1_200)
-    log("login", f"after entry goto → {page.url}")
+    log("login", f"after entry goto → {page.url} host={url_host(page.url)}")
 
+    # Always click through when still on a non-Riot host (e.g. docs.qq.com).
+    # Do NOT use a substring check — the entry URL embeds account.riotgames.com
+    # inside ?url=, which previously skipped this step.
     if not _on_riot_auth_or_account(page.url or ""):
         ok = click_through_login_entry(page, timeout_ms=timeout_ms)
-        log("login", f"click-through ok={ok} url={page.url}")
+        log("login", f"click-through ok={ok} url={page.url} host={url_host(page.url)}")
         if not ok:
             print("  Entry click-through failed — trying account.riotgames.com directly…")
             page.goto(ACCOUNT_URL, wait_until="domcontentloaded")
@@ -234,17 +261,17 @@ def open_riot_login(page, *, timeout_ms: int = 45_000) -> None:
     # Wait for Riot auth host or a visible username/password form.
     deadline = time.time() + min(25.0, timeout_ms / 1000.0)
     while time.time() < deadline:
-        u = (page.url or "").lower()
+        host = url_host(page.url or "")
         if (
-            "auth.riotgames.com" in u
-            or "authenticate.riotgames.com" in u
+            host in {"auth.riotgames.com", "authenticate.riotgames.com"}
+            or host.endswith(".riotgames.com")
             or login_form_visible(page)
         ):
             break
         page.wait_for_timeout(400)
     log(
         "login",
-        f"open_riot_login done url={page.url} "
+        f"open_riot_login done url={page.url} host={url_host(page.url)} "
         f"form={login_form_visible(page)} logged_in={page_looks_logged_in(page)}",
     )
 
@@ -393,22 +420,19 @@ def page_looks_logged_in(page) -> bool:
     True only when we are on the Riot account portal AND not on an auth/login
     URL AND the login form is not visible.
 
-    Important: account.riotgames.com/oauth2/log-in is NOT logged-in (note the
-    hyphen in log-in — a naive '/login' check misses it).
+    Important:
+      - Check the hostname only. docs.qq.com?url=…account.riotgames.com…
+        must NOT count as logged-in.
+      - account.riotgames.com/oauth2/log-in is NOT logged-in.
     """
-    href = (page.url or "").lower()
-    if "account.riotgames.com" not in href:
+    href = page.url or ""
+    host = url_host(href)
+    if host != "account.riotgames.com":
         return False
-    blocked = (
-        "auth.riotgames.com",
-        "authenticate.riotgames.com",
-        "/login",
-        "log-in",
-        "oauth2",
-        "sign-in",
-        "signin",
-    )
-    if any(b in href for b in blocked):
+    path = (urlparse(href).path or "").lower()
+    frag = (urlparse(href).fragment or "").lower()
+    blocked_bits = ("/login", "log-in", "oauth2", "sign-in", "signin")
+    if any(b in path or b in frag for b in blocked_bits):
         return False
     if login_form_visible(page):
         return False
@@ -419,11 +443,11 @@ def wait_until_logged_in(page, timeout_ms: int) -> None:
     print("  Waiting for successful login…")
     page.wait_for_function(
         """() => {
-            const href = window.location.href.toLowerCase();
-            if (!href.includes('account.riotgames.com')) return false;
-            const blocked = ['auth.riotgames.com','authenticate.riotgames.com',
-                             '/login','log-in','oauth2','sign-in','signin'];
-            if (blocked.some(b => href.includes(b))) return false;
+            const host = (window.location.hostname || '').toLowerCase();
+            if (host !== 'account.riotgames.com') return false;
+            const path = (window.location.pathname || '').toLowerCase();
+            const blocked = ['/login','log-in','oauth2','sign-in','signin'];
+            if (blocked.some(b => path.includes(b))) return false;
             const pass = document.querySelector('input[type="password"], input[name="password"]');
             if (pass && pass.offsetParent !== null) return false;
             return true;
