@@ -1,18 +1,14 @@
-TOOL_BUILD=2026-07-24e-aycd
+TOOL_BUILD=2026-07-24f-inbot
 
 If RiotEmailUpdate.exe does not print:
-  Tool build: 2026-07-24e-aycd
+  Tool build: 2026-07-24f-inbot
 then update_email.py was NOT replaced.
+
+Captcha strategy (in-bot, not AYCD):
+  CAPTCHA_PROVIDER=manual  → human solves in the browser window
+  CAPTCHA_PROVIDER=vision  → OCR/AI + 2Captcha Coordinates clicks (unattended)
 
 Headless:
   RiotEmailUpdate.exe --headless
   or set HEADED=false in .env
-
-Manual captcha still needs a visible window (HEADED=true).
-Unattended headless → CAPTCHA_PROVIDER=vision + solver API keys
-  or CAPTCHA_PROVIDER=aycd + AYCD_API_KEY (OneClick AutoSolve running).
-
-AYCD setup:
-  1. AutoSolve dashboard → create Bot API Key → AYCD_API_KEY=
-  2. CAPTCHA_PROVIDER=aycd
-  3. Start AutoSolve on OneClick solvers (or enable a 3rd-party route)
+  (manual still needs HEADED=true)

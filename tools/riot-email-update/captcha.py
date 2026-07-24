@@ -6,22 +6,22 @@ the submit session.
 
 Approaches implemented in this package
 --------------------------------------
-Token APIs (captcha.py / captcha_providers.py):
-  - aycd        — AYCD AutoSolve hub (OneClick / AI / 3rd-party on AYCD side)
-  - capmonster  — HCaptchaTask + customData=rqdata (common in Riot auth scripts)
+In-bot AI (preferred for Riot hCaptcha — same pattern as retail bots that
+disable hCaptcha→AYCD and solve inside the browser instead):
+  - CAPTCHA_PROVIDER=manual — human solves in the live Playwright window
+  - CAPTCHA_PROVIDER=vision — OCR/CV + YesCaptcha/2Captcha Coordinates clicks
+    (vision_captcha.py). Clicks the real challenge; no out-of-band token hub.
+
+Token APIs (often soft-fail on Riot enterprise even when they mint P1_ tokens):
+  - capmonster  — HCaptchaTask + customData=rqdata
   - twocaptcha  — HCaptchaTask + data=rqdata + matching User-Agent
   - nonecap     — type=hcaptcha_enterprise + rqdata
-  - capless     — /solve with site+sitekey+proxy+rqdata (lists Riot; often soft-fails)
+  - capless     — /solve with site+sitekey+proxy+rqdata
   - capsolver   — hard-rejects Riot sitekey ("We don't support this service")
-
-In-browser (vision_captcha.py):
-  - OCR/CV letter-grid + drag heuristics, optional agent/OpenAI backends
-  - Does NOT mint enterprise-bound tokens; Riot may still reject / Oops
 
 Riot Client API path (riot_api_login.py):
   - POST auth.riotgames.com/authorization → POST authenticate …/login
   - Extract sitekey+rqdata → solver → PUT login with `hcaptcha <token>`
-  - Preferred over injecting tokens into the web widget
 
 Probe: `python probe_hcaptcha_approaches.py`
 """
@@ -515,7 +515,7 @@ def solve_and_inject(
 ) -> bool:
     """
     Detect hCaptcha on the current page, solve, inject token.
-    provider: aycd | capless | capsolver | capmonster | twocaptcha | nonecap
+    provider: capless | capsolver | capmonster | twocaptcha | nonecap
 
     Enterprise-strict (default ON via ENTERPRISE_STRICT=1):
       require rqdata + proxy; match page User-Agent to solver task.
