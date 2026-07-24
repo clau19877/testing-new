@@ -403,9 +403,18 @@ end waitForRiotLogin
 
 on waitForPostLogin(timeoutSec)
 	set deadline to (current date) + timeoutSec
+	set loginPhase to "unknown"
 	repeat while (current date) < deadline
-		set phaseState to safariJS(jsProbePhase())
-		if phaseState is in {"bad_creds", "captcha", "mfa", "account", "logged_in"} then return phaseState
+		try
+			set loginPhase to safariJS(jsProbePhase()) as text
+		on error
+			set loginPhase to "unknown"
+		end try
+		if loginPhase is "bad_creds" then return "bad_creds"
+		if loginPhase is "captcha" then return "captcha"
+		if loginPhase is "mfa" then return "mfa"
+		if loginPhase is "account" then return "account"
+		if loginPhase is "logged_in" then return "logged_in"
 		delay 0.8
 	end repeat
 	return "timeout"
@@ -461,27 +470,15 @@ on envOrEmpty(varName)
 end envOrEmpty
 
 on taskFileValue(taskFilePath, keyName)
-	-- Task file format: one "key=value" per line (written by run_safari_batch.py).
+	-- Read one key=value line. Use shell so LF/CR from do shell script is not an issue.
+	-- (Splitting AppleScript text on linefeed alone broke and swallowed the whole file.)
 	try
-		set raw to do shell script "/bin/cat " & quoted form of taskFilePath
+		set cmd to "grep -m1 '^" & keyName & "=' " & quoted form of taskFilePath & " | cut -d= -f2-"
+		set raw to do shell script cmd
+		return raw as text
 	on error
 		return ""
 	end try
-	set oldDelim to AppleScript's text item delimiters
-	set AppleScript's text item delimiters to linefeed
-	set theLines to text items of raw
-	set AppleScript's text item delimiters to oldDelim
-	repeat with L in theLines
-		set lineText to L as text
-		if lineText starts with (keyName & "=") then
-			try
-				return text ((length of keyName) + 2) thru -1 of lineText
-			on error
-				return ""
-			end try
-		end if
-	end repeat
-	return ""
 end taskFileValue
 
 on scriptDir()
