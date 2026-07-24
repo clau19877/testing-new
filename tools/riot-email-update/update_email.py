@@ -40,7 +40,7 @@ ACCOUNT_URL = "https://account.riotgames.com/"
 AUTH_HOST_HINT = "auth.riotgames.com"
 
 # Printed at startup so you can confirm Windows replaced the right files.
-TOOL_BUILD = "2026-07-24h-vision-ok"
+TOOL_BUILD = "2026-07-24i-qq-continue"
 
 # Default entry: Tencent Docs scenario interstitial → click Continue → account.riotgames.com.
 # Opening Riot via this click-through is more reliable than deep-linking authenticate URLs.
@@ -242,37 +242,44 @@ def open_riot_login(page, *, timeout_ms: int = 45_000) -> None:
     Open the login entry (docs.qq.com by default), then land on Riot auth.
 
     For docs.qq.com (and similar) interstitials we:
-      1) open the entry URL (preserves the intended referrer/click path)
-      2) immediately follow the embedded ?url= target (same as Continue)
-      3) if that fails, click Continue / fall back to account.riotgames.com
+      1) open the entry URL (keeps the intended referrer / click path)
+      2) click Continue on the interstitial (preferred — matches real browser flow)
+      3) if Continue fails, follow the embedded ?url= target, then account.riotgames.com
     """
     from session_log import log
 
     entry = resolve_login_url()
     log("login", f"build={TOOL_BUILD} entry URL: {entry}")
     print(f"  Tool build: {TOOL_BUILD}", flush=True)
+    print(f"  Login entry: {entry[:120]}{'…' if len(entry) > 120 else ''}", flush=True)
     page.goto(entry, wait_until="domcontentloaded")
-    page.wait_for_timeout(800)
+    page.wait_for_timeout(1200)
     log("login", f"after entry goto → {page.url} host={url_host(page.url)}")
 
-    # Always leave non-Riot hosts. Prefer the embedded ?url= target (fast + reliable).
+    # Prefer a real Continue click on the interstitial (not a hard jump).
     if not _on_riot_auth_or_account(page.url or ""):
-        target = entry_target_from_url(page.url or "") or entry_target_from_url(entry) or ACCOUNT_URL
-        print(f"  Leaving interstitial → {target}", flush=True)
-        log("login", f"interstitial follow → {target}")
-        try:
-            page.goto(target, wait_until="domcontentloaded")
-            page.wait_for_timeout(500)
-        except Exception as exc:
-            log("login", f"interstitial follow failed: {exc}", level="WARN")
+        print("  Clicking Continue on interstitial…", flush=True)
+        ok = click_through_login_entry(page, timeout_ms=timeout_ms)
+        log("login", f"click-through ok={ok} url={page.url} host={url_host(page.url)}")
+
+        if not ok or not _on_riot_auth_or_account(page.url or ""):
+            target = (
+                entry_target_from_url(page.url or "")
+                or entry_target_from_url(entry)
+                or ACCOUNT_URL
+            )
+            print(f"  Continue failed — following embedded url → {target}", flush=True)
+            log("login", f"interstitial follow → {target}")
+            try:
+                page.goto(target, wait_until="domcontentloaded")
+                page.wait_for_timeout(800)
+            except Exception as exc:
+                log("login", f"interstitial follow failed: {exc}", level="WARN")
 
         if not _on_riot_auth_or_account(page.url or ""):
-            ok = click_through_login_entry(page, timeout_ms=timeout_ms)
-            log("login", f"click-through ok={ok} url={page.url} host={url_host(page.url)}")
-            if not ok:
-                print("  Entry click-through failed — trying account.riotgames.com directly…")
-                page.goto(ACCOUNT_URL, wait_until="domcontentloaded")
-                log("login", f"direct account goto → {page.url}")
+            print("  Still not on Riot — opening account.riotgames.com directly…")
+            page.goto(ACCOUNT_URL, wait_until="domcontentloaded")
+            log("login", f"direct account goto → {page.url}")
 
     # Wait for Riot auth host or a visible username/password form.
     deadline = time.time() + min(25.0, timeout_ms / 1000.0)
@@ -289,6 +296,11 @@ def open_riot_login(page, *, timeout_ms: int = 45_000) -> None:
         "login",
         f"open_riot_login done url={page.url} host={url_host(page.url)} "
         f"form={login_form_visible(page)} logged_in={page_looks_logged_in(page)}",
+    )
+    print(
+        f"  Login page ready host={url_host(page.url)} "
+        f"form={login_form_visible(page)}",
+        flush=True,
     )
 
 

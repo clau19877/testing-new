@@ -1,11 +1,3 @@
-TOOL_BUILD=2026-07-24h-vision-ok
+TOOL_BUILD=2026-07-24i-qq-continue
 
-If RiotEmailUpdate.exe does not print:
-  Tool build: 2026-07-24h-vision-ok
-then update_email.py was NOT replaced.
-
-Default captcha = in-bot AI:
-  CAPTCHA_PROVIDER=vision
-  VISION_BACKEND=hybrid
-  TWOCAPTCHA_API_KEY=…
-  YESCAPTCHA_API_KEY=…
+Login entry: docs.qq.com Continue → account.riotgames.com
