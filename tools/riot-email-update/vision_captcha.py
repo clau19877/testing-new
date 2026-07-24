@@ -1341,36 +1341,121 @@ def ensure_challenge_iframe_on_screen(page) -> bool:
     hCaptcha parks the challenge iframe at y=-9999 after some interactions.
     Force it back on-screen so screenshots/clicks stay aligned.
     """
+    return reveal_full_hcaptcha_challenge(page, enlarge=False)
+
+
+def reveal_full_hcaptcha_challenge(page, *, enlarge: bool = True) -> bool:
+    """
+    Bring the hCaptcha challenge table fully into view for a human (or CV).
+
+    - Repositions off-screen challenge iframes (Riot parks them at y=-9999)
+    - Clears overflow:hidden on ancestors that clip the popup
+    - Optionally enlarges / scales the challenge so the whole tile grid fits
+    """
     try:
-        moved = page.evaluate(
-            """() => {
+        # Optional scale factor for tiny displays (1.0–1.75). Default 1.25 when enlarge.
+        try:
+            scale = float(os.getenv("HCAPTCHA_VIEW_SCALE") or ("1.25" if enlarge else "1.0"))
+        except ValueError:
+            scale = 1.25 if enlarge else 1.0
+        scale = max(1.0, min(scale, 1.75))
+
+        result = page.evaluate(
+            """({ enlarge, scale }) => {
               const frames = [...document.querySelectorAll('iframe[src*="hcaptcha.com"]')];
               let fixed = 0;
+              const unlockOverflow = (el) => {
+                let n = 0;
+                let cur = el;
+                for (let i = 0; i < 8 && cur; i++) {
+                  try {
+                    const cs = getComputedStyle(cur);
+                    if (cs.overflow === 'hidden' || cs.overflowY === 'hidden'
+                        || cs.overflowX === 'hidden') {
+                      cur.style.setProperty('overflow', 'visible', 'important');
+                      cur.style.setProperty('overflow-x', 'visible', 'important');
+                      cur.style.setProperty('overflow-y', 'visible', 'important');
+                      n += 1;
+                    }
+                  } catch (_) {}
+                  cur = cur.parentElement;
+                }
+                return n;
+              };
               for (const f of frames) {
                 const r = f.getBoundingClientRect();
-                const big = (f.clientWidth || r.width) >= 300 && (f.clientHeight || r.height) >= 300;
+                const w = f.clientWidth || r.width || 0;
+                const h = f.clientHeight || r.height || 0;
+                const big = w >= 280 && h >= 280;
                 if (!big) continue;
-                if (r.top < 0 || r.left < -50 || r.top > window.innerHeight) {
-                  f.style.setProperty('position', 'fixed', 'important');
-                  f.style.setProperty('left', '50%', 'important');
-                  f.style.setProperty('top', '80px', 'important');
+
+                unlockOverflow(f);
+                // Host wrappers (div around iframe) often clip the challenge.
+                if (f.parentElement) unlockOverflow(f.parentElement);
+
+                const off = r.top < 0 || r.left < -50
+                  || r.top > window.innerHeight - 40
+                  || r.bottom > window.innerHeight + 20
+                  || r.right > window.innerWidth + 20;
+
+                f.style.setProperty('position', 'fixed', 'important');
+                f.style.setProperty('left', '50%', 'important');
+                f.style.setProperty('top', '24px', 'important');
+                f.style.setProperty('z-index', '2147483646', 'important');
+                f.style.setProperty('opacity', '1', 'important');
+                f.style.setProperty('visibility', 'visible', 'important');
+                f.style.setProperty('pointer-events', 'auto', 'important');
+                f.style.setProperty('max-width', 'none', 'important');
+                f.style.setProperty('max-height', 'none', 'important');
+
+                // Natural challenge size is ~400x600; force room for full table.
+                const targetW = Math.max(w, 420);
+                const targetH = Math.max(h, 680);
+                if (enlarge) {
+                  f.style.setProperty('width', targetW + 'px', 'important');
+                  f.style.setProperty('height', targetH + 'px', 'important');
+                  f.style.setProperty(
+                    'transform',
+                    'translateX(-50%) scale(' + scale + ')',
+                    'important'
+                  );
+                  f.style.setProperty('transform-origin', 'top center', 'important');
+                } else if (off) {
                   f.style.setProperty('transform', 'translateX(-50%)', 'important');
-                  f.style.setProperty('z-index', '2147483646', 'important');
-                  f.style.setProperty('opacity', '1', 'important');
-                  f.style.setProperty('pointer-events', 'auto', 'important');
-                  fixed += 1;
                 }
+
+                // Dim the page behind so the table is obvious.
+                let veil = document.getElementById('__riot_hcap_veil');
+                if (enlarge) {
+                  if (!veil) {
+                    veil = document.createElement('div');
+                    veil.id = '__riot_hcap_veil';
+                    veil.style.cssText = [
+                      'position:fixed', 'inset:0', 'background:rgba(0,0,0,0.35)',
+                      'z-index:2147483645', 'pointer-events:none',
+                    ].join(';');
+                    document.documentElement.appendChild(veil);
+                  }
+                }
+
+                try { f.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
+                fixed += 1;
               }
-              return fixed;
-            }"""
+              return { fixed, scale, enlarge };
+            }""",
+            {"enlarge": bool(enlarge), "scale": scale},
         )
-        if moved:
-            _log(f"repositioned {moved} off-screen hCaptcha iframe(s)")
-            page.wait_for_timeout(400)
+        fixed = int((result or {}).get("fixed") or 0)
+        if fixed:
+            _log(
+                f"revealed {fixed} hCaptcha challenge iframe(s) "
+                f"enlarge={enlarge} scale={(result or {}).get('scale')}"
+            )
+            page.wait_for_timeout(350)
             shield_social_login_buttons(page)
             return True
     except Exception as exc:
-        _log(f"iframe reposition failed: {exc}")
+        _log(f"hCaptcha reveal failed: {exc}")
     return False
 
 

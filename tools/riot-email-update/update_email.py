@@ -357,6 +357,7 @@ def wait_for_manual_captcha(page, *, timeout_s: float = 300.0) -> bool:
         page_has_riot_oops,
         page_looks_auth_progress,
         page_looks_mfa,
+        reveal_full_hcaptcha_challenge,
     )
 
     # Wait for the challenge to mount after sign-in
@@ -376,16 +377,30 @@ def wait_for_manual_captcha(page, *, timeout_s: float = 300.0) -> bool:
         print("  No hCaptcha challenge visible — nothing to solve manually")
         return True
 
+    # Pin + enlarge the challenge so the whole tile table is visible.
+    reveal_full_hcaptcha_challenge(page, enlarge=True)
+    try:
+        page.bring_to_front()
+    except Exception:
+        pass
+
     print("\n" + "=" * 68, flush=True)
     print("  MANUAL CAPTCHA — solve the hCaptcha in the browser window now.", flush=True)
+    print("  The challenge table is pinned/enlarged so the full grid is visible.", flush=True)
+    print("  Tip: Ctrl/Cmd + mouse-wheel to zoom further if needed.", flush=True)
     print("  Automation will continue on its own the moment it clears.", flush=True)
     print(f"  Waiting up to {int(timeout_s)}s…", flush=True)
     print("=" * 68 + "\n", flush=True)
 
     deadline = time.time() + timeout_s
     last_log = 0.0
+    last_reveal = 0.0
     while time.time() < deadline:
         page.wait_for_timeout(1000)
+        # Keep re-applying — hCaptcha often re-parks the iframe off-screen.
+        if time.time() - last_reveal > 3:
+            reveal_full_hcaptcha_challenge(page, enlarge=True)
+            last_reveal = time.time()
         if page_has_riot_oops(page):
             print("  Riot Oops during manual solve — will rotate")
             return False

@@ -15,6 +15,10 @@ Login uses Riot’s `authenticate.riotgames.com` accountodactyl-prod URL with
 `email.edit` scopes (fresh `state` every run). After login, the tool opens
 `EMAIL_CHANGE_URL` (default `https://account.riotgames.com/`) to edit the email.
 
+During manual captcha the browser starts maximized and the challenge popup is
+pinned/enlarged so the **full hCaptcha tile table** is visible. Tune with
+`HCAPTCHA_VIEW_SCALE=1.4` in `.env` if you still need it larger.
+
 ## Alternatives
 
 | File | When to use |
