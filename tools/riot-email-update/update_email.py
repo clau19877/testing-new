@@ -39,9 +39,17 @@ ACCOUNT_URL = "https://account.riotgames.com/"
 # Override with EMAIL_CHANGE_URL / --email-change-url / CSV email_change_url.
 AUTH_HOST_HINT = "auth.riotgames.com"
 
-# Official account-portal OAuth login that includes email.edit scope.
-# Matches authenticate.riotgames.com ?client_id=accountodactyl-prod&…
-# The `state` query param is regenerated every run (one-time CSRF token).
+# Default entry: Tencent Docs scenario interstitial → click Continue → account.riotgames.com.
+# Opening Riot via this click-through is more reliable than deep-linking authenticate URLs.
+DEFAULT_LOGIN_ENTRY_URL = (
+    "https://docs.qq.com/scenario/link.html?"
+    "url=https%3A%2F%2Faccount.riotgames.com%2F"
+    "&pid=300000000%24KrVGtggzglZK"
+    "&cid=144115210422737002"
+    "&nlc=1"
+)
+
+# Fallback: official account-portal OAuth login that includes email.edit scope.
 ACCOUNT_OAUTH_SCOPES = " ".join(
     [
         "openid",
@@ -67,10 +75,8 @@ ACCOUNT_OAUTH_SCOPES = " ".join(
 
 def build_account_login_url(*, state: str | None = None) -> str:
     """
-    Login URL for account.riotgames.com with email.edit (and related) scopes.
-
-    Equivalent to the authenticate.riotgames.com link used to open the account
-    portal for changing email — with a fresh `state` each call.
+    Direct authenticate.riotgames.com login with email.edit scopes.
+    Used only as a fallback when the entry click-through fails.
     """
     state = state or str(uuid.uuid4())
     authorize_qs = urlencode(
@@ -101,16 +107,135 @@ def build_account_login_url(*, state: str | None = None) -> str:
 
 
 def resolve_login_url() -> str:
-    """LOGIN_URL / ACCOUNT_LOGIN_URL env, else the email.edit OAuth login URL."""
-    for key in ("LOGIN_URL", "ACCOUNT_LOGIN_URL"):
+    """
+    Entry URL opened first in the browser.
+
+    Prefer LOGIN_URL / ACCOUNT_LOGIN_URL / LOGIN_ENTRY_URL, else the docs.qq.com
+    click-through that Continues into account.riotgames.com.
+    """
+    for key in ("LOGIN_URL", "ACCOUNT_LOGIN_URL", "LOGIN_ENTRY_URL"):
         raw = (os.getenv(key) or "").strip()
-        if raw:
-            # Pasted authenticate URL may carry a stale one-time state —
-            # rebuild so we always get a fresh CSRF state.
-            if "authenticate.riotgames.com" in raw and "accountodactyl-prod" in raw:
-                return build_account_login_url()
-            return raw
-    return build_account_login_url()
+        if not raw:
+            continue
+        low = raw.lower()
+        if low in {"authenticate", "oauth", "email.edit", "direct"}:
+            return build_account_login_url()
+        # Pasted authenticate URL may carry a stale one-time state.
+        if "authenticate.riotgames.com" in raw and "accountodactyl-prod" in raw:
+            return build_account_login_url()
+        return raw
+    return DEFAULT_LOGIN_ENTRY_URL
+
+
+def _on_riot_auth_or_account(url: str) -> bool:
+    u = (url or "").lower()
+    return any(
+        h in u
+        for h in (
+            "account.riotgames.com",
+            "auth.riotgames.com",
+            "authenticate.riotgames.com",
+        )
+    )
+
+
+def click_through_login_entry(page, *, timeout_ms: int = 45_000) -> bool:
+    """
+    If we're on a docs.qq.com (or similar) interstitial, click Continue /
+    the account.riotgames.com link so Riot's real login loads.
+    """
+    url = page.url or ""
+    if _on_riot_auth_or_account(url):
+        return True
+
+    print(f"  Entry interstitial: {url[:120]}", flush=True)
+    # Prefer an explicit link to Riot account.
+    selectors = [
+        'a[href*="account.riotgames.com"]',
+        'a[href*="authenticate.riotgames.com"]',
+        'a[href*="auth.riotgames.com"]',
+        'a:has-text("Continue")',
+        'a:has-text("继续")',
+        'button:has-text("Continue")',
+        'button:has-text("继续")',
+        'text=/Continue\\s*:/i',
+        'text=/https:\\/\\/account\\.riotgames\\.com/i',
+    ]
+    clicked = False
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            if loc.count() == 0:
+                continue
+            loc.wait_for(state="visible", timeout=3_000)
+            print(f"  Clicking through via: {sel}", flush=True)
+            with page.expect_navigation(timeout=timeout_ms, wait_until="domcontentloaded"):
+                loc.click(timeout=5_000)
+            clicked = True
+            break
+        except Exception:
+            # Some clicks open same-tab without a clean navigation event.
+            try:
+                page.locator(sel).first.click(timeout=3_000)
+                clicked = True
+                page.wait_for_timeout(1_500)
+                break
+            except Exception:
+                continue
+
+    if not clicked:
+        # Last resort: pull target from the entry URL's ?url= query and go there.
+        try:
+            from urllib.parse import parse_qs, urlparse, unquote
+
+            qs = parse_qs(urlparse(url).query)
+            target = unquote((qs.get("url") or [""])[0])
+            if target.startswith("http"):
+                print(f"  Falling back to entry url= param → {target}", flush=True)
+                page.goto(target, wait_until="domcontentloaded")
+                clicked = True
+        except Exception as exc:
+            print(f"  Entry click-through note: {exc}", flush=True)
+
+    try:
+        page.wait_for_url(_on_riot_auth_or_account, timeout=timeout_ms)
+    except Exception:
+        pass
+
+    if _on_riot_auth_or_account(page.url or ""):
+        print(f"  Landed on Riot: {page.url}", flush=True)
+        return True
+
+    print(f"  Still not on Riot after entry click (url={page.url})", flush=True)
+    return False
+
+
+def open_riot_login(page, *, timeout_ms: int = 45_000) -> None:
+    """
+    Open the login entry (docs.qq.com by default), click Continue into
+    account.riotgames.com, and wait for the Riot auth form.
+    """
+    entry = resolve_login_url()
+    print(f"  Entry URL: {entry[:120]}", flush=True)
+    page.goto(entry, wait_until="domcontentloaded")
+    page.wait_for_timeout(1_000)
+
+    if not _on_riot_auth_or_account(page.url or ""):
+        ok = click_through_login_entry(page, timeout_ms=timeout_ms)
+        if not ok:
+            print("  Entry click-through failed — trying account.riotgames.com directly…")
+            page.goto(ACCOUNT_URL, wait_until="domcontentloaded")
+
+    # account.riotgames.com usually redirects into authenticate / auth.
+    try:
+        page.wait_for_url(
+            lambda u: "auth.riotgames.com" in u or "authenticate.riotgames.com" in u,
+            timeout=min(20_000, timeout_ms),
+        )
+    except Exception:
+        if page_looks_logged_in(page):
+            return
+        # Still on account portal without auth form — stay; caller may pause.
 
 
 def prompt(label: str, *, secret: bool = False, default: str | None = None) -> str:
@@ -561,22 +686,14 @@ def run_login(
     """
     from vision_captcha import captcha_visible, page_has_riot_oops
 
-    print("\n[1/3] Opening Riot account portal (email.edit scopes)…")
+    print("\n[1/3] Opening Riot login via entry link (click-through)…")
     login_started = time.time()
     used_codes: set[str] = set()
-    login_url = resolve_login_url()
-    print(f"  Login URL: {login_url[:96]}…")
-    page.goto(login_url, wait_until="domcontentloaded")
+    open_riot_login(page, timeout_ms=max(timeout_ms, 45_000))
 
-    try:
-        page.wait_for_url(
-            lambda url: "auth.riotgames.com" in url or "authenticate.riotgames.com" in url,
-            timeout=15_000,
-        )
-    except Exception:
-        if page_looks_logged_in(page):
-            print("  Appears already signed in.")
-            return "logged_in"
+    if page_looks_logged_in(page):
+        print("  Appears already signed in.")
+        return "logged_in"
 
     dismiss_cookie_banner(page)
     print("[1/3] Filling login form…")
@@ -1005,7 +1122,7 @@ def main() -> int:
         "\nThis helper drives the official Riot account site for YOUR account only.\n"
         f"Browser mode: {'headed' if headed else 'headless'}\n"
         f"Target email: {new_email}\n"
-        f"Login URL: {login_url_preview[:96]}…\n"
+        f"Login entry: {login_url_preview[:96]}…\n"
         f"Email-change URL: {email_change_url}\n"
         f"Captcha: {captcha_provider} "
         f"(VISION_BACKEND={os.getenv('VISION_BACKEND') or 'hybrid'})\n"

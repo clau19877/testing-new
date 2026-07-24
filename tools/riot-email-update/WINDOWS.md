@@ -11,9 +11,9 @@
 
 Optional: copy `.env.example` → `.env` and add `data/proxies.txt` if you use proxies.
 
-Login uses Riot’s `authenticate.riotgames.com` accountodactyl-prod URL with
-`email.edit` scopes (fresh `state` every run). After login, the tool opens
-`EMAIL_CHANGE_URL` (default `https://account.riotgames.com/`) to edit the email.
+Login opens a docs.qq.com entry link, clicks **Continue** into
+`https://account.riotgames.com/`, then fills the Riot sign-in form. After
+login, the tool opens `EMAIL_CHANGE_URL` to edit the email.
 
 During manual captcha the browser starts maximized and the challenge popup is
 pinned/enlarged so the **full hCaptcha tile table** is visible. Tune with
