@@ -420,14 +420,15 @@ on parseArgs(argv)
 		if a is "--" then
 			set i to i + 1
 		else if a starts with "--" then
-			set key to text 3 thru -1 of a
-			if key is "skip-email-change" or key is "batch" then
-				set end of opts to {key, "1"}
+			-- NOTE: do not use variable name "key" — reserved in AppleScript (-10006)
+			set flagName to text 3 thru -1 of a
+			if flagName is "skip-email-change" or flagName is "batch" then
+				set end of opts to {flagName, "1"}
 			else if i < (count of argv) then
 				set i to i + 1
-				set end of opts to {key, item i of argv as text}
+				set end of opts to {flagName, item i of argv as text}
 			else
-				set end of opts to {key, "1"}
+				set end of opts to {flagName, "1"}
 			end if
 			set i to i + 1
 		else
@@ -437,16 +438,16 @@ on parseArgs(argv)
 	return opts
 end parseArgs
 
-on optValue(opts, key, defaultValue)
+on optValue(opts, optName, defaultValue)
 	repeat with p in opts
 		set k to item 1 of p as text
-		if k is key then return item 2 of p as text
+		if k is optName then return item 2 of p as text
 	end repeat
 	return defaultValue
 end optValue
 
-on optFlag(opts, key)
-	return optValue(opts, key, "") is "1"
+on optFlag(opts, optName)
+	return optValue(opts, optName, "") is "1"
 end optFlag
 
 on envOrEmpty(varName)

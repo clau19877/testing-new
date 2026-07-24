@@ -1,9 +1,8 @@
 #!/bin/bash
 # Double-click this file on your Mac (or run it in Terminal).
-# It always uses the folder that contains this file — e.g. Desktop/riotemail.
-
 cd "$(dirname "$0")" || exit 1
-chmod +x run_safari_mac.sh run_safari_batch.sh fetch_riot_imap_code.py 2>/dev/null || true
+setopt null_glob 2>/dev/null || true
+chmod +x run_safari_mac.sh run_safari_batch.sh fetch_riot_imap_code.py RUN_ME.command 2>/dev/null || true
 
 echo "Working folder: $(pwd)"
 echo "Looking for data/tasks.csv ..."
