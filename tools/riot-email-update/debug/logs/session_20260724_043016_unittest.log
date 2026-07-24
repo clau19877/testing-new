@@ -1,6 +1,0 @@
-[2026-07-24 04:30:16.181] [INFO] [session] log file → /workspace/tools/riot-email-update/debug/logs/session_20260724_043016_unittest.log
-[2026-07-24 04:30:16.181] [INFO] [session] cwd=/workspace/tools/riot-email-update
-[2026-07-24 04:30:16.181] [INFO] [session] python=/usr/bin/python3
-[2026-07-24 04:30:16.181] [INFO] [session] argv=['-']
-[2026-07-24 04:30:16.181] [INFO] [test] hello world
-printed line
