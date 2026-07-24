@@ -1,36 +1,21 @@
-(*
-  Riot account email update via local macOS Safari.
+-- Riot account email update via local macOS Safari.
+--
+-- Why Safari: on a real Mac Safari session, Riot often skips hCaptcha.
+-- Opens docs.qq.com click-through, signs in, handles MFA, updates email.
+--
+-- Prerequisites:
+--   Safari -> Settings -> Advanced -> show Develop menu
+--   Develop -> Allow JavaScript from Apple Events (must be ON)
+--
+-- Run:
+--   osascript safari_riot_email.applescript -username RiotUser -password Secret -new-email new@icloud.com
+--   ./run_safari_mac.sh
+--
+-- Optional args: entry-url, mfa-code, verify-code, skip-email-change, batch
+--
+-- Note: do not embed JS with backslash-quote inside AppleScript string literals.
+-- Use the js* handlers below (single-quoted JS, AppleScript quote for dynamics).
 
-  Why Safari: on a real Mac Safari session, Riot often skips hCaptcha.
-  This script opens the docs.qq.com click-through, signs in, handles MFA
-  (prompt or CLI arg), then updates the account email.
-
-  Prerequisites
-  -------------
-  Safari → Settings → Advanced → show Develop menu
-  Develop → Allow JavaScript from Apple Events  (must be ON)
-
-  Run
-  ---
-    osascript safari_riot_email.applescript \
-      --username 'RiotUser' \
-      --password 'Secret' \
-      --new-email 'new@icloud.com'
-
-  Or with the helper (loads .env):
-    ./run_safari_mac.sh
-
-  Optional args:
-    --entry-url URL     docs.qq.com interstitial (default built-in)
-    --mfa-code CODE     skip MFA prompt if you already have the code
-    --verify-code CODE  new-email verify code (skip prompt)
-    --skip-email-change only login, do not change email
-    --batch             no dialogs; fail if MFA/IMAP/captcha needs a human
-
-  Quoting note: AppleScript strings use "" for a literal quote. Never use \"
-  inside AppleScript string literals (that breaks compile with errors like
-  预期的是表示式，但找到的是「st」).
-*)
 
 on run argv
 	set opts to parseArgs(argv)
@@ -392,7 +377,7 @@ end waitForPostLogin
 on parseArgs(argv)
 	set opts to {}
 	set i to 1
-	repeat while i ≤ (count of argv)
+	repeat while i <= (count of argv)
 		set a to item i of argv as text
 		if a starts with "--" then
 			set key to text 3 thru -1 of a
