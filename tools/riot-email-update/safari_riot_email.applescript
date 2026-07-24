@@ -163,23 +163,26 @@ on defaultEntryURL()
 	return "https://docs.qq.com/scenario/link.html?url=https%3A%2F%2Faccount.riotgames.com%2F&pid=300000000%24KrVGtggzglZK&cid=144115210422737002&nlc=1"
 end defaultEntryURL
 
+on backslashChar()
+	-- Avoid "\" in source — some AppleScript builds treat \ as an escape.
+	return character id 92
+end backslashChar
+
 on logLine(msg)
 	log msg
 	try
-		-- AppleScript "\n" is backslash + n, which printf interprets as newline.
-		do shell script "printf '%s\n' " & quoted form of ("[safari-riot] " & msg) & " >&2"
+		do shell script "echo " & quoted form of ("[safari-riot] " & msg) & " >&2"
 	end try
 end logLine
 
 on jsonString(s)
 	-- Produce a JS string literal safely for embedding in do JavaScript.
-	-- AppleScript: "\" = one backslash; "\\" = two backslashes; quote = ".
-	-- "\n" is backslash + n (AppleScript has no C-style escapes).
+	set bs to backslashChar()
 	set s to s as text
-	set s to replaceText(s, "\", "\\")
-	set s to replaceText(s, quote, "\" & quote)
-	set s to replaceText(s, return, "\n")
-	set s to replaceText(s, linefeed, "\n")
+	set s to replaceText(s, bs, bs & bs)
+	set s to replaceText(s, quote, bs & quote)
+	set s to replaceText(s, return, bs & "n")
+	set s to replaceText(s, linefeed, bs & "n")
 	return quote & s & quote
 end jsonString
 
@@ -209,13 +212,14 @@ end safariJS
 -- Use only single quotes in the JS source text below.
 
 on jsClickContinue()
+	set bs to backslashChar()
 	return "(function () {" & ¬
 		"  const candidates = Array.from(document.querySelectorAll('a,button'));" & ¬
 		"  for (const el of candidates) {" & ¬
 		"    const t = (el.textContent || '').trim();" & ¬
 		"    const href = (el.getAttribute('href') || '');" & ¬
-		"    if (/account\\.riotgames\\.com|authenticate\\.riotgames\\.com/i.test(href)" & ¬
-		"        || /^Continue/i.test(t) || t.includes('\\u7ee7\\u7eed')) {" & ¬
+		"    if (/account" & bs & ".riotgames" & bs & ".com|authenticate" & bs & ".riotgames" & bs & ".com/i.test(href)" & ¬
+		"        || /^Continue/i.test(t) || t.indexOf('Continue') === 0) {" & ¬
 		"      el.click();" & ¬
 		"      return 'clicked:' + (t || href).slice(0, 80);" & ¬
 		"    }" & ¬
@@ -262,6 +266,7 @@ on jsClickSignIn()
 end jsClickSignIn
 
 on jsProbePhase()
+	set bs to backslashChar()
 	return "(function () {" & ¬
 		"  const href = location.href || '';" & ¬
 		"  const body = (document.body && document.body.innerText || '').toLowerCase();" & ¬
@@ -272,9 +277,9 @@ on jsProbePhase()
 		"  if (/code|verification|authenticate|two-factor|2fa|email you/.test(body)" & ¬
 		"      && document.querySelector('input[name=code], input[autocomplete=one-time-code], input[inputmode=numeric]'))" & ¬
 		"    return 'mfa';" & ¬
-		"  if (/account\\.riotgames\\.com/.test(href) && !/log-in|login|oauth2\\/log-in/.test(href))" & ¬
+		"  if (/account" & bs & ".riotgames" & bs & ".com/.test(href) && href.indexOf('log-in') < 0 && href.indexOf('login') < 0 && href.indexOf('oauth2') < 0)" & ¬
 		"    return 'account';" & ¬
-		"  if (/account\\.riotgames\\.com/.test(href))" & ¬
+		"  if (/account" & bs & ".riotgames" & bs & ".com/.test(href))" & ¬
 		"    return 'logged_in';" & ¬
 		"  if (document.querySelector('input[name=username], input[type=password]'))" & ¬
 		"    return 'login';" & ¬
