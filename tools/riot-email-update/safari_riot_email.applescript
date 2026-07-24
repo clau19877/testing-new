@@ -164,7 +164,7 @@ on defaultEntryURL()
 end defaultEntryURL
 
 on backslashChar()
-	-- Avoid "\" in source — some AppleScript builds treat \ as an escape.
+	-- Return ASCII backslash without putting a backslash in source text.
 	return character id 92
 end backslashChar
 
