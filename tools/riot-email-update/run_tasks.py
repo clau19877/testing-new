@@ -113,6 +113,8 @@ def build_env(row: dict[str, str]) -> dict[str, str]:
     )
     if row.get("proxy_index"):
         env["PROXY_INDEX"] = row["proxy_index"]
+    if row.get("email_change_url"):
+        env["EMAIL_CHANGE_URL"] = row["email_change_url"]
     return env
 
 
@@ -158,6 +160,10 @@ def main() -> int:
             "--new-email", row["new_email"],
             "--imap-timeout", str(args.imap_timeout),
         ]
+        if row.get("email_change_url"):
+            cmd.extend(["--email-change-url", row["email_change_url"]])
+        elif env.get("EMAIL_CHANGE_URL"):
+            cmd.extend(["--email-change-url", env["EMAIL_CHANGE_URL"]])
         t0 = time.time()
         try:
             rc = subprocess.call(cmd, env=env, cwd=str(ROOT))

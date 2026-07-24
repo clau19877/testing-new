@@ -1,4 +1,4 @@
-riot_username,riot_password,imap_email,imap_app_password,new_email,imap_host,imap_port,proxy_index
+riot_username,riot_password,imap_email,imap_app_password,new_email,imap_host,imap_port,proxy_index,email_change_url
 # One row per account. Fill in the 5 required columns; leave optional ones blank.
 #   riot_username      Riot login (username or account email)
 #   riot_password      Riot password
@@ -8,6 +8,7 @@ riot_username,riot_password,imap_email,imap_app_password,new_email,imap_host,ima
 #   imap_host          (optional) IMAP server; blank = auto from the email domain
 #   imap_port          (optional) default 993
 #   proxy_index        (optional) which proxy from data/proxies.txt to use
+#   email_change_url   (optional) direct Riot page for changing email; blank = EMAIL_CHANGE_URL / account.riotgames.com
 # iCloud app passwords: appleid.apple.com > Sign-In and Security > App-Specific Passwords
 # Gmail app passwords:  myaccount.google.com/apppasswords (requires 2FA)
-example-login@icloud.com,RiotPassw0rd!,codes-inbox@icloud.com,abcd-efgh-ijkl-mnop,my-new-email@gmail.com,,,
+example-login@icloud.com,RiotPassw0rd!,codes-inbox@icloud.com,abcd-efgh-ijkl-mnop,my-new-email@gmail.com,,,,

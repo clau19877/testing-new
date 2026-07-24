@@ -33,6 +33,7 @@ from captcha import (
 from imap_mail import ImapConfig, ImapInbox
 
 ACCOUNT_URL = "https://account.riotgames.com/"
+# Override with EMAIL_CHANGE_URL / --email-change-url / CSV column email_change_url.
 AUTH_HOST_HINT = "auth.riotgames.com"
 
 
@@ -110,6 +111,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=180.0,
         help="Seconds to wait for Riot mail via IMAP (default: 180)",
+    )
+    parser.add_argument(
+        "--email-change-url",
+        default=None,
+        help="URL opened after login to change email "
+        "(default: EMAIL_CHANGE_URL env or https://account.riotgames.com/)",
     )
     return parser.parse_args()
 
@@ -624,6 +631,26 @@ def run_login(
         print("  Login detected.")
 
 
+def email_change_candidates(preferred: str | None) -> list[str]:
+    """Ordered list of URLs to try for the email-change page."""
+    urls: list[str] = []
+    preferred = (preferred or "").strip()
+    if preferred:
+        urls.append(preferred)
+    env_url = (os.getenv("EMAIL_CHANGE_URL") or "").strip()
+    for u in (
+        env_url,
+        ACCOUNT_URL,
+        "https://account.riotgames.com/",
+        "https://account.riotgames.com/#/",
+        "https://account.riotgames.com/account",
+    ):
+        u = (u or "").strip()
+        if u and u not in urls:
+            urls.append(u)
+    return urls
+
+
 def run_email_update(
     page,
     new_email: str,
@@ -632,25 +659,28 @@ def run_email_update(
     current_inbox: ImapInbox | None,
     new_inbox: ImapInbox | None,
     imap_timeout: float,
+    email_change_url: str | None = None,
 ) -> None:
-    print("\n[2/3] Opening account settings…")
-    page.goto(ACCOUNT_URL, wait_until="domcontentloaded")
-    page.wait_for_timeout(2_000)
-
+    print("\n[2/3] Opening email-change page…")
     navigated = False
-    for path in ("/account", "/", "/#/"):
+    for url in email_change_candidates(email_change_url):
         try:
-            page.goto(f"https://account.riotgames.com{path}", wait_until="domcontentloaded")
+            print(f"  Trying {url}")
+            page.goto(url, wait_until="domcontentloaded")
             page.wait_for_timeout(1_500)
             if AUTH_HOST_HINT in page.url or "authenticate.riotgames.com" in page.url:
                 raise RuntimeError("Session expired — redirected to login")
             navigated = True
+            print(f"  Opened: {page.url}")
             break
         except Exception as exc:
             print(f"  Navigation note: {exc}")
 
     if not navigated:
-        pause("Open your Riot account page manually in the browser.")
+        pause(
+            "Open the Riot email-change page manually in the browser "
+            "(set EMAIL_CHANGE_URL if you have a direct link)."
+        )
 
     print("[2/3] Looking for email / Personal Information controls…")
     opened_editor = click_first_matching(
@@ -854,11 +884,17 @@ def main() -> int:
     username = args.username or os.getenv("RIOT_USERNAME") or prompt("Riot username or email")
     password = os.getenv("RIOT_PASSWORD") or prompt("Riot password", secret=True)
     new_email = args.new_email or os.getenv("NEW_EMAIL") or prompt("New email address")
+    email_change_url = (
+        (args.email_change_url or os.getenv("EMAIL_CHANGE_URL") or ACCOUNT_URL)
+        .strip()
+        or ACCOUNT_URL
+    )
 
     print(
         "\nThis helper drives the official Riot account site for YOUR account only.\n"
         f"Browser mode: {'headed' if headed else 'headless'}\n"
         f"Target email: {new_email}\n"
+        f"Email-change URL: {email_change_url}\n"
         f"Captcha: {captcha_provider} "
         f"(VISION_BACKEND={os.getenv('VISION_BACKEND') or 'hybrid'})\n"
         f"Proxy list: {n_proxies} entries, start index={proxy_index}, "
@@ -958,6 +994,7 @@ def main() -> int:
                         current_inbox=current_inbox,
                         new_inbox=new_inbox,
                         imap_timeout=args.imap_timeout,
+                        email_change_url=email_change_url,
                     )
                 elif last_status in ("oops", "captcha_fail"):
                     print(
