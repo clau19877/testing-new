@@ -134,32 +134,40 @@ def run_one(row: dict[str, str], *, entry_url: str, skip_email: bool) -> tuple[b
             "RIOT_USERNAME": row["riot_username"],
             "RIOT_PASSWORD": row["riot_password"],
             "NEW_EMAIL": row["new_email"],
+            "SAFARI_BATCH": "1",
         }
     )
+
+    # Write a task file — more reliable than osascript argv / system attribute.
+    task_path = ROOT / ".safari_current_task"
+    task_lines = [
+        f"riot_username={row['riot_username']}",
+        f"riot_password={row['riot_password']}",
+        f"new_email={row['new_email']}",
+        f"imap_email={row['imap_email']}",
+        f"imap_app_password={row['imap_app_password']}",
+        f"imap_host={imap_host}",
+        f"imap_port={imap_port}",
+        f"entry_url={entry_url}",
+        f"skip_email_change={'1' if skip_email else '0'}",
+    ]
+    task_path.write_text("\n".join(task_lines) + "\n", encoding="utf-8")
+    env["SAFARI_TASK_FILE"] = str(task_path)
 
     cmd = [
         "osascript",
         str(ROOT / "safari_riot_email.applescript"),
-        "--",  # end osascript options; pass the rest to the script
+        "--",
         "--batch",
-        "--entry-url",
-        entry_url,
-        "--username",
-        row["riot_username"],
-        "--password",
-        row["riot_password"],
-        "--new-email",
-        row["new_email"],
+        "--task-file",
+        str(task_path),
     ]
-    if skip_email:
-        cmd.append("--skip-email-change")
-
-    env["SAFARI_BATCH"] = "1"
 
     print(
         f"\n{'=' * 60}\n"
         f"Safari batch: {row['riot_username']} → {row['new_email']}\n"
         f"  IMAP {row['imap_email']} @ {imap_host}\n"
+        f"  task-file: {task_path}\n"
         f"{'=' * 60}",
         flush=True,
     )
@@ -176,6 +184,11 @@ def run_one(row: dict[str, str], *, entry_url: str, skip_email: bool) -> tuple[b
         return False, "timeout"
     except FileNotFoundError:
         return False, "osascript not found (macOS only)"
+    finally:
+        try:
+            task_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
     if out:
@@ -251,6 +264,12 @@ def main() -> int:
         )
 
     tasks = read_tasks(csv_path)
+    if not tasks:
+        raise SystemExit(
+            f"No account rows found in {csv_path}\n"
+            f"  Add rows under the header (riot_username,riot_password,...).\n"
+            f"  See data/tasks.csv.example"
+        )
     success_path = Path(args.success)
     failed_path = Path(args.failed)
     if not success_path.is_absolute():

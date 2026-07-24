@@ -1,3 +1,6 @@
 debug/
 success.txt
 failed.txt
+.safari_current_task
+*.pyc
+__pycache__/

@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 # Launch Riot email-update via local macOS Safari (usually no hCaptcha).
 #
-# Preferred (reads accounts from CSV, no username prompts):
+# REQUIRED for CSV accounts (no username prompts):
 #   ./run_safari_mac.sh
 #   ./run_safari_mac.sh data/tasks.csv
 #   ./run_safari_batch.sh data/tasks.csv
 #
-# Single account from .env / flags:
-#   ./run_safari_mac.sh --username X --password Y --new-email Z
-#   ./run_safari_mac.sh --skip-email-change
+# Do NOT double-click safari_riot_email.applescript — that has no CSV.
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -27,29 +25,45 @@ if [[ -f .env ]]; then
   set +a
 fi
 
-# Default: if first arg is a CSV (or no args and data/tasks.csv exists), run batch.
+csv_has_rows() {
+  local f="$1"
+  [[ -f "$f" ]] || return 1
+  # any non-empty, non-comment line after header
+  awk 'NR>1 && $0 !~ /^[[:space:]]*$/ && $0 !~ /^#/ { found=1; exit } END { exit !found }' "$f"
+}
+
 CSV_CANDIDATE=""
-if [[ $# -ge 1 && -f "$1" && "$1" == *.csv ]]; then
-  CSV_CANDIDATE="$1"
-  shift
-elif [[ $# -ge 1 && -f "$ROOT/$1" && "$1" == *.csv ]]; then
-  CSV_CANDIDATE="$ROOT/$1"
-  shift
-elif [[ $# -eq 0 && -f "$ROOT/data/tasks.csv" ]]; then
-  # Only auto-batch when CSV has at least one data row
-  if awk 'NR>1 && $0 !~ /^[[:space:]]*$/ && $0 !~ /^#/ { found=1; exit } END { exit !found }' "$ROOT/data/tasks.csv"; then
-    CSV_CANDIDATE="$ROOT/data/tasks.csv"
+if [[ $# -ge 1 && "$1" != --* ]]; then
+  if [[ -f "$1" ]]; then
+    CSV_CANDIDATE="$1"
+    shift
+  elif [[ -f "$ROOT/$1" ]]; then
+    CSV_CANDIDATE="$ROOT/$1"
+    shift
+  else
+    echo "File not found: $1" >&2
+    exit 2
   fi
+elif [[ -f "$ROOT/data/tasks.csv" ]]; then
+  CSV_CANDIDATE="$ROOT/data/tasks.csv"
 fi
 
 if [[ -n "$CSV_CANDIDATE" ]]; then
+  if ! csv_has_rows "$CSV_CANDIDATE"; then
+    echo "ERROR: $CSV_CANDIDATE has no account rows (only header or empty)." >&2
+    echo "  Add lines like:" >&2
+    echo "  riotuser,password,imap@icloud.com,app-pass,new@icloud.com,imap.mail.me.com,993,," >&2
+    echo "  Example: data/tasks.csv.example" >&2
+    exit 2
+  fi
   echo "== Riot Safari batch (from CSV) =="
   echo "  csv: $CSV_CANDIDATE"
-  echo "  (usernames/passwords/new emails come from the CSV — no prompts)"
+  echo "  usernames come from the CSV — you should NOT get a username dialog"
   echo
   exec python3 "$ROOT/run_safari_batch.py" "$CSV_CANDIDATE" "$@"
 fi
 
+# Single-account path only when there is no data/tasks.csv
 ENTRY_URL="${LOGIN_ENTRY_URL:-${LOGIN_URL:-https://docs.qq.com/scenario/link.html?url=https%3A%2F%2Faccount.riotgames.com%2F&pid=300000000%24KrVGtggzglZK&cid=144115210422737002&nlc=1}}"
 USER_NAME="${RIOT_USERNAME:-}"
 PASS="${RIOT_PASSWORD:-}"
@@ -64,40 +78,23 @@ while [[ $# -gt 0 ]]; do
       PASSTHROUGH+=("$1"); shift ;;
     *)
       echo "Unknown arg: $1" >&2
-      echo "Usage: $0 [data/tasks.csv]   OR   $0 --username U --password P --new-email E" >&2
+      echo "Put accounts in data/tasks.csv then run: $0" >&2
       exit 2 ;;
   esac
 done
 
-have_flag() {
-  local key="$1"
-  local i
-  for ((i=0; i<${#PASSTHROUGH[@]}; i++)); do
-    [[ "${PASSTHROUGH[$i]}" == "$key" ]] && return 0
-  done
-  return 1
-}
-
-ARGS=()
-ARGS+=(--entry-url "$ENTRY_URL")
-if ! have_flag --username && [[ -n "$USER_NAME" ]]; then
-  ARGS+=(--username "$USER_NAME")
-fi
-if ! have_flag --password && [[ -n "$PASS" ]]; then
-  ARGS+=(--password "$PASS")
-fi
-if ! have_flag --new-email && [[ -n "$NEW_EMAIL_ADDR" ]]; then
-  ARGS+=(--new-email "$NEW_EMAIL_ADDR")
-fi
+ARGS=(--entry-url "$ENTRY_URL")
+[[ -n "$USER_NAME" ]] && ARGS+=(--username "$USER_NAME")
+[[ -n "$PASS" ]] && ARGS+=(--password "$PASS")
+[[ -n "$NEW_EMAIL_ADDR" ]] && ARGS+=(--new-email "$NEW_EMAIL_ADDR")
 ARGS+=("${PASSTHROUGH[@]}")
 
-echo "== Riot Safari single-account launcher =="
-echo "  entry: $ENTRY_URL"
-echo "  user:  ${USER_NAME:-"(missing — will prompt unless passed)"}"
-echo "  new:   ${NEW_EMAIL_ADDR:-"(missing — will prompt unless passed)"}"
-echo "  Tip: put rows in data/tasks.csv and run: ./run_safari_mac.sh"
-echo "  Ensure: Safari → Develop → Allow JavaScript from Apple Events"
-echo
+if [[ -z "$USER_NAME" ]]; then
+  echo "ERROR: no data/tasks.csv and no RIOT_USERNAME." >&2
+  echo "  Create data/tasks.csv with account rows, then run: $0" >&2
+  exit 2
+fi
 
-# "--" stops osascript from eating --username / --password
+echo "== Riot Safari single-account =="
+echo "  user: $USER_NAME"
 exec osascript "$ROOT/safari_riot_email.applescript" -- "${ARGS[@]}"

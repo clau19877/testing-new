@@ -29,8 +29,24 @@ on run argv
 	set skipEmail to optFlag(opts, "skip-email-change")
 	set batchMode to optFlag(opts, "batch")
 
-	-- Fall back to env (batch runner sets these from tasks.csv).
-	-- osascript sometimes drops --flags; env is the reliable path.
+	-- Primary source for batch: task file written from tasks.csv (reliable).
+	set taskFile to optValue(opts, "task-file", "")
+	if taskFile is "" then set taskFile to envOrEmpty("SAFARI_TASK_FILE")
+	if taskFile is not "" then
+		set batchMode to true
+		set tfUser to taskFileValue(taskFile, "riot_username")
+		set tfPass to taskFileValue(taskFile, "riot_password")
+		set tfEmail to taskFileValue(taskFile, "new_email")
+		set tfEntry to taskFileValue(taskFile, "entry_url")
+		if tfUser is not "" then set riotUser to tfUser
+		if tfPass is not "" then set riotPass to tfPass
+		if tfEmail is not "" then set newEmail to tfEmail
+		if tfEntry is not "" then set entryURL to tfEntry
+		if taskFileValue(taskFile, "skip_email_change") is "1" then set skipEmail to true
+		logLine("Loaded task file: " & taskFile)
+	end if
+
+	-- Fall back to env (batch runner also sets these from tasks.csv).
 	if riotUser is "" then set riotUser to envOrEmpty("RIOT_USERNAME")
 	if riotPass is "" then set riotPass to envOrEmpty("RIOT_PASSWORD")
 	if newEmail is "" then set newEmail to envOrEmpty("NEW_EMAIL")
@@ -39,22 +55,21 @@ on run argv
 		if envEntry is "" then set envEntry to envOrEmpty("LOGIN_URL")
 		if envEntry is not "" then set entryURL to envEntry
 	end if
-	-- If still batch-ish env from CSV runner, stay non-interactive
-	if (not batchMode) and (envOrEmpty("RIOT_USERNAME") is not "") and (envOrEmpty("SAFARI_BATCH") is "1") then
+	if (not batchMode) and (envOrEmpty("SAFARI_BATCH") is "1") then
 		set batchMode to true
 	end if
 
 	if riotUser is "" then
-		if batchMode then error "batch mode requires username (CSV riot_username / RIOT_USERNAME)"
-		set riotUser to text returned of (display dialog "Riot username or email:" default answer "")
+		if batchMode then error "batch mode: no riot_username (check tasks.csv / task file)"
+		error "No Riot username. Do not open this script directly. Run:" & return & "./run_safari_mac.sh data/tasks.csv"
 	end if
 	if riotPass is "" then
-		if batchMode then error "batch mode requires password (CSV riot_password / RIOT_PASSWORD)"
-		set riotPass to text returned of (display dialog "Riot password:" default answer "" with hidden answer)
+		if batchMode then error "batch mode: no riot_password (check tasks.csv)"
+		error "No Riot password. Run: ./run_safari_mac.sh data/tasks.csv"
 	end if
 	if (not skipEmail) and newEmail is "" then
-		if batchMode then error "batch mode requires new email (CSV new_email / NEW_EMAIL)"
-		set newEmail to text returned of (display dialog "New email address:" default answer "")
+		if batchMode then error "batch mode: no new_email (check tasks.csv)"
+		error "No new email. Run: ./run_safari_mac.sh data/tasks.csv"
 	end if
 
 	logLine("Account: " & riotUser & " -> " & newEmail)
@@ -443,6 +458,30 @@ on envOrEmpty(varName)
 		return ""
 	end try
 end envOrEmpty
+
+on taskFileValue(taskFilePath, keyName)
+	-- Task file format: one "key=value" per line (written by run_safari_batch.py).
+	try
+		set raw to do shell script "/bin/cat " & quoted form of taskFilePath
+	on error
+		return ""
+	end try
+	set oldDelim to AppleScript's text item delimiters
+	set AppleScript's text item delimiters to linefeed
+	set theLines to text items of raw
+	set AppleScript's text item delimiters to oldDelim
+	repeat with L in theLines
+		set lineText to L as text
+		if lineText starts with (keyName & "=") then
+			try
+				return text ((length of keyName) + 2) thru -1 of lineText
+			on error
+				return ""
+			end try
+		end if
+	end repeat
+	return ""
+end taskFileValue
 
 on scriptDir()
 	try
