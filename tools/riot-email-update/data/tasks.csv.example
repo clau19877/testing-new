@@ -8,7 +8,8 @@ riot_username,riot_password,imap_email,imap_app_password,new_email,imap_host,ima
 #   imap_host          (optional) IMAP server; blank = auto from the email domain
 #   imap_port          (optional) default 993
 #   proxy_index        (optional) which proxy from data/proxies.txt to use
-#   email_change_url   (optional) direct Riot page for changing email; blank = EMAIL_CHANGE_URL / account.riotgames.com
+#   email_change_url   (optional) post-login page to edit email; blank = account.riotgames.com
+#                      (login itself always uses authenticate…accountodactyl-prod with email.edit)
 # iCloud app passwords: appleid.apple.com > Sign-In and Security > App-Specific Passwords
 # Gmail app passwords:  myaccount.google.com/apppasswords (requires 2FA)
 example-login@icloud.com,RiotPassw0rd!,codes-inbox@icloud.com,abcd-efgh-ijkl-mnop,my-new-email@gmail.com,,,,

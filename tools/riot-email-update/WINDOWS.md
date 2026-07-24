@@ -10,7 +10,10 @@
 5. A real Chromium window opens; solve each hCaptcha when prompted. MFA + email change stay automated.
 
 Optional: copy `.env.example` → `.env` and add `data/proxies.txt` if you use proxies.
-Set `EMAIL_CHANGE_URL` in `.env` (or the `email_change_url` CSV column) if you have a direct Riot email-change page link.
+
+Login uses Riot’s `authenticate.riotgames.com` accountodactyl-prod URL with
+`email.edit` scopes (fresh `state` every run). After login, the tool opens
+`EMAIL_CHANGE_URL` (default `https://account.riotgames.com/`) to edit the email.
 
 ## Alternatives
 

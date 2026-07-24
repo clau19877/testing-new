@@ -21,7 +21,9 @@ import getpass
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
+from urllib.parse import quote, urlencode
 
 from dotenv import load_dotenv
 
@@ -33,8 +35,82 @@ from captcha import (
 from imap_mail import ImapConfig, ImapInbox
 
 ACCOUNT_URL = "https://account.riotgames.com/"
-# Override with EMAIL_CHANGE_URL / --email-change-url / CSV column email_change_url.
+# Post-login account portal (where the email field lives).
+# Override with EMAIL_CHANGE_URL / --email-change-url / CSV email_change_url.
 AUTH_HOST_HINT = "auth.riotgames.com"
+
+# Official account-portal OAuth login that includes email.edit scope.
+# Matches authenticate.riotgames.com ?client_id=accountodactyl-prod&…
+# The `state` query param is regenerated every run (one-time CSRF token).
+ACCOUNT_OAUTH_SCOPES = " ".join(
+    [
+        "openid",
+        "email",
+        "profile",
+        "riot://riot.atlas/openid",
+        "riot://riot.atlas/accounts.edit",
+        "riot://riot.atlas/accounts/password.edit",
+        "riot://riot.atlas/accounts/email.edit",
+        "riot://riot.atlas/accounts.auth",
+        "riot://third_party.revoke",
+        "riot://third_party.query",
+        "riot://forgetme/notify.write",
+        "riot://riot.authenticator/auth.code",
+        "riot://riot.authenticator/authz.edit",
+        "riot://rso/mfa/device.write",
+        "riot://riot.authenticator/identity.add",
+        "riot://riot.atlas/accounts.read",
+        "riot://riot.parent-portal/parent.write",
+    ]
+)
+
+
+def build_account_login_url(*, state: str | None = None) -> str:
+    """
+    Login URL for account.riotgames.com with email.edit (and related) scopes.
+
+    Equivalent to the authenticate.riotgames.com link used to open the account
+    portal for changing email — with a fresh `state` each call.
+    """
+    state = state or str(uuid.uuid4())
+    authorize_qs = urlencode(
+        {
+            "acr_values": "urn:riot:gold",
+            "client_id": "accountodactyl-prod",
+            "redirect_uri": "https://account.riotgames.com/oauth2/log-in",
+            "response_type": "code",
+            "scope": ACCOUNT_OAUTH_SCOPES,
+            "state": state,
+        },
+        quote_via=quote,
+        safe="",
+    )
+    authorize_url = f"https://auth.riotgames.com/authorize?{authorize_qs}"
+    authn_qs = urlencode(
+        {
+            "client_id": "accountodactyl-prod",
+            "method": "riot_identity",
+            "platform": "web",
+            "redirect_uri": authorize_url,
+            "security_profile": "high",
+        },
+        quote_via=quote,
+        safe="",
+    )
+    return f"https://authenticate.riotgames.com/?{authn_qs}"
+
+
+def resolve_login_url() -> str:
+    """LOGIN_URL / ACCOUNT_LOGIN_URL env, else the email.edit OAuth login URL."""
+    for key in ("LOGIN_URL", "ACCOUNT_LOGIN_URL"):
+        raw = (os.getenv(key) or "").strip()
+        if raw:
+            # Pasted authenticate URL may carry a stale one-time state —
+            # rebuild so we always get a fresh CSRF state.
+            if "authenticate.riotgames.com" in raw and "accountodactyl-prod" in raw:
+                return build_account_login_url()
+            return raw
+    return build_account_login_url()
 
 
 def prompt(label: str, *, secret: bool = False, default: str | None = None) -> str:
@@ -115,8 +191,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--email-change-url",
         default=None,
-        help="URL opened after login to change email "
+        help="URL opened after login to edit email "
         "(default: EMAIL_CHANGE_URL env or https://account.riotgames.com/)",
+    )
+    parser.add_argument(
+        "--login-url",
+        default=None,
+        help="Riot authenticate login URL (default: LOGIN_URL env or "
+        "accountodactyl-prod OAuth with email.edit scopes)",
     )
     return parser.parse_args()
 
@@ -464,10 +546,12 @@ def run_login(
     """
     from vision_captcha import captcha_visible, page_has_riot_oops
 
-    print("\n[1/3] Opening Riot account portal…")
+    print("\n[1/3] Opening Riot account portal (email.edit scopes)…")
     login_started = time.time()
     used_codes: set[str] = set()
-    page.goto(ACCOUNT_URL, wait_until="domcontentloaded")
+    login_url = resolve_login_url()
+    print(f"  Login URL: {login_url[:96]}…")
+    page.goto(login_url, wait_until="domcontentloaded")
 
     try:
         page.wait_for_url(
@@ -632,11 +716,16 @@ def run_login(
 
 
 def email_change_candidates(preferred: str | None) -> list[str]:
-    """Ordered list of URLs to try for the email-change page."""
+    """Ordered list of URLs to try for the email-change page (post-login)."""
     urls: list[str] = []
     preferred = (preferred or "").strip()
     if preferred:
-        urls.append(preferred)
+        # Pasted authenticate URL → use fresh-state login builder instead;
+        # after auth, account portal is where the email editor lives.
+        if "authenticate.riotgames.com" in preferred and "accountodactyl-prod" in preferred:
+            urls.append(ACCOUNT_URL)
+        else:
+            urls.append(preferred)
     env_url = (os.getenv("EMAIL_CHANGE_URL") or "").strip()
     for u in (
         env_url,
@@ -646,7 +735,11 @@ def email_change_candidates(preferred: str | None) -> list[str]:
         "https://account.riotgames.com/account",
     ):
         u = (u or "").strip()
-        if u and u not in urls:
+        if not u:
+            continue
+        if "authenticate.riotgames.com" in u and "accountodactyl-prod" in u:
+            u = ACCOUNT_URL
+        if u not in urls:
             urls.append(u)
     return urls
 
@@ -889,11 +982,15 @@ def main() -> int:
         .strip()
         or ACCOUNT_URL
     )
+    if args.login_url:
+        os.environ["LOGIN_URL"] = args.login_url.strip()
+    login_url_preview = resolve_login_url()
 
     print(
         "\nThis helper drives the official Riot account site for YOUR account only.\n"
         f"Browser mode: {'headed' if headed else 'headless'}\n"
         f"Target email: {new_email}\n"
+        f"Login URL: {login_url_preview[:96]}…\n"
         f"Email-change URL: {email_change_url}\n"
         f"Captcha: {captcha_provider} "
         f"(VISION_BACKEND={os.getenv('VISION_BACKEND') or 'hybrid'})\n"
