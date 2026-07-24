@@ -1,15 +1,11 @@
-TOOL_BUILD=2026-07-24g-vision
+TOOL_BUILD=2026-07-24h-vision-ok
 
 If RiotEmailUpdate.exe does not print:
-  Tool build: 2026-07-24g-vision
+  Tool build: 2026-07-24h-vision-ok
 then update_email.py was NOT replaced.
 
 Default captcha = in-bot AI:
   CAPTCHA_PROVIDER=vision
   VISION_BACKEND=hybrid
-  TWOCAPTCHA_API_KEY=…     (recommended)
-  YESCAPTCHA_API_KEY=…     (optional)
-
-Headless:
-  RiotEmailUpdate.exe --headless
-  or HEADED=false in .env
+  TWOCAPTCHA_API_KEY=…
+  YESCAPTCHA_API_KEY=…

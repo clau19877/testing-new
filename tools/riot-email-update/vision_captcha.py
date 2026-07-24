@@ -1864,6 +1864,41 @@ def page_looks_mfa(page) -> bool:
     )
 
 
+def hcaptcha_appears_solved(page) -> bool:
+    """True when the widget minted a token / checkbox checked / demo success."""
+    try:
+        from yescaptcha_click import checkbox_is_checked
+
+        if checkbox_is_checked(page):
+            return True
+    except Exception:
+        pass
+    try:
+        body = (page.content() or "").lower()
+        if "challenge success" in body:
+            return True
+    except Exception:
+        pass
+    try:
+        token_len = page.evaluate(
+            """() => {
+              const a = document.querySelector(
+                '[name="h-captcha-response"], textarea[name="h-captcha-response"]'
+              );
+              const b = document.querySelector(
+                '[name="g-recaptcha-response"], textarea[name="g-recaptcha-response"]'
+              );
+              const t = (a && a.value) || (b && b.value) || '';
+              return t.length;
+            }"""
+        )
+        if int(token_len or 0) > 20:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def page_looks_auth_progress(page) -> bool:
     """True when captcha is done and login advanced (account page or MFA)."""
     if page_looks_past_login(page):
@@ -1998,6 +2033,10 @@ def solve_visible_captcha(
                     return False
                 if page_looks_auth_progress(page) or not captcha_visible(page):
                     _log("YesCaptcha DEMO/canvas cleared captcha")
+                    return True
+                # Demo / in-place widgets keep the iframe mounted after a pass.
+                if hcaptcha_appears_solved(page):
+                    _log("YesCaptcha solved (checkbox/token/demo success)")
                     return True
                 prev_instruction = "yescaptcha-demo"
                 continue
@@ -2181,6 +2220,20 @@ def solve_visible_captcha(
                 return True
         except Exception:
             pass
+    # Final settle — last Verify may clear after the loop ends.
+    try:
+        page.wait_for_timeout(1500)
+    except Exception:
+        pass
+    if page_has_riot_oops(page) or page_has_invalid_captcha(page):
+        _log("max vision rounds exhausted — Oops/invalid")
+        return False
+    if page_looks_auth_progress(page) or hcaptcha_appears_solved(page):
+        _log("max vision rounds exhausted — but captcha appears solved")
+        return True
+    if not captcha_visible(page):
+        _log("max vision rounds exhausted — captcha gone; treating as solved")
+        return True
     _log("max vision rounds exhausted")
     return False
 
