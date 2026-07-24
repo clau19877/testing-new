@@ -166,8 +166,12 @@ def main(argv: list[str] | None = None) -> int:
 
     csv_arg = ""
     extra: list[str] = []
+    want_headless = False
     for a in argv:
-        if a.startswith("--"):
+        if a in ("--headless", "--no-headed"):
+            want_headless = True
+            extra.append(a)
+        elif a.startswith("--"):
             extra.append(a)
         else:
             csv_arg = a
@@ -184,10 +188,15 @@ def main(argv: list[str] | None = None) -> int:
     if not ensure_tasks_csv(tasks_csv):
         return 0
 
-    # Manual captcha needs a real headed browser window.
     os.environ.setdefault("CAPTCHA_PROVIDER", "manual")
-    os.environ.setdefault("HEADED", "true")
-    ensure_display()
+    if want_headless or (os.getenv("HEADED") or "").strip().lower() in {
+        "0", "false", "no", "off", "headless",
+    }:
+        os.environ["HEADED"] = "false"
+        print("[display] headless mode — no browser window", flush=True)
+    else:
+        os.environ.setdefault("HEADED", "true")
+        ensure_display()
 
     print(f"[run] starting tasks from {tasks_csv}", flush=True)
     cmd = [str(py), str(ROOT / "run_tasks.py"), str(tasks_csv), *extra]

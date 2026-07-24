@@ -40,7 +40,7 @@ ACCOUNT_URL = "https://account.riotgames.com/"
 AUTH_HOST_HINT = "auth.riotgames.com"
 
 # Printed at startup so you can confirm Windows replaced the right files.
-TOOL_BUILD = "2026-07-24c-docs-hostfix"
+TOOL_BUILD = "2026-07-24d-headless"
 
 # Default entry: Tencent Docs scenario interstitial → click Continue → account.riotgames.com.
 # Opening Riot via this click-through is more reliable than deep-linking authenticate URLs.
@@ -1182,6 +1182,7 @@ def main() -> int:
     print(f"  Session log: {log_path}", flush=True)
     log("session", f"tool_build={TOOL_BUILD}")
 
+    # HEADED=false / --no-headed → headless Chromium (no window).
     headed = args.headed if args.headed is not None else env_bool("HEADED", True)
     # Default: in-browser hybrid (local CV + 2Captcha Coordinates). Token APIs
     # soft-fail on Riot enterprise even when they mint P1_ tokens.
@@ -1194,14 +1195,23 @@ def main() -> int:
         captcha_provider = "vision"
     captcha_key = None
     if captcha_provider in ("manual", "human"):
-        # Human solves the captcha; no solver key needed. Force headed and a
-        # single session so we don't rotate the proxy mid-solve.
-        headed = True
+        # Human solves the captcha; no solver key needed. Prefer a single
+        # session so we don't rotate the proxy mid-solve.
         os.environ.setdefault("PROXY_ATTEMPTS", "1")
+        # Default manual → headed (so you can see the grid). Explicit
+        # HEADED=false / --no-headed is respected for true headless runs.
+        if args.headed is None and os.getenv("HEADED") is None:
+            headed = True
         print(
             "[mode] MANUAL captcha — a human solves hCaptcha in the browser; "
             "login form, MFA (IMAP) and email update stay automated."
         )
+        if not headed:
+            print(
+                "[warn] HEADLESS + MANUAL captcha: there is no window to solve in. "
+                "Use HEADED=true for manual, or CAPTCHA_PROVIDER=vision for unattended.",
+                flush=True,
+            )
     if not args.no_captcha_solver and captcha_provider not in ("manual", "human"):
         key_env = {
             "capless": "CAPLESS_API_KEY",

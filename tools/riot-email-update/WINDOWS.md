@@ -22,6 +22,15 @@ pinned/enlarged so the **full hCaptcha tile table** is visible. Tune with
 Each run writes a full session log under `debug/logs/` (console + navigations).
 Send that file when something fails so the flow can be improved.
 
+### Headless
+```bat
+RiotEmailUpdate.exe --headless
+```
+or set `HEADED=false` in `.env`.
+
+Manual captcha needs a visible window (`HEADED=true`). For unattended
+headless runs use `CAPTCHA_PROVIDER=vision` plus your solver API keys.
+
 ## Alternatives
 
 | File | When to use |

@@ -91,7 +91,14 @@ def read_tasks(path: Path) -> list[dict[str, str]]:
     return rows
 
 
-def build_env(row: dict[str, str]) -> dict[str, str]:
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def build_env(row: dict[str, str], *, headed: bool) -> dict[str, str]:
     env = dict(os.environ)
     imap_host = row.get("imap_host") or derive_imap_host(row["imap_email"])
     env.update(
@@ -105,9 +112,9 @@ def build_env(row: dict[str, str]) -> dict[str, str]:
             "IMAP_PASSWORD": row["imap_app_password"],
             "IMAP_FOLDER": row.get("imap_folder") or "INBOX",
             "IMAP_SSL": "true",
-            "CAPTCHA_PROVIDER": "manual",
+            "CAPTCHA_PROVIDER": env.get("CAPTCHA_PROVIDER") or "manual",
             "NONINTERACTIVE": "1",
-            "HEADED": "true",
+            "HEADED": "true" if headed else "false",
             "PROXY_ATTEMPTS": env.get("PROXY_ATTEMPTS") or "1",
         }
     )
@@ -123,7 +130,24 @@ def main() -> int:
     ap.add_argument("csv", nargs="?", default=str(DEFAULT_CSV), help="Path to tasks CSV")
     ap.add_argument("--dry-run", action="store_true", help="Validate CSV; do not launch")
     ap.add_argument("--imap-timeout", type=int, default=180, help="Seconds to wait for MFA code")
+    ap.add_argument(
+        "--headed",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Show browser window (default: HEADED env, else true). Use --no-headed / --headless.",
+    )
+    ap.add_argument(
+        "--headless",
+        action="store_true",
+        help="Shortcut for --no-headed (Chromium with no window).",
+    )
     args = ap.parse_args()
+    if args.headless:
+        headed = False
+    elif args.headed is not None:
+        headed = bool(args.headed)
+    else:
+        headed = _env_bool("HEADED", True)
 
     csv_path = Path(args.csv)
     if not csv_path.exists():
@@ -150,16 +174,18 @@ def main() -> int:
         print("\n" + "#" * 70)
         print(f"# TASK {i}/{len(tasks)}: {row['riot_username']} → {row['new_email']}")
         print("#" * 70, flush=True)
-        env = build_env(row)
+        env = build_env(row, headed=headed)
+        captcha = (env.get("CAPTCHA_PROVIDER") or "manual").strip().lower()
         cmd = [
             sys.executable,
             str(ROOT / "update_email.py"),
-            "--headed",
-            "--captcha-provider", "manual",
+            "--headed" if headed else "--no-headed",
+            "--captcha-provider", captcha,
             "--username", row["riot_username"],
             "--new-email", row["new_email"],
             "--imap-timeout", str(args.imap_timeout),
         ]
+        print(f"# browser={'headed' if headed else 'headless'} captcha={captcha}", flush=True)
         if row.get("email_change_url"):
             cmd.extend(["--email-change-url", row["email_change_url"]])
         elif env.get("EMAIL_CHANGE_URL"):
