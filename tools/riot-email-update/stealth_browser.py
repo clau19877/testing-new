@@ -162,13 +162,14 @@ def launch_stealth_browser(
         ctx_kwargs: dict[str, Any] = {
             "locale": "en-US",
             "user_agent": ua,
-            "device_scale_factor": 1,
         }
-        # no_viewport=True when vp is None → use the real maximized window
+        # no_viewport=True when vp is None → use the real maximized window.
+        # Playwright forbids device_scale_factor when viewport is null.
         if vp is None:
             ctx_kwargs["no_viewport"] = True
         else:
             ctx_kwargs["viewport"] = vp
+            ctx_kwargs["device_scale_factor"] = 1
         if proxy_dict:
             ctx_kwargs["proxy"] = proxy_dict
         # Patchright: reduce automation signals further when supported
@@ -184,6 +185,7 @@ def launch_stealth_browser(
                 fallback["no_viewport"] = True
             else:
                 fallback["viewport"] = vp
+                fallback["device_scale_factor"] = 1
             context = browser.new_context(**fallback)
         try:
             # Best-effort: hide webdriver
