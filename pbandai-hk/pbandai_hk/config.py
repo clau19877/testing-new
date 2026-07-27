@@ -35,6 +35,8 @@ class Config:
     add_cart_retry_count: int = 5
     background_mode: bool = False
     login_url: str = "https://p-bandai.com/hk/login"
+    browser: str = "auto"
+    cookie_file: str = ""
     schedule_mode: bool = False
     execute_times: List[str] = field(default_factory=list)
     schedule_polling_period: int = 60
@@ -72,6 +74,8 @@ class Config:
             add_cart_retry_count=int(os.getenv("ADD_CART_RETRY_COUNT") or "5"),
             background_mode=_as_bool(os.getenv("BACKGROUND_MODE"), False),
             login_url=os.getenv("LOGIN_URL") or "https://p-bandai.com/hk/login",
+            browser=(os.getenv("BROWSER") or "auto").lower(),
+            cookie_file=os.getenv("COOKIE_FILE") or "",
             schedule_mode=_as_bool(os.getenv("SCHEDULE_MODE"), False),
             execute_times=_split_csv(os.getenv("EXECUTE_TIME")),
             schedule_polling_period=int(os.getenv("EXECUTE_SCHEDULE_POLLING_PERIOD") or "60"),

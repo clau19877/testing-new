@@ -69,6 +69,14 @@ class PBandaiHkBot:
                 login_and_transfer_cookies(self.config, self.client)
             except Exception as exc:  # noqa: BLE001
                 log_exception(logger, "login/cookie transfer failed", exc)
+                print(
+                    "\nBrowser login failed.\n"
+                    "Quick fixes:\n"
+                    "  1) Install/update Google Chrome or Microsoft Edge\n"
+                    "  2) Delete driver cache folder: %USERPROFILE%\\.wdm\n"
+                    "  3) Set BROWSER=edge in .env and retry\n"
+                    "  4) Or set ENABLE_ADD_TO_CART=0 for monitor-only mode\n"
+                )
                 raise
 
     def run_once(self) -> RunReport:

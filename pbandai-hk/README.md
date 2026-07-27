@@ -103,7 +103,7 @@ Errors/tracebacks are appended to `logs/pbandai_hk.log`.
 
 When `ENABLE_ADD_TO_CART=1`:
 
-1. Chrome opens `LOGIN_URL`
+1. Chrome/Edge opens `LOGIN_URL`
 2. You log in manually
 3. Cookies + CSRF are copied into the API client
 4. Matching purchasable items are posted to `/api/cart/addToCart` as:
@@ -111,6 +111,12 @@ When `ENABLE_ADD_TO_CART=1`:
 ```json
 [{ "areaItemNo": "AAI........HK", "qty": 1 }]
 ```
+
+If Windows shows `WinError 193` during login:
+- Install/update **Google Chrome** or **Microsoft Edge**
+- Delete the broken driver cache folder: `%USERPROFILE%\.wdm`
+- Set `BROWSER=edge` in `.env` and retry
+- Or export cookies to a file and set `COOKIE_FILE=...` to skip Selenium
 
 Cart/checkout still follows P-Bandai / Global-e site rules. Use only with your own account and for personal purchasing.
 
