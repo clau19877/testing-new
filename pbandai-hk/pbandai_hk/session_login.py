@@ -119,47 +119,47 @@ def login_and_transfer_cookies(
             log_exception(logger, "driver.quit failed", exc)
 
 
-def _autofill_login(driver: Any, *, login: str, password: str, timeout: int = 45) -> None:
+def _autofill_login(driver: Any, *, login: str, password: str, timeout: int = 60) -> None:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
-    from selenium.webdriver.support.ui import WebDriverWait
 
-    wait = WebDriverWait(driver, timeout)
-    email_selectors = [
-        "input#loginId",
-        "input[name='mail']",
-        "input[name='memberId']",
-        "input[name='email']",
-        "input[type='email']",
-        "input[autocomplete='username']",
-    ]
-    password_selectors = [
-        "input#password",
-        "input[name='password']",
-        "input[type='password']",
-        "input[autocomplete='current-password']",
-    ]
+    email_css = (
+        "input#loginId, input[name='mail'], input[name='memberId'], "
+        "input[name='email'], input[type='email'], input[autocomplete='username'], "
+        "input[placeholder*='mail'], input[placeholder*='Mail'], "
+        "input[placeholder*='ID'], input[placeholder*='Id']"
+    )
+    password_css = (
+        "input#password, input[name='password'], input[type='password'], "
+        "input[autocomplete='current-password']"
+    )
     submit_selectors = [
         "button[type='submit']",
         "input[type='submit']",
         "button.login",
         "button[class*='login']",
+        "button[class*='Login']",
         "form button",
+        "//button[contains(., 'Log') or contains(., 'Sign') or contains(., 'ログイン')]",
     ]
 
-    email_el = _wait_first(wait, By.CSS_SELECTOR, email_selectors)
-    pass_el = _wait_first(wait, By.CSS_SELECTOR, password_selectors)
-    email_el.clear()
-    email_el.send_keys(login)
-    pass_el.clear()
-    pass_el.send_keys(password)
+    print("  waiting for login form (SPA)...")
+    email_el = _wait_visible(driver, By.CSS_SELECTOR, email_css, timeout=timeout)
+    pass_el = _wait_visible(driver, By.CSS_SELECTOR, password_css, timeout=timeout)
+    _set_input(driver, email_el, login)
+    _set_input(driver, pass_el, password)
+    print("  submitting login...")
 
     submitted = False
     for selector in submit_selectors:
         try:
-            btn = driver.find_element(By.CSS_SELECTOR, selector)
+            by = By.XPATH if selector.startswith("//") else By.CSS_SELECTOR
+            btn = driver.find_element(by, selector)
             if btn.is_displayed() and btn.is_enabled():
-                btn.click()
+                try:
+                    btn.click()
+                except Exception:  # noqa: BLE001
+                    driver.execute_script("arguments[0].click();", btn)
                 submitted = True
                 break
         except Exception:  # noqa: BLE001
@@ -168,29 +168,70 @@ def _autofill_login(driver: Any, *, login: str, password: str, timeout: int = 45
         pass_el.send_keys(Keys.ENTER)
 
     # Give the SPA a moment to process the login POST.
-    time.sleep(1.5)
+    time.sleep(2.0)
 
 
-def _wait_first(wait: Any, by: Any, selectors: List[str]) -> Any:
+def _set_input(driver: Any, element: Any, value: str) -> None:
+    try:
+        element.clear()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        element.click()
+    except Exception:  # noqa: BLE001
+        pass
+    element.send_keys(value)
+    # Vue/React controlled inputs sometimes ignore send_keys; force value + events.
+    try:
+        current = element.get_attribute("value") or ""
+        if current != value:
+            driver.execute_script(
+                """
+                const el = arguments[0];
+                const val = arguments[1];
+                el.focus();
+                el.value = val;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                """,
+                element,
+                value,
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _wait_visible(driver: Any, by: Any, selector: str, timeout: int = 60) -> Any:
+    deadline = time.time() + timeout
     last_exc: Optional[Exception] = None
-    for selector in selectors:
+    while time.time() < deadline:
         try:
-            return wait.until(lambda d, s=selector: d.find_element(by, s))
+            elements = driver.find_elements(by, selector)
+            for el in elements:
+                try:
+                    if el.is_displayed() and el.is_enabled():
+                        return el
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    continue
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
-            continue
+        time.sleep(0.25)
     raise RuntimeError(
-        "Could not find login form fields on the page. "
-        "Try manual login or check LOGIN_URL."
+        "Could not find login form fields on the page within "
+        f"{timeout}s (selector={selector!r}). "
+        "Check proxy/captcha, or login manually with menu [7]."
     ) from last_exc
 
 
-def _wait_for_session_cookie(driver: Any, timeout: int = 45) -> None:
+def _wait_for_session_cookie(driver: Any, timeout: int = 60) -> None:
+    print("  waiting for SESSION cookie...")
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             names = {c.get("name", "").upper() for c in driver.get_cookies()}
             if "SESSION" in names:
+                print("  SESSION cookie found")
                 return
         except Exception:  # noqa: BLE001
             pass
@@ -198,10 +239,10 @@ def _wait_for_session_cookie(driver: Any, timeout: int = 45) -> None:
         try:
             current = (driver.current_url or "").lower()
             if "/login" not in current and "p-bandai.com" in current:
-                # Wait a bit more for cookies to settle
                 time.sleep(1.0)
                 names = {c.get("name", "").upper() for c in driver.get_cookies()}
                 if "SESSION" in names or len(driver.get_cookies()) >= 3:
+                    print("  login redirect detected")
                     return
         except Exception:  # noqa: BLE001
             pass
