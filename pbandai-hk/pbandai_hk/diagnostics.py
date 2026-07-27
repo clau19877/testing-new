@@ -159,33 +159,48 @@ def _evaluate_eligibility(signals: CartSignals) -> None:
     elif signals.max_qty:
         reasons.append(f"maxQuantity={signals.max_qty}")
 
-    # Pre-order gate: do not fire cart before the order window opens.
-    # Example A2891018001: preOrderStatus=NotStarted until orderStartDate.
+    # Pre-order gate: block only while the order window is still in the future.
+    # At T-0 the API often lags: orderStartDate has passed but preOrderStatus stays
+    # NotStarted for a few seconds. Hard-blocking on NotStarted alone misses the drop
+    # (A2891018001: qty was still 2 at 16:00:00 HKT while status=NotStarted).
     pre_status = (signals.pre_order_status or "").strip().lower()
     if pre_status:
         reasons.append(f"preOrderStatus={signals.pre_order_status}")
+
+    start_dt = _parse_iso(signals.order_start) if signals.order_start else None
+    if start_dt is not None and start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    start_reached = start_dt is not None and now >= start_dt
+
     if pre_status in {"notstarted", "not_started", "beforestart", "before_start"}:
-        blocking.append(
-            f"preOrderStatus={signals.pre_order_status} (order not open yet)"
-        )
-    elif signals.order_start:
-        start_dt = _parse_iso(signals.order_start)
-        if start_dt is not None:
-            now = datetime.now(timezone.utc)
-            if start_dt.tzinfo is None:
-                start_dt = start_dt.replace(tzinfo=timezone.utc)
-            if now < start_dt:
-                blocking.append(
-                    f"orderStartDate={signals.order_start} (opens in "
-                    f"{int((start_dt - now).total_seconds())}s)"
-                )
-            else:
-                reasons.append(f"orderStartDate reached ({signals.order_start})")
+        if start_reached:
+            reasons.append(
+                f"preOrderStatus={signals.pre_order_status} ignored — "
+                f"orderStartDate reached ({signals.order_start}); API lag"
+            )
+        elif start_dt is not None:
+            blocking.append(
+                f"orderStartDate={signals.order_start} (opens in "
+                f"{max(0, int((start_dt - now).total_seconds()))}s); "
+                f"preOrderStatus={signals.pre_order_status}"
+            )
+        else:
+            blocking.append(
+                f"preOrderStatus={signals.pre_order_status} (order not open yet)"
+            )
+    elif start_dt is not None:
+        if not start_reached:
+            blocking.append(
+                f"orderStartDate={signals.order_start} (opens in "
+                f"{max(0, int((start_dt - now).total_seconds()))}s)"
+            )
+        else:
+            reasons.append(f"orderStartDate reached ({signals.order_start})")
 
     if signals.order_end:
         end_dt = _parse_iso(signals.order_end)
         if end_dt is not None:
-            now = datetime.now(timezone.utc)
             if end_dt.tzinfo is None:
                 end_dt = end_dt.replace(tzinfo=timezone.utc)
             if now > end_dt:

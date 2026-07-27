@@ -759,10 +759,10 @@ class PBandaiHkBot:
                                 lead,
                             )
                         else:
-                            # Near drop: fast-poll every ~1s.
-                            sleep_for = min(sleep_for, 1.0)
+                            # Near drop / API may lag on preOrderStatus — poll hard.
+                            sleep_for = min(sleep_for, 0.25)
                             logger.info("[loop] near drop — fast poll")
-                    sleep_for = max(0.5, sleep_for)
+                    sleep_for = max(0.2, sleep_for)
                     logger.info("[loop] sleep %.1fs", sleep_for)
                     time.sleep(sleep_for)
         finally:
