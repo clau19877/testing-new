@@ -748,11 +748,20 @@ class PBandaiHkBot:
                         break
                     sleep_for = float(self.config.retry_wait)
                     if self._next_sleep_hint is not None:
-                        # Wake near orderStartDate instead of blind RETRY_WAIT polling.
-                        sleep_for = min(sleep_for, float(self._next_sleep_hint))
-                        # Near drop: poll fast.
-                        if self._next_sleep_hint <= max(5, self.config.drop_lead_seconds):
+                        hint = float(self._next_sleep_hint)
+                        lead = max(5, int(self.config.drop_lead_seconds))
+                        if hint > lead:
+                            # Far from orderStartDate: sleep until ~T-lead (no busy poll).
+                            sleep_for = hint
+                            logger.info(
+                                "[loop] order opens in ~%.0fs; sleeping until ~T-%ss",
+                                hint + lead,
+                                lead,
+                            )
+                        else:
+                            # Near drop: fast-poll every ~1s.
                             sleep_for = min(sleep_for, 1.0)
+                            logger.info("[loop] near drop — fast poll")
                     sleep_for = max(0.5, sleep_for)
                     logger.info("[loop] sleep %.1fs", sleep_for)
                     time.sleep(sleep_for)
