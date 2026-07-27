@@ -38,12 +38,18 @@ def browser_add_to_cart(
         cookies = load_cookies_file(Path(str(cookie_file)))
     elif client.session.cookies:
         for c in client.session.cookies:
+            rest = getattr(c, "_rest", {}) or {}
             cookies.append(
                 {
                     "name": c.name,
                     "value": c.value,
                     "domain": c.domain or ".p-bandai.com",
                     "path": c.path or "/",
+                    "secure": bool(getattr(c, "secure", True)),
+                    "httpOnly": bool(
+                        rest.get("HttpOnly") is not None
+                        or str(c.name or "").upper().startswith("SESSION")
+                    ),
                 }
             )
 
@@ -70,10 +76,43 @@ def browser_add_to_cart(
         except Exception:  # noqa: BLE001
             pass
 
-        # Seed domain before adding cookies.
-        driver.get(f"{config.base_url}/{config.area_code}/")
-        time.sleep(1.5)
-        _load_cookies_into_driver(driver, cookies)
+        # Seed domain, inject cookies (CDP), then hard-reload so Vue picks up SESSION.
+        home = f"{config.base_url}/{config.area_code}/"
+        driver.get(home)
+        time.sleep(1.2)
+        cookie_stats = _load_cookies_into_driver(driver, cookies)
+        logger.info(
+            "browser cookies applied session=%s total=%s applied=%s sessionCookies=%s failed=%s",
+            client.name,
+            cookie_stats.get("total"),
+            cookie_stats.get("applied"),
+            cookie_stats.get("session"),
+            cookie_stats.get("failed"),
+        )
+        driver.get(home)
+        time.sleep(1.0)
+        auth = verify_browser_logged_in(driver, timeout=15.0)
+        if not auth.get("ok"):
+            # One retry: re-inject then reload.
+            _load_cookies_into_driver(driver, cookies)
+            driver.get(home)
+            time.sleep(1.0)
+            auth = verify_browser_logged_in(driver, timeout=12.0)
+        if auth.get("ok"):
+            print(
+                f"[{client.name}] Browser login OK "
+                f"(member={auth.get('member_id') or auth.get('email') or 'yes'})"
+            )
+        else:
+            print(
+                f"[{client.name}] Browser NOT logged in "
+                f"(session={auth.get('has_session')} reason={auth.get('reason')})"
+            )
+            logger.warning(
+                "browser login verify failed session=%s auth=%s",
+                client.name,
+                auth,
+            )
         driver.get(product_url)
         _wait_for_product_ready(driver, timeout=60)
         logger.info(
@@ -182,29 +221,216 @@ def _safe_cart_count(client: "PBandaiHkClient") -> Optional[int]:
         return None
 
 
-def _load_cookies_into_driver(driver: Any, cookies: List[Dict[str, Any]]) -> None:
-    for cookie in cookies:
-        name = cookie.get("name")
-        value = cookie.get("value")
-        if not name:
+def _normalize_cookie_domain(domain: Any) -> str:
+    text = str(domain or ".p-bandai.com").strip()
+    if not text:
+        return ".p-bandai.com"
+    if "://" in text:
+        text = text.split("://", 1)[1]
+    text = text.split("/", 1)[0].strip()
+    if text.startswith("www."):
+        text = text[4:]
+    if "p-bandai.com" in text and not text.startswith("."):
+        text = "." + text.lstrip(".")
+    return text or ".p-bandai.com"
+
+
+def _cookie_expiry(cookie: Dict[str, Any]) -> Optional[float]:
+    for key in ("expiry", "expires", "expirationDate"):
+        raw = cookie.get(key)
+        if raw in (None, "", 0, "0"):
             continue
-        item = {
-            "name": name,
-            "value": value,
-            "path": cookie.get("path") or "/",
-        }
-        domain = cookie.get("domain") or ".p-bandai.com"
-        # Selenium wants domain without leading scheme; keep leading dot when present.
-        item["domain"] = domain
         try:
-            driver.add_cookie(item)
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        # Some dumps use milliseconds.
+        if value > 10_000_000_000:
+            value = value / 1000.0
+        return value
+    return None
+
+
+def _load_cookies_into_driver(driver: Any, cookies: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Inject cookies via CDP first (reliable for httpOnly SESSION), then Selenium fallback."""
+    stats = {"total": 0, "applied": 0, "failed": 0, "session": 0}
+    try:
+        driver.execute_cdp_cmd("Network.enable", {})
+    except Exception:  # noqa: BLE001
+        pass
+
+    for cookie in cookies:
+        name = str(cookie.get("name") or "").strip()
+        value = cookie.get("value")
+        if not name or value is None:
+            continue
+        stats["total"] += 1
+        domain = _normalize_cookie_domain(cookie.get("domain"))
+        path = str(cookie.get("path") or "/") or "/"
+        secure = bool(cookie.get("secure", True))
+        http_only = bool(cookie.get("httpOnly", name.upper().startswith("SESSION")))
+        same_site = str(cookie.get("sameSite") or cookie.get("same_site") or "").strip()
+        expiry = _cookie_expiry(cookie)
+
+        applied = False
+        cdp_payload: Dict[str, Any] = {
+            "name": name,
+            "value": str(value),
+            "domain": domain,
+            "path": path,
+            "secure": secure,
+            "httpOnly": http_only,
+        }
+        if expiry is not None:
+            cdp_payload["expires"] = expiry
+        if same_site:
+            normalized = same_site[:1].upper() + same_site[1:].lower()
+            if normalized.lower() == "none":
+                normalized = "None"
+            cdp_payload["sameSite"] = normalized
+        try:
+            result = driver.execute_cdp_cmd("Network.setCookie", cdp_payload)
+            applied = bool((result or {}).get("success", True))
         except Exception:  # noqa: BLE001
-            # Retry without domain if rejected.
+            applied = False
+
+        if not applied:
+            item: Dict[str, Any] = {
+                "name": name,
+                "value": str(value),
+                "path": path,
+                "domain": domain,
+                "secure": secure,
+            }
+            if expiry is not None:
+                item["expiry"] = int(expiry)
             try:
-                item.pop("domain", None)
                 driver.add_cookie(item)
-            except Exception:
-                continue
+                applied = True
+            except Exception:  # noqa: BLE001
+                try:
+                    item.pop("domain", None)
+                    driver.add_cookie(item)
+                    applied = True
+                except Exception:  # noqa: BLE001
+                    applied = False
+
+        if applied:
+            stats["applied"] += 1
+            if name.upper().startswith("SESSION"):
+                stats["session"] += 1
+        else:
+            stats["failed"] += 1
+    return stats
+
+
+def driver_has_session_cookie(driver: Any) -> bool:
+    try:
+        result = driver.execute_cdp_cmd("Network.getAllCookies", {})
+        for cookie in result.get("cookies") or []:
+            if str(cookie.get("name") or "").upper().startswith("SESSION"):
+                return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        for cookie in driver.get_cookies():
+            if str(cookie.get("name") or "").upper().startswith("SESSION"):
+                return True
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
+def verify_browser_logged_in(driver: Any, timeout: float = 20.0) -> Dict[str, Any]:
+    """Confirm member context after cookie inject (header UI can lag; API is truth)."""
+    deadline = time.time() + max(3.0, timeout)
+    last: Dict[str, Any] = {"ok": False, "reason": "not-checked", "has_session": False}
+    try:
+        driver.set_script_timeout(12)
+    except Exception:  # noqa: BLE001
+        pass
+
+    script = """
+        const callback = arguments[arguments.length - 1];
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 8000);
+        fetch('/api/context/member', {
+            method: 'GET',
+            credentials: 'include',
+            headers: { 'Accept': 'application/json' },
+            signal: ctrl.signal,
+        }).then(async (resp) => {
+            clearTimeout(timer);
+            const text = await resp.text();
+            let json = null;
+            try { json = JSON.parse(text); } catch (e) { json = null; }
+            callback({
+                status: resp.status,
+                hasJson: !!json,
+                result: json && json.result ? json.result : null,
+                bodyPreview: String(text || '').slice(0, 160),
+            });
+        }).catch((err) => {
+            clearTimeout(timer);
+            callback({ status: 0, hasJson: false, result: null, error: String(err) });
+        });
+    """
+    while time.time() < deadline:
+        has_session = driver_has_session_cookie(driver)
+        try:
+            payload = driver.execute_async_script(script)
+        except Exception as exc:  # noqa: BLE001
+            last = {"ok": False, "reason": f"script-error:{exc}", "has_session": has_session}
+            time.sleep(0.8)
+            continue
+
+        result = (payload or {}).get("result") if isinstance(payload, dict) else None
+        member_id = ""
+        email = ""
+        if isinstance(result, dict):
+            member_id = str(
+                result.get("memberId")
+                or result.get("id")
+                or result.get("loginId")
+                or result.get("userId")
+                or ""
+            ).strip()
+            email = str(result.get("email") or result.get("mailAddress") or "").strip()
+            # Some HK payloads nest identity under member/profile.
+            if not member_id and isinstance(result.get("member"), dict):
+                nested = result["member"]
+                member_id = str(
+                    nested.get("memberId") or nested.get("id") or nested.get("loginId") or ""
+                ).strip()
+                email = email or str(nested.get("email") or nested.get("mailAddress") or "").strip()
+        status = int((payload or {}).get("status") or 0) if isinstance(payload, dict) else 0
+        if has_session and (member_id or email):
+            return {
+                "ok": True,
+                "has_session": True,
+                "member_id": member_id,
+                "email": email,
+                "status": status,
+            }
+        # SESSION present + 200 JSON usually means logged in even if fields differ.
+        if has_session and status == 200 and isinstance(result, dict) and result:
+            return {
+                "ok": True,
+                "has_session": True,
+                "member_id": member_id or "present",
+                "email": email,
+                "status": status,
+            }
+        last = {
+            "ok": False,
+            "has_session": has_session,
+            "status": status,
+            "reason": (payload or {}).get("error")
+            or (payload or {}).get("bodyPreview")
+            or "member-context-empty",
+        }
+        time.sleep(0.8)
+    return last
 
 
 def _click_add_to_cart(driver: Any, timeout: int = 45) -> bool:

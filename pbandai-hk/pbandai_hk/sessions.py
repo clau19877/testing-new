@@ -116,15 +116,22 @@ def load_cookies_file(path: Path) -> List[Dict[str, Any]]:
         parts = line.split("\t")
         if len(parts) < 7:
             continue
-        domain, _flag, cookie_path, _secure, _expiry, name, value = parts[:7]
-        cookies.append(
-            {
-                "name": name,
-                "value": value,
-                "domain": domain,
-                "path": cookie_path or "/",
-            }
-        )
+        domain, _flag, cookie_path, secure, expiry, name, value = parts[:7]
+        item: Dict[str, Any] = {
+            "name": name,
+            "value": value,
+            "domain": domain,
+            "path": cookie_path or "/",
+            "secure": str(secure).upper() == "TRUE",
+            "httpOnly": str(name).upper().startswith("SESSION"),
+        }
+        try:
+            exp = float(expiry)
+            if exp > 0:
+                item["expiry"] = exp
+        except (TypeError, ValueError):
+            pass
+        cookies.append(item)
     return cookies
 
 

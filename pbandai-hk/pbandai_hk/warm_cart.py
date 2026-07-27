@@ -26,6 +26,7 @@ from .browser_cart import (
     _page_fetch_add_to_cart,
     _safe_cart_count,
     _wait_for_product_ready,
+    verify_browser_logged_in,
 )
 from .logging_utils import get_logger, log_exception
 from .proxy_util import redact_proxy
@@ -219,12 +220,18 @@ class WarmBrowserPool:
         if cookies:
             return cookies
         for c in runtime.client.session.cookies:
+            rest = getattr(c, "_rest", {}) or {}
             cookies.append(
                 {
                     "name": c.name,
                     "value": c.value,
                     "domain": c.domain or ".p-bandai.com",
                     "path": c.path or "/",
+                    "secure": bool(getattr(c, "secure", True)),
+                    "httpOnly": bool(
+                        rest.get("HttpOnly") is not None
+                        or str(c.name or "").upper().startswith("SESSION")
+                    ),
                 }
             )
         return cookies
@@ -271,9 +278,44 @@ class WarmBrowserPool:
             except Exception:  # noqa: BLE001
                 pass
 
-            driver.get(f"{self.config.base_url}/{self.config.area_code}/")
+            home = f"{self.config.base_url}/{self.config.area_code}/"
+            driver.get(home)
             time.sleep(1.2)
-            _load_cookies_into_driver(driver, cookies)
+            cookie_stats = _load_cookies_into_driver(driver, cookies)
+            logger.info(
+                "[warm] cookies session=%s total=%s applied=%s sessionCookies=%s failed=%s",
+                client.name,
+                cookie_stats.get("total"),
+                cookie_stats.get("applied"),
+                cookie_stats.get("session"),
+                cookie_stats.get("failed"),
+            )
+            print(
+                f"[warm] {client.name}: cookies applied="
+                f"{cookie_stats.get('applied')}/{cookie_stats.get('total')} "
+                f"SESSION={cookie_stats.get('session')}"
+            )
+            # Hard reload so Vue boots with SESSION (otherwise header stays Sign In).
+            driver.get(home)
+            time.sleep(1.0)
+            auth = verify_browser_logged_in(driver, timeout=15.0)
+            if not auth.get("ok"):
+                _load_cookies_into_driver(driver, cookies)
+                driver.get(home)
+                time.sleep(1.0)
+                auth = verify_browser_logged_in(driver, timeout=12.0)
+            if auth.get("ok"):
+                who = auth.get("email") or auth.get("member_id") or "yes"
+                print(f"[warm] {client.name}: logged in OK ({who})")
+                logger.info("[warm] login OK session=%s auth=%s", client.name, auth)
+            else:
+                print(
+                    f"[warm] {client.name}: NOT logged in in browser "
+                    f"(SESSION={auth.get('has_session')} reason={str(auth.get('reason'))[:80]})"
+                )
+                logger.warning("[warm] login verify failed session=%s auth=%s", client.name, auth)
+                wb.last_error = f"browser not logged in: {auth.get('reason')}"
+
             driver.get(product_url)
             _wait_for_product_ready(driver, timeout=60)
             title = (driver.title or "").lower()
@@ -290,7 +332,6 @@ class WarmBrowserPool:
                 # Critical for drops: HTML PDP may 502 while cart API works.
                 # Stay on HK origin so F5 hooks + cookies are live; in-page fetch
                 # still posts /api/cart/addToCart without needing the PDP DOM.
-                home = f"{self.config.base_url}/{self.config.area_code}/"
                 logger.warning(
                     "[warm] %s PDP unavailable; parking on %s for in-page fetch",
                     client.name,
@@ -303,10 +344,19 @@ class WarmBrowserPool:
                 driver.get(home)
                 time.sleep(1.5)
                 wb.driver = driver
-                wb.ready = True
+                # Still mark ready for in-page fetch if SESSION exists; cart needs auth.
+                wb.ready = bool(auth.get("ok") or auth.get("has_session") or cookie_stats.get("session"))
                 wb.product_code = product_code
-                wb.last_error = "pdp unavailable; home-parked"
-                logger.info("[warm] home-parked session=%s", client.name)
+                if not wb.last_error:
+                    wb.last_error = "pdp unavailable; home-parked"
+                else:
+                    wb.last_error = f"{wb.last_error}; pdp unavailable; home-parked"
+                logger.info(
+                    "[warm] home-parked session=%s ready=%s logged_in=%s",
+                    client.name,
+                    wb.ready,
+                    auth.get("ok"),
+                )
                 return wb
 
             # Nudge page JS / F5 hooks
@@ -317,9 +367,21 @@ class WarmBrowserPool:
                 pass
 
             wb.driver = driver
-            wb.ready = True
-            logger.info("[warm] ready session=%s url=%s", client.name, driver.current_url)
-            print(f"[warm] ready {client.name}")
+            # Prefer logged-in browsers; still park if SESSION cookie landed (UI may lag).
+            wb.ready = bool(auth.get("ok") or auth.get("has_session") or cookie_stats.get("session"))
+            if not wb.ready:
+                wb.last_error = wb.last_error or "no SESSION after cookie inject"
+            logger.info(
+                "[warm] ready=%s session=%s logged_in=%s url=%s",
+                wb.ready,
+                client.name,
+                auth.get("ok"),
+                driver.current_url,
+            )
+            print(
+                f"[warm] {'ready' if wb.ready else 'NOT ready'} {client.name}"
+                f"{'' if auth.get('ok') else ' (check Sign In / re-login)'}"
+            )
         except Exception as exc:  # noqa: BLE001
             wb.ready = False
             wb.last_error = str(exc)

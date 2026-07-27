@@ -275,15 +275,42 @@ def _wait_for_session_cookie(driver: Any, timeout: int = 60) -> None:
 
 def _driver_cookies(driver: Any) -> List[Dict[str, Any]]:
     cookies: List[Dict[str, Any]] = []
-    for cookie in driver.get_cookies():
-        cookies.append(
-            {
-                "name": cookie.get("name"),
-                "value": cookie.get("value"),
-                "domain": cookie.get("domain"),
-                "path": cookie.get("path") or "/",
-            }
-        )
+    raw: List[Dict[str, Any]] = []
+    try:
+        result = driver.execute_cdp_cmd("Network.getAllCookies", {})
+        raw = list(result.get("cookies") or [])
+    except Exception:  # noqa: BLE001
+        raw = []
+    if not raw:
+        try:
+            raw = list(driver.get_cookies() or [])
+        except Exception:  # noqa: BLE001
+            raw = []
+    for cookie in raw:
+        name = cookie.get("name")
+        if not name:
+            continue
+        domain = str(cookie.get("domain") or ".p-bandai.com")
+        # Keep cookies for p-bandai only.
+        if "p-bandai.com" not in domain:
+            continue
+        item: Dict[str, Any] = {
+            "name": name,
+            "value": cookie.get("value"),
+            "domain": domain,
+            "path": cookie.get("path") or "/",
+            "secure": bool(cookie.get("secure", True)),
+            "httpOnly": bool(cookie.get("httpOnly", str(name).upper().startswith("SESSION"))),
+        }
+        if cookie.get("sameSite"):
+            item["sameSite"] = cookie.get("sameSite")
+        expires = cookie.get("expires")
+        if expires not in (None, "", -1, "-1"):
+            try:
+                item["expiry"] = float(expires)
+            except (TypeError, ValueError):
+                pass
+        cookies.append(item)
     return cookies
 
 

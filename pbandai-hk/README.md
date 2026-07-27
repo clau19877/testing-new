@@ -196,9 +196,10 @@ SALE_STATUSES=On,Waiting
 Flow:
 1. Login all sessions (task.csv / menu `[8]`) **before** the drop
 2. Start `loop` early — browsers park on PDP (or HK home if PDP is down)
-3. Bot waits on `preOrderStatus` / `orderStartDate` (sleeps until ~T-30s, then fast-polls)
-4. When open, cart fires via **in-page `fetch('/api/cart/addToCart')`** (no HTML reload)
-5. Success requires cart count increase (`REQUIRE_CART_INCREASE=1`) — no false “clicked / verify on site” exits
+3. Console should print `logged in OK` per warm window. If you still see **Sign In** in the header, re-login that account (cookies did not stick). Cart auth follows SESSION cookies + `/api/context/member`, not the header alone.
+4. Bot waits on `preOrderStatus` / `orderStartDate` (sleeps until ~T-30s, then fast-polls)
+5. When open, cart fires via **in-page `fetch('/api/cart/addToCart')`** (no HTML reload)
+6. Success requires cart count increase (`REQUIRE_CART_INCREASE=1`) — no false “clicked / verify on site” exits
 
 Do **not** use cold `CART_METHOD=browser` alone for drops — that relaunches Chrome and reloads HTML under load.
 
