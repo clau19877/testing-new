@@ -339,26 +339,85 @@ def _common_options(options: Any, config: "Config", proxy: str = "") -> Any:
 
 
 def _apply_proxy_options(options: Any, proxy: str) -> Optional[str]:
-    """Apply proxy to Chromium options. Returns temp extension dir if created."""
+    """Apply proxy to Chromium options.
+
+    For HTTP(S) proxies with username/password, start a local auth bridge so
+    Chrome never shows the native proxy password popup (extensions often fail
+    on modern Chrome).
+    """
     parsed = parse_proxy(proxy)
     if not parsed:
         return None
-    # socks / http without auth
+
     if not parsed.has_auth:
         options.add_argument(f"--proxy-server={parsed.server}")
         return None
+
     if parsed.scheme.startswith("socks"):
-        # Chromium cannot natively do socks auth via --proxy-server userinfo.
+        # Try extension path for socks; Chromium has no native socks auth.
+        ext_dir = _install_proxy_auth_extension(
+            options,
+            parsed.scheme,
+            parsed.host,
+            parsed.port,
+            parsed.username or "",
+            parsed.password or "",
+        )
         options.add_argument(f"--proxy-server={parsed.server}")
         logger.warning(
-            "SOCKS proxy auth may be ignored by the browser; "
+            "SOCKS proxy auth via browser is best-effort; "
             "API requests still use full proxy auth."
         )
+        return ext_dir
+
+    # HTTP(S) + auth: local bridge (no popup)
+    try:
+        from .local_proxy import start_local_auth_proxy
+
+        bridge = start_local_auth_proxy(parsed)
+        options.add_argument(f"--proxy-server={bridge.local_url}")
+        print(f"  proxy auth bridge: {bridge.local_url} -> {redact_proxy(proxy)}")
+        logger.info(
+            "using local proxy auth bridge %s for %s",
+            bridge.local_url,
+            redact_proxy(proxy),
+        )
         return None
-    # HTTP(S) proxy with auth via temporary extension
-    ext_dir = _write_proxy_auth_extension(parsed.scheme, parsed.host, parsed.port, parsed.username or "", parsed.password or "")
-    options.add_argument(f"--load-extension={ext_dir}")
+    except Exception as exc:  # noqa: BLE001
+        log_exception(logger, "local proxy auth bridge failed; trying extension", exc)
+
+    ext_dir = _install_proxy_auth_extension(
+        options,
+        parsed.scheme,
+        parsed.host,
+        parsed.port,
+        parsed.username or "",
+        parsed.password or "",
+    )
     options.add_argument(f"--proxy-server={parsed.scheme}://{parsed.host}:{parsed.port}")
+    return ext_dir
+
+
+def _install_proxy_auth_extension(
+    options: Any,
+    scheme: str,
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+) -> str:
+    """Best-effort Chrome extension install for proxy auth (fallback path)."""
+    ext_dir = _write_proxy_auth_extension(scheme, host, port, username, password)
+    # Chrome 137+ disables --load-extension unless this feature flag is off.
+    options.add_argument("--disable-features=DisableLoadExtensionCommandLineSwitch")
+    options.add_argument(f"--load-extension={ext_dir}")
+    try:
+        # Packed zip via add_extension is more reliable than unpacked on some builds.
+        zip_path = Path(ext_dir) / "proxy_auth.zip"
+        if zip_path.exists():
+            options.add_extension(str(zip_path))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("add_extension failed: %s", exc)
     return ext_dir
 
 
@@ -370,15 +429,8 @@ def _write_proxy_auth_extension(
     password: str,
 ) -> str:
     """Create a temporary Chrome extension for proxy credentials."""
-    manifest = {
-        "version": "1.0.0",
-        "manifest_version": 3,
-        "name": "Proxy Auth",
-        "permissions": ["proxy", "storage", "webRequest", "webRequestAuthProvider"],
-        "host_permissions": ["<all_urls>"],
-        "background": {"service_worker": "background.js"},
-    }
-    # MV3 service worker proxy auth support varies; use MV2-compatible packed style for broader Chrome.
+    # Prefer MV3 declarativeNetRequest-unrelated auth provider where available;
+    # keep MV2 blocking listener for older Chromium / Edge builds.
     manifest_v2 = {
         "version": "1.0.0",
         "manifest_version": 2,
@@ -403,7 +455,7 @@ var config = {{
       host: "{host}",
       port: {int(port)}
     }},
-    bypassList: ["localhost"]
+    bypassList: ["localhost", "127.0.0.1"]
   }}
 }};
 chrome.proxy.settings.set({{value: config, scope: "regular"}}, function(){{}});
@@ -424,12 +476,10 @@ chrome.webRequest.onAuthRequired.addListener(
     temp_dir = Path(tempfile.mkdtemp(prefix="pbandai_proxy_ext_"))
     (temp_dir / "manifest.json").write_text(json.dumps(manifest_v2), encoding="utf-8")
     (temp_dir / "background.js").write_text(background, encoding="utf-8")
-    # Also keep a zip for debugging if needed
     zip_path = temp_dir / "proxy_auth.zip"
     with zipfile.ZipFile(zip_path, "w") as zf:
         zf.write(temp_dir / "manifest.json", "manifest.json")
         zf.write(temp_dir / "background.js", "background.js")
-    _ = manifest  # reserved if we switch to MV3 later
     return str(temp_dir)
 
 
