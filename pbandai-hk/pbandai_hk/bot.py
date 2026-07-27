@@ -57,8 +57,13 @@ class PBandaiHkBot:
     def prepare(self) -> None:
         setup_logging(self.config.log_file, level=self.config.log_level)
         self.config.validate()
+        from . import BUILD_ID, __version__
+
         logger.info(
-            "prepare start area=%s direct=%s search=%s cart=%s sessions_file=%s proxy=%s",
+            "prepare start version=%s build=%s area=%s direct=%s search=%s cart=%s "
+            "sessions_file=%s proxy=%s",
+            __version__,
+            BUILD_ID,
             self.config.area_code,
             self.config.product_codes,
             self.config.search_keywords,
@@ -66,6 +71,7 @@ class PBandaiHkBot:
             self.config.sessions_file,
             redact_proxy(self.config.proxy_url) or "-",
         )
+        print(f"P-Bandai HK bot version={__version__} build={BUILD_ID}")
 
         # CSV tasks: N rows => N parallel sessions, each with a random proxy.
         from .task_runner import ensure_tasks_ready, task_csv_exists
