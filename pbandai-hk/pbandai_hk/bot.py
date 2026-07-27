@@ -499,8 +499,13 @@ class PBandaiHkBot:
         report.errors.append(
             f"failed to add {product.product_code}: {result.detail_note}"
         )
-        # Keep pressure on the drop instead of sleeping RETRY_WAIT (60s) after 503s.
-        if any(_is_retryable_cart_failure(f) for f in failures):
+        # Keep pressure on gateway failures; stock/preallocation needs slower retries.
+        if any(_is_stock_or_business_cart_error(f) for f in failures):
+            self._next_sleep_hint = 1.5
+            logger.info(
+                "[cart] stock/preallocation failures — next loop sleep ~1.5s"
+            )
+        elif any(_is_retryable_cart_failure(f) for f in failures):
             self._next_sleep_hint = 0.25
             logger.info(
                 "[cart] retryable failures — next loop sleep ~0.25s (keep trying)"
@@ -573,6 +578,12 @@ class PBandaiHkBot:
                         retries,
                         note[:180],
                     )
+                    # 409/preallocation = Bandai OOS/hold — do not burn all 8 bursts.
+                    if _is_stock_or_business_cart_error(note):
+                        if attempt >= min(3, retries):
+                            return False, note
+                        time.sleep(0.6)
+                        continue
                     if attempt < retries and _is_retryable_cart_failure(note):
                         try:
                             client.refresh_csrf(required=False)
@@ -840,22 +851,25 @@ class PBandaiHkBot:
 
 
 def _is_retryable_cart_failure(note: str) -> bool:
+    from .browser_cart import _is_retryable_cart_note, _is_stock_or_business_cart_error
+
+    if _is_stock_or_business_cart_error(note):
+        return False
+    if _is_retryable_cart_note(note):
+        return True
     text = (note or "").lower()
+    # Narrow extras — do NOT match bare "warm failed" (that includes 409 stock).
     needles = (
-        "503",
-        "502",
-        "500",
-        "504",
-        "429",
-        "html error",
-        "page not available",
-        "timeout",
-        "timed out",
-        "abort",
-        "connection",
         "click=no button",
         "no button",
-        "warm failed",
         "waf",
+        "501",
+        "html error",
     )
     return any(n in text for n in needles)
+
+
+def _is_stock_or_business_cart_error(note: str) -> bool:
+    from .browser_cart import _is_stock_or_business_cart_error as _impl
+
+    return _impl(note)

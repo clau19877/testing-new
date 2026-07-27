@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from .browser_cart import (
     _click_add_to_cart,
+    _is_retryable_cart_note,
+    _is_stock_or_business_cart_error,
     _load_cookies_into_driver,
     _page_fetch_add_to_cart_burst,
     _safe_cart_count,
@@ -180,25 +182,45 @@ class WarmBrowserPool:
         if ok:
             return self._verify(client, wb, before, f"warm-inpage {note}")
 
-        # 2) Quick click only — don't burn 12s when PDP has no button under 503.
+        stock_blocked = _is_stock_or_business_cart_error(note)
+
+        # 2) Click PLACE PRE-ORDER (site path). For 409/preallocation, still click once
+        # then poll cart — Bandai sometimes delays cart reflection.
         logger.warning(
-            "[warm] in-page burst failed session=%s (%s); trying short click",
+            "[warm] in-page burst failed session=%s (%s); trying click",
             client.name,
-            note,
+            note[:160],
         )
-        print(f"[{client.name}] warm fetch failed ({note[:120]}); short click")
-        clicked = _click_add_to_cart(wb.driver, timeout=3)
+        print(f"[{client.name}] warm fetch failed ({note[:120]}); click")
+        clicked = _click_add_to_cart(wb.driver, timeout=4 if stock_blocked else 3)
         if clicked:
-            time.sleep(1.5)
-            verified = self._verify(client, wb, before, "warm-click PLACE PRE-ORDER/CART")
+            verified = self._verify(
+                client,
+                wb,
+                before,
+                "warm-click PLACE PRE-ORDER/CART",
+                poll_seconds=6.0 if stock_blocked else 3.0,
+            )
             if verified[0]:
                 return verified
 
-        # 3) Repark on HK origin (or PDP) and burst again — HTML may recover.
+        if stock_blocked:
+            # Do NOT repark — navigating away often trips WAF 501 and wastes the window.
+            msg = (
+                f"stock/preallocation hold (Bandai treats as OOS despite UI qty): {note}"
+            )
+            logger.warning("[warm] %s session=%s", msg[:180], client.name)
+            print(f"[{client.name}] {msg[:160]}")
+            return False, msg
+
+        if not _is_retryable_cart_note(note) and not clicked:
+            return False, f"warm failed: fetch={note}; click=no button"
+
+        # 3) Repark only for gateway/WAF failures (503/501), never for 409 stock holds.
         home = f"{self.config.base_url}/{self.config.area_code}/"
         product_url = self._product_url(product_code)
         try:
-            print(f"[{client.name}] warm repark + burst retry")
+            print(f"[{client.name}] warm repark + burst retry (gateway error)")
             wb.driver.get(home)
             time.sleep(0.6)
             force_vue_member_refresh(wb.driver)
@@ -212,6 +234,8 @@ class WarmBrowserPool:
             )
             if ok2:
                 return self._verify(client, wb, before, f"warm-repark-home {note2}")
+            if _is_stock_or_business_cart_error(note2):
+                return False, f"stock/preallocation hold: {note2}"
             try:
                 wb.driver.get(product_url)
                 _wait_for_product_ready(wb.driver, timeout=8)
@@ -227,6 +251,8 @@ class WarmBrowserPool:
             )
             if ok3:
                 return self._verify(client, wb, before, f"warm-repark-pdp {note3}")
+            if _is_stock_or_business_cart_error(note3):
+                return False, f"stock/preallocation hold: {note3}"
             note = f"{note}; repark={note2}; pdp={note3}"
         except Exception as exc:  # noqa: BLE001
             note = f"{note}; repark-error={exc}"
@@ -470,26 +496,38 @@ class WarmBrowserPool:
         wb: WarmBrowser,
         before: Optional[int],
         note: str,
+        *,
+        poll_seconds: float = 2.5,
     ) -> tuple[bool, str]:
-        try:
-            fresh = _driver_cookies(wb.driver)
-            if fresh:
-                apply_cookies_to_client(client, fresh)
-                if wb.cookie_file:
-                    Path(str(wb.cookie_file)).write_text(
-                        json.dumps(fresh, ensure_ascii=False, indent=2) + "\n",
-                        encoding="utf-8",
-                    )
-            client.refresh_csrf()
-            after = _safe_cart_count(client)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("warm cart verify failed session=%s: %s", client.name, exc)
-            after = None
+        deadline = time.time() + max(1.0, poll_seconds)
+        after: Optional[int] = None
+        while True:
+            try:
+                fresh = _driver_cookies(wb.driver)
+                if fresh:
+                    apply_cookies_to_client(client, fresh)
+                    if wb.cookie_file:
+                        Path(str(wb.cookie_file)).write_text(
+                            json.dumps(fresh, ensure_ascii=False, indent=2) + "\n",
+                            encoding="utf-8",
+                        )
+                try:
+                    client.refresh_csrf(required=False)
+                except Exception:  # noqa: BLE001
+                    pass
+                after = _safe_cart_count(client)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("warm cart verify failed session=%s: %s", client.name, exc)
+                after = None
 
-        if after is not None and before is not None and after > before:
-            return True, f"{note} cart {before}->{after}"
-        if after is not None and after > 0 and (before or 0) == 0:
-            return True, f"{note} cart_count={after}"
+            if after is not None and before is not None and after > before:
+                return True, f"{note} cart {before}->{after}"
+            if after is not None and after > 0 and (before or 0) == 0:
+                return True, f"{note} cart_count={after}"
+            if time.time() >= deadline:
+                break
+            time.sleep(0.4)
+
         if after is not None and before is not None and after <= before:
             return False, f"{note} but cart unchanged {before}->{after}"
         return True, f"{note} (verify cart on site)"

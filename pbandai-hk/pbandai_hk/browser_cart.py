@@ -586,7 +586,30 @@ def _click_add_to_cart(driver: Any, timeout: int = 45) -> bool:
     return False
 
 
+def _is_stock_or_business_cart_error(note: str) -> bool:
+    """Bandai maps Preallocation to the same UI as out-of-stock."""
+    text = (note or "").lower()
+    needles = (
+        "status=409",
+        " 409:",
+        "409:",
+        "preallocation",
+        "outofstock",
+        "out_of_stock",
+        "exceededmaxpurchase",
+        "couldnotaddtocartbyoutofstock",
+        "couldnotaddtocartbypreallocation",
+        "couldnotaddtocartbyendofsale",
+        "couldnotaddtocartbysuspendeditem",
+        "couldnotaddtocartbymaxpurchaseqty",
+        "couldnotaddtocartbyminpurchaseqty",
+    )
+    return any(n in text for n in needles)
+
+
 def _is_retryable_cart_note(note: str) -> bool:
+    if _is_stock_or_business_cart_error(note):
+        return False
     text = (note or "").lower()
     needles = (
         "503",
@@ -719,6 +742,10 @@ def _page_has_error(driver: Any) -> bool:
 
 def _short_error(text: str) -> str:
     low = text.lower()
+    if "couldnotaddtocartbypreallocation" in low.replace(" ", ""):
+        return "409 CouldNotAddToCartByPreallocation (stock held/OOS)"
+    if "couldnotaddtocartbyoutofstock" in low.replace(" ", ""):
+        return "409 CouldNotAddToCartByOutOfStock"
     if "<html" in low or "<!doctype" in low:
         if "page not available" in low:
             return "HTML error page (WAF/501 Page not available)"
