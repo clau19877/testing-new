@@ -47,7 +47,10 @@ def login_and_transfer_cookies(
 
         cookies = load_cookies_file(Path(str(cookie_file)))
         apply_cookies_to_client(client, cookies)
-        client.refresh_csrf()
+        try:
+            client.refresh_csrf(required=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("csrf refresh soft-failed after cookie load: %s", exc)
         summary = client.cart_summary()
         print(f"[{client.name}] Session loaded from cookie file. cart summary={summary}")
         logger.info(
@@ -91,8 +94,16 @@ def login_and_transfer_cookies(
 
         cookies = _driver_cookies(driver)
         _apply_driver_cookies(client, cookies)
-        client.refresh_csrf()
-        summary = client.cart_summary()
+        try:
+            client.refresh_csrf(required=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("csrf soft-fail after browser login: %s", exc)
+        try:
+            summary = client.cart_summary()
+        except Exception as exc:  # noqa: BLE001
+            # Cookies may still work in warm browser even if API summary is WAF-blocked.
+            logger.warning("cart summary soft-fail after browser login: %s", exc)
+            summary = {"warning": str(exc)}
         print(
             f"[{client.name}] Session transferred ({len(cookies)} cookies). "
             f"cart summary={summary}"

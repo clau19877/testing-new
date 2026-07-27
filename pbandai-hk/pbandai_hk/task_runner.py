@@ -152,36 +152,57 @@ def _login_one_task(config: "Config", row: AssignedTask, force: bool) -> TaskLog
         proxy=row.proxy,
         name=row.name,
     )
+    cookie_path = Path(row.cookie_file)
     try:
-        client.bootstrap()
-        # Reuse cookies when valid unless force/FORCE_BROWSER_LOGIN.
-        if Path(row.cookie_file).exists() and not force and not config.force_browser_login:
-            login_and_transfer_cookies(
-                config,
-                client,
-                proxy=row.proxy,
-                save_cookie_file=row.cookie_file,
-                force_browser=False,
+        # Soft warm only — WAF often blocks anonymous /api/context/member.
+        # Do NOT hard-fail here before cookie reuse / browser login.
+        try:
+            client.bootstrap(required=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[task] soft bootstrap skipped name=%s: %s",
+                row.name,
+                exc,
             )
-        else:
-            login_and_transfer_cookies(
-                config,
-                client,
-                proxy=row.proxy,
-                save_cookie_file=row.cookie_file,
-                force_browser=True,
-                login=row.login,
-                password=row.password,
-            )
-        upsert_session_spec(
-            config.sessions_file,
-            SessionSpec(
-                name=row.name,
-                enabled=True,
-                proxy=row.proxy,
-                cookie_file=row.cookie_file,
-            ),
+
+        reuse = (
+            cookie_path.exists()
+            and not force
+            and not config.force_browser_login
         )
+        if reuse:
+            try:
+                login_and_transfer_cookies(
+                    config,
+                    client,
+                    proxy=row.proxy,
+                    save_cookie_file=row.cookie_file,
+                    force_browser=False,
+                )
+                _persist_session(config, row)
+                return TaskLoginResult(
+                    name=row.name,
+                    ok=True,
+                    proxy=row.proxy,
+                    cookie_file=row.cookie_file,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[task] cookie reuse failed name=%s (%s); trying browser login",
+                    row.name,
+                    exc,
+                )
+
+        login_and_transfer_cookies(
+            config,
+            client,
+            proxy=row.proxy,
+            save_cookie_file=row.cookie_file,
+            force_browser=True,
+            login=row.login,
+            password=row.password,
+        )
+        _persist_session(config, row)
         return TaskLoginResult(
             name=row.name,
             ok=True,
@@ -189,6 +210,22 @@ def _login_one_task(config: "Config", row: AssignedTask, force: bool) -> TaskLog
             cookie_file=row.cookie_file,
         )
     except Exception as exc:  # noqa: BLE001
+        # Last chance: cookie file exists and looks usable offline for warm browsers.
+        if cookie_path.exists() and _cookie_file_has_session(cookie_path):
+            logger.warning(
+                "[task] login API failed name=%s but cookie file has SESSION; "
+                "continuing for warm/browser cart: %s",
+                row.name,
+                exc,
+            )
+            _persist_session(config, row)
+            return TaskLoginResult(
+                name=row.name,
+                ok=True,
+                proxy=row.proxy,
+                cookie_file=row.cookie_file,
+                error=f"soft-ok with cookies despite: {exc}",
+            )
         log_exception(logger, f"task login failed name={row.name}", exc)
         return TaskLoginResult(
             name=row.name,
@@ -197,6 +234,32 @@ def _login_one_task(config: "Config", row: AssignedTask, force: bool) -> TaskLog
             cookie_file=row.cookie_file,
             error=str(exc),
         )
+
+
+def _persist_session(config: "Config", row: AssignedTask) -> None:
+    upsert_session_spec(
+        config.sessions_file,
+        SessionSpec(
+            name=row.name,
+            enabled=True,
+            proxy=row.proxy,
+            cookie_file=row.cookie_file,
+        ),
+    )
+
+
+def _cookie_file_has_session(path: Path) -> bool:
+    try:
+        import json
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        rows = data if isinstance(data, list) else data.get("cookies") or []
+        for item in rows:
+            if str(item.get("name") or "").upper() == "SESSION" and item.get("value"):
+                return True
+    except Exception:
+        return False
+    return False
 
 
 def ensure_tasks_ready(config: "Config", *, force: bool = False) -> List[TaskLoginResult]:

@@ -83,19 +83,102 @@ class PBandaiHkClient:
             headers["X-CSRF-TOKEN"] = self.csrf_token
         return headers
 
-    def bootstrap(self) -> None:
-        """Warm cookies / CSRF via public member context."""
-        self.session.get(self._url(f"/{self.area_code}/"), timeout=30)
-        self.refresh_csrf()
+    def bootstrap(self, *, required: bool = True) -> None:
+        """Warm cookies / CSRF via public member context.
 
-    def refresh_csrf(self) -> Optional[str]:
-        resp = self.session.get(self._url("/api/context/member"), timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        token = data.get("csrfToken")
-        if token:
-            self.csrf_token = token
+        WAF/proxies often return HTML for /api/context/member. When required=False,
+        failures are logged and ignored so cookie reuse / browser login can continue.
+        """
+        import time
+
+        last_exc: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                home = self.session.get(
+                    self._url(f"/{self.area_code}/"),
+                    timeout=30,
+                    headers={"Accept": "text/html,application/xhtml+xml,*/*"},
+                )
+                # Ignore home status — some regions return soft blocks with 200 HTML.
+                _ = home.status_code
+                self.refresh_csrf(required=True)
+                return
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                time.sleep(0.6 * attempt)
+        if required and last_exc is not None:
+            raise RuntimeError(
+                f"bootstrap failed after retries: {_short_exc(last_exc)}"
+            ) from last_exc
+
+    def refresh_csrf(self, *, required: bool = True) -> Optional[str]:
+        """Fetch CSRF from /api/context/member; tolerate WAF HTML responses."""
+        import time
+
+        last_detail = ""
+        for attempt in range(1, 4):
+            try:
+                resp = self.session.get(
+                    self._url("/api/context/member"),
+                    timeout=30,
+                    headers={
+                        "Accept": "application/json, text/plain, */*",
+                        "Referer": f"{self.base_url}/{self.area_code}/",
+                        "Origin": self.base_url,
+                    },
+                )
+                data = _safe_json(resp)
+                if data is None:
+                    last_detail = (
+                        f"status={resp.status_code} "
+                        f"{_short_html_error(resp.text or '') or 'empty body'}"
+                    )
+                    time.sleep(0.5 * attempt)
+                    continue
+                token = data.get("csrfToken") or data.get("csrf") or data.get("token")
+                if token:
+                    self.csrf_token = str(token)
+                    return self.csrf_token
+                last_detail = f"member JSON missing csrfToken keys={list(data)[:8]}"
+            except Exception as exc:  # noqa: BLE001
+                last_detail = _short_exc(exc)
+                time.sleep(0.5 * attempt)
+
+        # Fallback: scrape csrf from any HTML page that loaded.
+        scraped = self._csrf_from_html()
+        if scraped:
+            self.csrf_token = scraped
+            return self.csrf_token
+
+        if required:
+            raise RuntimeError(
+                f"refresh_csrf failed (WAF/proxy/non-JSON?): {last_detail}"
+            )
         return self.csrf_token
+
+    def _csrf_from_html(self) -> Optional[str]:
+        import re
+
+        try:
+            resp = self.session.get(
+                self._url(f"/{self.area_code}/"),
+                timeout=30,
+                headers={"Accept": "text/html,application/xhtml+xml,*/*"},
+            )
+            text = resp.text or ""
+        except Exception:
+            return None
+        patterns = (
+            r'name=["\']csrf-token["\']\s+content=["\']([^"\']+)["\']',
+            r'content=["\']([^"\']+)["\']\s+name=["\']csrf-token["\']',
+            r'name=["\']_csrf["\']\s+content=["\']([^"\']+)["\']',
+            r'"csrfToken"\s*:\s*"([^"]+)"',
+        )
+        for pat in patterns:
+            m = re.search(pat, text, flags=re.I)
+            if m:
+                return m.group(1)
+        return None
 
     def search(
         self,
@@ -218,8 +301,15 @@ class PBandaiHkClient:
             headers=self._auth_headers(),
             timeout=30,
         )
-        resp.raise_for_status()
-        return resp.json()
+        data = _safe_json(resp)
+        if data is None:
+            raise RuntimeError(
+                f"cart/summary non-JSON status={resp.status_code}: "
+                f"{_short_html_error(resp.text or '') or 'empty body'}"
+            )
+        if resp.status_code >= 400:
+            raise RuntimeError(f"cart/summary failed ({resp.status_code}): {data}")
+        return data
 
     def add_to_cart(
         self,
@@ -297,18 +387,44 @@ class PBandaiHkClient:
         )
 
 
-def _response_error_detail(resp: Any) -> str:
+def _safe_json(resp: Any) -> Optional[Dict[str, Any]]:
+    """Return parsed JSON object, or None for empty/HTML/non-JSON bodies."""
+    text = (getattr(resp, "text", None) or "").strip()
+    if not text:
+        return None
+    low = text[:200].lower()
+    if low.startswith("<!doctype") or low.startswith("<html") or "page not available" in low:
+        return None
+    ctype = (resp.headers.get("content-type") or "").lower()
+    if "html" in ctype and not text.startswith("{") and not text.startswith("["):
+        return None
     try:
         data = resp.json()
-        return str(data)
     except Exception:
-        return _short_html_error(resp.text or "")
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _response_error_detail(resp: Any) -> str:
+    data = _safe_json(resp)
+    if data is not None:
+        return str(data)
+    return _short_html_error(resp.text or "")
 
 
 def _short_html_error(text: str) -> str:
     low = (text or "").lower()
+    if not (text or "").strip():
+        return "empty body"
     if "<html" in low or "<!doctype" in low:
         if "page not available" in low:
             return "HTML WAF/error page (Page not available)"
         return f"HTML error page ({len(text)} chars)"
     return (text or "")[:300]
+
+
+def _short_exc(exc: BaseException) -> str:
+    msg = str(exc) or exc.__class__.__name__
+    if "Expecting value" in msg or "JSONDecodeError" in msg:
+        return "non-JSON response (WAF/proxy empty/HTML)"
+    return msg[:300]

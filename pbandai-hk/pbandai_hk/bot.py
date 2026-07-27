@@ -74,10 +74,23 @@ class PBandaiHkBot:
             results = ensure_tasks_ready(self.config)
             failed = [r for r in results if not r.ok]
             if failed and self.config.enable_add_to_cart:
+                # Allow continue when at least one session logged in.
+                ok = [r for r in results if r.ok]
                 names = ", ".join(r.name for r in failed)
-                raise RuntimeError(
-                    f"CSV task login failed for: {names}. "
-                    "Fix credentials/proxies and retry, or set ENABLE_ADD_TO_CART=0."
+                if not ok:
+                    raise RuntimeError(
+                        f"CSV task login failed for: {names}. "
+                        "Often caused by proxy WAF on /api/context/member. "
+                        "Try menu [8] force re-login, switch proxies, or set ENABLE_ADD_TO_CART=0."
+                    )
+                logger.warning(
+                    "CSV login partial failure; continuing with %s ok, failed=%s",
+                    len(ok),
+                    names,
+                )
+                print(
+                    f"WARNING: some CSV logins failed ({names}); "
+                    f"continuing with {len(ok)} session(s)."
                 )
 
         if self.client is None:
@@ -103,16 +116,24 @@ class PBandaiHkBot:
 
         for runtime in self.sessions:
             try:
-                runtime.client.bootstrap()
+                runtime.client.bootstrap(required=False)
+                # Still try once hard if we have no csrf yet
+                if not runtime.client.csrf_token:
+                    try:
+                        runtime.client.refresh_csrf(required=False)
+                    except Exception:  # noqa: BLE001
+                        pass
                 logger.info(
-                    "bootstrapped session=%s proxy=%s",
+                    "bootstrapped session=%s proxy=%s csrf=%s",
                     runtime.client.name,
                     redact_proxy(runtime.client.proxy) or "-",
+                    "yes" if runtime.client.csrf_token else "no",
                 )
             except Exception as exc:  # noqa: BLE001
                 msg = f"bootstrap failed for session={runtime.client.name}: {exc}"
                 log_exception(logger, msg, exc)
-                raise RuntimeError(msg) from exc
+                # Don't abort prepare — warm/browser cart can still work with cookies.
+                print(f"WARNING: {msg}")
 
         if self.config.enable_add_to_cart:
             self._ensure_logged_in_sessions()
@@ -136,7 +157,7 @@ class PBandaiHkBot:
             )
             if has_session_cookie and not self.config.force_browser_login:
                 try:
-                    client.refresh_csrf()
+                    client.refresh_csrf(required=False)
                     summary = client.cart_summary()
                     logger.info(
                         "session=%s already authenticated summary=%s",
