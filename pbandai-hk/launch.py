@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""Python fallback launcher (used when the .exe/.bin is absent)."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+
+
+def venv_python() -> Path:
+    if os.name == "nt":
+        return ROOT / ".venv" / "Scripts" / "python.exe"
+    return ROOT / ".venv" / "bin" / "python"
+
+
+def run(cmd: list[str]) -> None:
+    print("+", " ".join(cmd))
+    subprocess.check_call(cmd, cwd=ROOT)
+
+
+def ensure_setup() -> Path:
+    os.chdir(ROOT)
+    py = sys.executable
+    vp = venv_python()
+    if not vp.exists():
+        print("Creating virtual environment (.venv)...")
+        run([py, "-m", "venv", str(ROOT / ".venv")])
+    print("Installing/updating dependencies...")
+    run([str(vp), "-m", "pip", "install", "--upgrade", "pip"])
+    run([str(vp), "-m", "pip", "install", "-r", "requirements.txt"])
+    env = ROOT / ".env"
+    example = ROOT / ".env.example"
+    if not env.exists():
+        print("Creating .env from .env.example ...")
+        shutil.copyfile(example, env)
+        print(f"Edit {env} and set PRODUCT_LINKS, then re-run.")
+    return vp
+
+
+def run_bot(vp: Path, *args: str) -> int:
+    cmd = [str(vp), str(ROOT / "web_shopping_bot_hk.py"), *args]
+    print("Launching:", " ".join(cmd))
+    return subprocess.call(cmd, cwd=ROOT)
+
+
+def menu(vp: Path) -> int:
+    while True:
+        print(
+            """
+What do you want to do?
+  [1] Start monitor loop (recommended)
+  [2] Run one scan
+  [3] Check a direct product link
+  [4] Open .env for editing
+  [5] Re-run setup (deps)
+  [Q] Quit
+"""
+        )
+        choice = input("> ").strip().lower()
+        if choice in {"1", ""}:
+            return run_bot(vp, "loop")
+        if choice == "2":
+            return run_bot(vp, "once")
+        if choice == "3":
+            link = input("Paste product URL or code: ").strip()
+            if not link:
+                print("No link provided.")
+                continue
+            run_bot(vp, "check", link)
+        elif choice == "4":
+            open_env()
+        elif choice == "5":
+            ensure_setup()
+            print("Dependencies reinstalled.")
+        elif choice in {"q", "quit", "exit"}:
+            return 0
+        else:
+            print("Unknown option.")
+
+
+def open_env() -> None:
+    env = ROOT / ".env"
+    if os.name == "nt":
+        os.startfile(str(env))  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(env)])
+    else:
+        subprocess.Popen(["xdg-open", str(env)])
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="P-Bandai HK setup & launch")
+    parser.add_argument("--one-click", "-y", action="store_true", help="setup + start loop")
+    parser.add_argument("--setup-only", action="store_true")
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--loop", action="store_true")
+    parser.add_argument("--check", metavar="URL")
+    args = parser.parse_args()
+
+    print("========================================")
+    print(" P-Bandai HK - Setup & Launch")
+    print("========================================")
+    print("App folder:", ROOT)
+
+    vp = ensure_setup()
+    print("Setup complete.")
+    if args.setup_only:
+        return 0
+    if args.check:
+        return run_bot(vp, "check", args.check)
+    if args.once:
+        return run_bot(vp, "once")
+    if args.loop or args.one_click:
+        return run_bot(vp, "loop")
+    return menu(vp)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except subprocess.CalledProcessError as exc:
+        print("ERROR:", exc, file=sys.stderr)
+        if os.name == "nt":
+            input("Press Enter to close...")
+        raise SystemExit(1)

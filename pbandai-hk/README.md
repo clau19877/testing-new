@@ -17,7 +17,27 @@ JP and HK are different platforms. This module does **not** scrape JP DOM (`#cdu
 
 Default mode is **monitor + notify only** (`ENABLE_ADD_TO_CART=0`).
 
-## Setup
+## One-click setup & launch
+
+### Windows
+1. Install [Python 3.10+](https://www.python.org/downloads/) (enable **Add python.exe to PATH**)
+2. Double-click either:
+   - `dist/PBandaiHK.exe` — menu after setup
+   - `OneClickMonitor.bat` — setup + start monitor loop
+   - `SetupAndLaunch.bat` — same as the exe menu
+
+First run creates `.venv`, installs deps, and copies `.env` for you.
+
+### macOS / Linux
+```bash
+./setup_and_launch.sh
+# or
+./dist/PBandaiHK
+```
+
+Rebuild launchers anytime with `./build_launcher.sh`.
+
+## Manual setup
 
 ```bash
 cd pbandai-hk
@@ -107,10 +127,18 @@ Cart/checkout still follows P-Bandai / Global-e site rules. Use only with your o
 
 ```
 pbandai-hk/
+  SetupAndLaunch.bat       # Windows one-click menu
+  OneClickMonitor.bat      # Windows one-click monitor loop
+  setup_and_launch.sh      # macOS/Linux one-click
+  launch.py                # Python launcher fallback
+  build_launcher.sh        # rebuild dist/PBandaiHK(.exe)
+  dist/PBandaiHK.exe       # Windows launcher
+  dist/PBandaiHK           # Linux launcher
   web_shopping_bot_hk.py   # CLI entry
   requirements.txt
   .env.example
   logs/                    # created at runtime
+  launcher/main.go         # launcher source
   pbandai_hk/
     api.py                 # HK API client
     bot.py                 # scan / match / optional cart loop
