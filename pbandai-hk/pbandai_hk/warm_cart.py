@@ -3,13 +3,15 @@
 Problem:
   During drops the product HTML often 502/503 while the cart API can still work.
   Cold-starting Chrome or reloading the PDP at T-0 frequently fails.
+  Raw in-page fetch('/api/cart/addToCart') often gets WAF 501 HTML because it
+  lacks Shape/F5 bot tokens that the site's own PLACE PRE-ORDER click carries.
 
 Solution:
   1. Before the drop, park logged-in Chrome tabs on the product page (warm pool).
   2. Poll eligibility via lightweight JSON APIs (not HTML).
-  3. At drop time, fire cart from *inside* the already-open page via fetch().
-     F5/WAF page-context headers are attached by the site's own JS — no reload.
-  4. Only fall back to clicking PLACE PRE-ORDER if in-page fetch fails.
+  3. At drop time: click PLACE PRE-ORDER first when the button is on the PDP.
+  4. Only use a short in-page fetch burst as fallback (home-park / no button).
+  5. Never repark after a successful click — reloads destroy WAF context.
 """
 
 from __future__ import annotations
@@ -169,43 +171,78 @@ class WarmBrowserPool:
 
         before = _safe_cart_count(client)
         csrf = getattr(client, "csrf_token", "") or ""
+        on_pdp = self._is_on_product_page(wb, product_code)
+        clicked = False
+        note = ""
 
-        # 1) Burst in-page fetch — drops return 503 HTML for seconds; keep hammering.
+        # 1) Click-first on PDP — site button carries Shape/F5 tokens; raw fetch often 501s.
+        if on_pdp:
+            print(f"[{client.name}] warm click-first PLACE PRE-ORDER")
+            logger.info("[warm] click-first session=%s on_pdp=1", client.name)
+            clicked = _click_add_to_cart(wb.driver, timeout=3)
+            if clicked:
+                verified = self._verify(
+                    client,
+                    wb,
+                    before,
+                    "warm-click PLACE PRE-ORDER/CART",
+                    poll_seconds=7.0,
+                )
+                if verified[0]:
+                    return verified
+                # Click fired but cart not reflected yet — one short fetch as backup,
+                # then stop. Do NOT repark (destroys page WAF context).
+                ok, note = _page_fetch_add_to_cart_burst(
+                    wb.driver,
+                    area_item_no=area_item_no,
+                    qty=qty,
+                    csrf=csrf,
+                    attempts=3,
+                    gap=0.15,
+                )
+                if ok:
+                    return self._verify(
+                        client, wb, before, f"warm-click+fetch {note}", poll_seconds=4.0
+                    )
+                if _is_stock_or_business_cart_error(note):
+                    msg = (
+                        "stock/preallocation hold "
+                        f"(Bandai treats as OOS despite UI qty): {note}"
+                    )
+                    logger.warning("[warm] %s session=%s", msg[:180], client.name)
+                    print(f"[{client.name}] {msg[:160]}")
+                    return False, msg
+                return False, (
+                    f"warm failed: click=yes cart unchanged; fetch={note or 'n/a'}"
+                )
+
+        # 2) Short fetch burst (home-park / no button). Cap hard — 501 spam trips WAF.
         ok, note = _page_fetch_add_to_cart_burst(
             wb.driver,
             area_item_no=area_item_no,
             qty=qty,
             csrf=csrf,
-            attempts=16,
-            gap=0.1,
+            attempts=4,
+            gap=0.15,
         )
         if ok:
             return self._verify(client, wb, before, f"warm-inpage {note}")
 
         stock_blocked = _is_stock_or_business_cart_error(note)
-
-        # 2) Click PLACE PRE-ORDER (site path). For 409/preallocation, still click once
-        # then poll cart — Bandai sometimes delays cart reflection.
-        logger.warning(
-            "[warm] in-page burst failed session=%s (%s); trying click",
-            client.name,
-            note[:160],
-        )
-        print(f"[{client.name}] warm fetch failed ({note[:120]}); click")
-        clicked = _click_add_to_cart(wb.driver, timeout=4 if stock_blocked else 3)
-        if clicked:
-            verified = self._verify(
-                client,
-                wb,
-                before,
-                "warm-click PLACE PRE-ORDER/CART",
-                poll_seconds=6.0 if stock_blocked else 3.0,
-            )
-            if verified[0]:
-                return verified
-
         if stock_blocked:
-            # Do NOT repark — navigating away often trips WAF 501 and wastes the window.
+            # One native click then poll — sometimes cart reflects after 409.
+            if on_pdp and not clicked:
+                clicked = _click_add_to_cart(wb.driver, timeout=3)
+                if clicked:
+                    verified = self._verify(
+                        client,
+                        wb,
+                        before,
+                        "warm-click after preallocation",
+                        poll_seconds=6.0,
+                    )
+                    if verified[0]:
+                        return verified
             msg = (
                 f"stock/preallocation hold (Bandai treats as OOS despite UI qty): {note}"
             )
@@ -213,52 +250,85 @@ class WarmBrowserPool:
             print(f"[{client.name}] {msg[:160]}")
             return False, msg
 
+        # 3) Fetch failed (likely 501) — try click if we haven't yet.
+        if not clicked:
+            logger.warning(
+                "[warm] short fetch failed session=%s (%s); trying click",
+                client.name,
+                note[:160],
+            )
+            print(f"[{client.name}] warm fetch failed ({note[:120]}); click")
+            clicked = _click_add_to_cart(wb.driver, timeout=3)
+            if clicked:
+                verified = self._verify(
+                    client,
+                    wb,
+                    before,
+                    "warm-click PLACE PRE-ORDER/CART",
+                    poll_seconds=7.0,
+                )
+                if verified[0]:
+                    return verified
+                # Click happened — do not repark.
+                return False, (
+                    f"warm failed: fetch={note}; click=yes; cart unchanged"
+                )
+
         if not _is_retryable_cart_note(note) and not clicked:
             return False, f"warm failed: fetch={note}; click=no button"
 
-        # 3) Repark only for gateway/WAF failures (503/501), never for 409 stock holds.
-        home = f"{self.config.base_url}/{self.config.area_code}/"
+        # 4) Last resort: soft return to PDP once (no home hop), then one click + tiny burst.
+        # Avoid home→fetch spam that caused the 501 death spiral in drops.
         product_url = self._product_url(product_code)
         try:
-            print(f"[{client.name}] warm repark + burst retry (gateway error)")
-            wb.driver.get(home)
-            time.sleep(0.6)
+            print(f"[{client.name}] warm soft PDP refresh + click (no fetch spam)")
+            logger.info("[warm] soft PDP refresh session=%s", client.name)
+            wb.driver.get(product_url)
+            _wait_for_product_ready(wb.driver, timeout=8)
             force_vue_member_refresh(wb.driver)
+            clicked2 = _click_add_to_cart(wb.driver, timeout=4)
+            if clicked2:
+                verified = self._verify(
+                    client,
+                    wb,
+                    before,
+                    "warm-pdp-refresh-click",
+                    poll_seconds=7.0,
+                )
+                if verified[0]:
+                    return verified
             ok2, note2 = _page_fetch_add_to_cart_burst(
                 wb.driver,
                 area_item_no=area_item_no,
                 qty=qty,
                 csrf=csrf,
-                attempts=12,
-                gap=0.1,
+                attempts=3,
+                gap=0.15,
             )
             if ok2:
-                return self._verify(client, wb, before, f"warm-repark-home {note2}")
+                return self._verify(client, wb, before, f"warm-pdp-refresh-fetch {note2}")
             if _is_stock_or_business_cart_error(note2):
                 return False, f"stock/preallocation hold: {note2}"
-            try:
-                wb.driver.get(product_url)
-                _wait_for_product_ready(wb.driver, timeout=8)
-            except Exception:  # noqa: BLE001
-                pass
-            ok3, note3 = _page_fetch_add_to_cart_burst(
-                wb.driver,
-                area_item_no=area_item_no,
-                qty=qty,
-                csrf=csrf,
-                attempts=10,
-                gap=0.1,
-            )
-            if ok3:
-                return self._verify(client, wb, before, f"warm-repark-pdp {note3}")
-            if _is_stock_or_business_cart_error(note3):
-                return False, f"stock/preallocation hold: {note3}"
-            note = f"{note}; repark={note2}; pdp={note3}"
+            note = f"{note}; pdp-refresh={note2}"
+            clicked = clicked or clicked2
         except Exception as exc:  # noqa: BLE001
-            note = f"{note}; repark-error={exc}"
-            log_exception(logger, f"warm repark burst failed session={client.name}", exc)
+            note = f"{note}; pdp-refresh-error={exc}"
+            log_exception(logger, f"warm soft PDP refresh failed session={client.name}", exc)
 
         return False, f"warm failed: fetch={note}; click={'yes' if clicked else 'no button'}"
+
+    @staticmethod
+    def _is_on_product_page(wb: WarmBrowser, product_code: str) -> bool:
+        if wb.driver is None or not product_code:
+            return False
+        try:
+            url = (wb.driver.current_url or "").lower()
+            title = (wb.driver.title or "").lower()
+            if "page not available" in title:
+                return False
+            return product_code.lower() in url
+        except Exception:  # noqa: BLE001
+            return False
 
     def close(self) -> None:
         for wb in self.browsers:

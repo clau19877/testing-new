@@ -715,9 +715,15 @@ def _page_fetch_add_to_cart_burst(
     csrf: str,
     attempts: int = 12,
     gap: float = 0.12,
+    max_waf_hits: int = 4,
 ) -> tuple[bool, str]:
-    """Hammer addToCart; drops often return 503 HTML for a few seconds."""
+    """Short retry on gateway errors; abort early on repeated WAF 501 HTML.
+
+    Raw fetch often lacks Shape/F5 tokens — hammering 501 pages makes WAF worse.
+    Prefer native button click (warm/browser paths) over long fetch bursts.
+    """
     last = "browser-fetch not attempted"
+    waf_hits = 0
     for i in range(1, max(1, attempts) + 1):
         ok, note = _page_fetch_add_to_cart(
             driver, area_item_no=area_item_no, qty=qty, csrf=csrf
@@ -727,6 +733,11 @@ def _page_fetch_add_to_cart_burst(
         last = note
         if not _is_retryable_cart_note(note):
             return False, note
+        low = note.lower()
+        if "501" in low or "page not available" in low or "html error" in low:
+            waf_hits += 1
+            if waf_hits >= max(1, max_waf_hits):
+                return False, last
         if i < attempts:
             time.sleep(gap)
     return False, last

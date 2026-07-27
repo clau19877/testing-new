@@ -446,12 +446,18 @@ class PBandaiHkBot:
         if use_parallel:
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
-            print(f"[cart] parallel add across {len(sessions)} sessions")
-            logger.info("[cart] parallel add sessions=%s", len(sessions))
+            def _staggered_add(runtime: RuntimeSession, delay: float) -> tuple[bool, str]:
+                # Stagger starts so 3× simultaneous fetch don't trip WAF together.
+                if delay > 0:
+                    time.sleep(delay)
+                return self._add_with_client(runtime.client, product, detail)
+
+            print(f"[cart] parallel add across {len(sessions)} sessions (staggered)")
+            logger.info("[cart] parallel add sessions=%s staggered", len(sessions))
             with ThreadPoolExecutor(max_workers=len(sessions)) as pool:
                 futures = {
-                    pool.submit(self._add_with_client, runtime.client, product, detail): runtime
-                    for runtime in sessions
+                    pool.submit(_staggered_add, runtime, idx * 0.25): runtime
+                    for idx, runtime in enumerate(sessions)
                 }
                 for fut in as_completed(futures):
                     runtime = futures[fut]
