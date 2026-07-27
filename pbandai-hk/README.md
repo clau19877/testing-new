@@ -151,13 +151,38 @@ Launcher menu also has:
 | `PROXY_URL` | Single/fallback proxy |
 | `SESSIONS_FILE` | Multi-session config (`sessions.json`) |
 | `CART_MODE` | `first` / `all` / `round_robin` |
+| `CART_METHOD` | `auto` / `api` / `browser` / `warm` |
+| `PREWARM_BROWSERS` | `1` = park Chrome on PDP before drop (use with `auto`/`warm`) |
 | `TASK_CSV` | Accounts file (`name,login,password`) |
 | `PROXY_CSV` | Proxy pool; each task picks one at random |
 | `PROXY_ASSIGN_MODE` | `random` or `unique` |
 | `TASK_PARALLEL_WORKERS` | `0` = one worker per task |
 | `EMAIL_USER` | Leave empty to skip email |
 
-## Cart mode notes
+## Drop / site-crash strategy (warm browsers)
+
+During drops the product **HTML** often 502/503 while `/api/products` and cart still work. Cold-opening Chrome at T-0 usually fails.
+
+Recommended `.env` for drops:
+
+```env
+ENABLE_ADD_TO_CART=1
+PRODUCT_LINKS=https://p-bandai.com/hk/item/YOUR_CODE
+CART_METHOD=warm
+# or: CART_METHOD=auto + PREWARM_BROWSERS=1
+PREWARM_BROWSERS=1
+BACKGROUND_MODE=0
+RETRY_WAIT=2
+```
+
+Flow:
+1. Login all sessions (task.csv / menu `[8]`) **before** the drop
+2. Start `loop` — browsers open and **park on the product page**
+3. Bot polls eligibility via JSON APIs (not HTML)
+4. When eligible, cart fires via **in-page `fetch('/api/cart/addToCart')`** inside the already-open tab (F5/WAF tokens stay valid; no page reload)
+5. If fetch fails, clicks PLACE PRE-ORDER / ADD TO CART on the open page
+
+Do **not** use cold `CART_METHOD=browser` alone for drops — that relaunches Chrome and reloads HTML under load.
 
 When `ENABLE_ADD_TO_CART=1`:
 
@@ -215,4 +240,7 @@ pbandai-hk/
     logging_utils.py       # file/console error logging
     notify.py
     session_login.py       # Selenium cookie transfer
+    browser_cart.py        # cold browser add-to-cart
+    warm_cart.py           # pre-warmed browsers for drops
+    diagnostics.py         # cart eligibility diagnose
 ```

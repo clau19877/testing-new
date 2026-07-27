@@ -28,8 +28,16 @@ def _dotenv_path(explicit: str | None) -> str | None:
 
 def cmd_once(config: Config) -> int:
     bot = PBandaiHkBot(config)
-    bot.prepare()
-    report = bot.run_once()
+    try:
+        bot.prepare()
+        report = bot.run_once()
+    finally:
+        if bot.warm_pool is not None:
+            try:
+                bot.warm_pool.close()
+            except Exception:  # noqa: BLE001
+                pass
+            bot.warm_pool = None
     print(
         json.dumps(
             {

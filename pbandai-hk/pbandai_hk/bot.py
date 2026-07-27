@@ -51,6 +51,7 @@ class PBandaiHkBot:
         self.remaining_direct_codes: List[str] = list(config.product_codes)
         self.seen_codes: Set[str] = set()
         self._rr_index = 0
+        self.warm_pool = None  # WarmBrowserPool | None
 
     def prepare(self) -> None:
         setup_logging(self.config.log_file, level=self.config.log_level)
@@ -114,9 +115,12 @@ class PBandaiHkBot:
 
         if self.config.enable_add_to_cart:
             self._ensure_logged_in_sessions()
+            self._maybe_prepare_warm_pool()
 
         print(
             f"Active sessions: {len(self.sessions)} | cart_mode={self.config.cart_mode}"
+            f" | cart_method={self.config.cart_method}"
+            f" | prewarm={int(self.config.prewarm_browsers or self.config.cart_method == 'warm')}"
         )
         for runtime in self.sessions:
             print(
@@ -183,6 +187,43 @@ class PBandaiHkBot:
                     "  4) Or set ENABLE_ADD_TO_CART=0 for monitor-only mode\n"
                 )
                 raise
+
+    def _want_warm(self) -> bool:
+        if not self.config.enable_add_to_cart:
+            return False
+        if self.config.cart_method == "warm":
+            return True
+        if self.config.cart_method in {"auto", "browser"} and self.config.prewarm_browsers:
+            return True
+        return False
+
+    def _maybe_prepare_warm_pool(self) -> None:
+        if not self._want_warm():
+            return
+        codes = list(self.remaining_direct_codes) or list(self.config.product_codes)
+        if not codes:
+            logger.warning(
+                "[warm] PREWARM/CART_METHOD=warm set but no PRODUCT_LINKS/CODES; "
+                "warm pool skipped (keyword-only mode cannot pre-park)"
+            )
+            print(
+                "[warm] skipped: set PRODUCT_LINKS/PRODUCT_CODES so browsers can park "
+                "on the product page before the drop"
+            )
+            return
+        product_code = codes[0]
+        from .warm_cart import WarmBrowserPool
+
+        if self.warm_pool is not None:
+            try:
+                self.warm_pool.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self.warm_pool = WarmBrowserPool(config=self.config)
+        ready = self.warm_pool.prepare(self.sessions, product_code)
+        if ready <= 0:
+            logger.warning("[warm] no browsers ready — will fall back to cold browser/API")
+            print("[warm] WARNING: no warm browsers ready; cold fallback will be used")
 
     def run_once(self) -> RunReport:
         report = RunReport()
@@ -422,6 +463,19 @@ class PBandaiHkBot:
 
                 if method == "browser":
                     return self._browser_add(client, product, area_item_no)
+                if method == "warm":
+                    return self._warm_add(client, product, area_item_no)
+
+                # auto: prefer warm pool (no HTML reload) when ready
+                if self.warm_pool is not None and self.warm_pool.ready_count > 0:
+                    ok, note = self._warm_add(client, product, area_item_no)
+                    if ok:
+                        return True, note
+                    logger.warning(
+                        "[cart] session=%s warm failed (%s); trying API",
+                        client.name,
+                        note[:160],
+                    )
 
                 logger.info(
                     "[cart] session=%s attempting API add areaItemNo=%s "
@@ -452,6 +506,11 @@ class PBandaiHkBot:
                             client.name,
                             msg[:160],
                         )
+                        # Prefer warm again if pool still alive (no cold launch)
+                        if self.warm_pool is not None and self.warm_pool.ready_count > 0:
+                            ok, note = self._warm_add(client, product, area_item_no)
+                            if ok:
+                                return True, note
                         return self._browser_add(client, product, area_item_no)
                     raise
             except Exception as exc:  # noqa: BLE001
@@ -465,6 +524,25 @@ class PBandaiHkBot:
                 detail = None
                 time.sleep(1)
         return False, last_note
+
+    def _warm_add(
+        self,
+        client: PBandaiHkClient,
+        product: ProductHit,
+        area_item_no: str,
+    ) -> tuple[bool, str]:
+        if self.warm_pool is None or self.warm_pool.ready_count <= 0:
+            return False, "warm pool not ready"
+        try:
+            self.warm_pool.ensure_product(product.product_code)
+        except Exception as exc:  # noqa: BLE001
+            log_exception(logger, "warm ensure_product failed", exc)
+        return self.warm_pool.add_to_cart(
+            client,
+            product_code=product.product_code,
+            area_item_no=area_item_no,
+            qty=self.config.cart_qty,
+        )
 
     def _browser_add(
         self,
@@ -545,24 +623,32 @@ class PBandaiHkBot:
 
     def run_forever(self) -> None:
         self.prepare()
-        if self.config.schedule_mode:
-            if not self.config.execute_times:
-                raise ValueError("SCHEDULE_MODE=1 requires EXECUTE_TIME")
-            for when in self.config.execute_times:
-                schedule.every().day.at(when).do(self.run_once)
-                logger.info("[schedule] registered %s", when)
-            logger.info("[schedule] waiting...")
-            while True:
-                schedule.run_pending()
-                time.sleep(self.config.schedule_polling_period)
-        else:
-            logger.info("[loop] immediate mode")
-            while True:
-                self.run_once()
-                if self.config.enable_add_to_cart and not (
-                    self.remaining_targets or self.remaining_direct_codes
-                ):
-                    logger.info("[loop] all targets handled; exiting")
-                    break
-                logger.info("[loop] sleep %ss", self.config.retry_wait)
-                time.sleep(self.config.retry_wait)
+        try:
+            if self.config.schedule_mode:
+                if not self.config.execute_times:
+                    raise ValueError("SCHEDULE_MODE=1 requires EXECUTE_TIME")
+                for when in self.config.execute_times:
+                    schedule.every().day.at(when).do(self.run_once)
+                    logger.info("[schedule] registered %s", when)
+                logger.info("[schedule] waiting...")
+                while True:
+                    schedule.run_pending()
+                    time.sleep(self.config.schedule_polling_period)
+            else:
+                logger.info("[loop] immediate mode")
+                while True:
+                    self.run_once()
+                    if self.config.enable_add_to_cart and not (
+                        self.remaining_targets or self.remaining_direct_codes
+                    ):
+                        logger.info("[loop] all targets handled; exiting")
+                        break
+                    logger.info("[loop] sleep %ss", self.config.retry_wait)
+                    time.sleep(self.config.retry_wait)
+        finally:
+            if self.warm_pool is not None:
+                try:
+                    self.warm_pool.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                self.warm_pool = None

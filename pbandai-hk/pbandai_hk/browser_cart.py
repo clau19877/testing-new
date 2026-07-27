@@ -269,23 +269,39 @@ def _page_fetch_add_to_cart(
     script = """
     const areaItemNo = arguments[0];
     const qty = arguments[1];
-    const csrf = arguments[2];
+    const csrfArg = arguments[2];
     const callback = arguments[arguments.length - 1];
-    const headers = {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json, text/plain, */*',
-      'X-Requested-With': 'XMLHttpRequest'
-    };
-    if (csrf) headers['X-CSRF-TOKEN'] = csrf;
-    fetch('/api/cart/addToCart', {
-      method: 'POST',
-      credentials: 'include',
-      headers,
-      body: JSON.stringify([{areaItemNo, qty}])
-    }).then(async (resp) => {
-      const text = await resp.text();
-      callback({status: resp.status, body: text.slice(0, 500)});
-    }).catch((err) => callback({status: 0, body: String(err)}));
+    (async () => {
+      try {
+        const csrf =
+          csrfArg ||
+          document.querySelector('meta[name="csrf-token"]')?.content ||
+          document.querySelector('meta[name="_csrf"]')?.content ||
+          document.querySelector('input[name="_csrf"]')?.value ||
+          '';
+        const headers = {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json, text/plain, */*',
+          'X-Requested-With': 'XMLHttpRequest',
+          'X-G1-Area-Code': 'hk',
+        };
+        if (csrf) {
+          headers['X-CSRF-TOKEN'] = csrf;
+          headers['X-XSRF-TOKEN'] = csrf;
+        }
+        // Native fetch so F5/Shape page hooks can inject bot tokens.
+        const resp = await fetch('/api/cart/addToCart', {
+          method: 'POST',
+          credentials: 'include',
+          headers,
+          body: JSON.stringify([{areaItemNo, qty}]),
+        });
+        const text = await resp.text();
+        callback({status: resp.status, body: text.slice(0, 800)});
+      } catch (err) {
+        callback({status: 0, body: String(err)});
+      }
+    })();
     """
     try:
         driver.set_script_timeout(30)
