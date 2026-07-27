@@ -23,6 +23,8 @@ pbandai-hk/logs/
 pbandai-hk.zip
 pbandai-hk/sessions.json
 pbandai-hk/sessions/*.cookies.json
+pbandai-hk/task.csv
+pbandai-hk/proxy.csv
 
 __pycache__/
 *.pyc

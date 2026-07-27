@@ -83,6 +83,7 @@ func menu(venvPy string) int {
 		fmt.Println("  [5] Re-run setup (deps)")
 		fmt.Println("  [6] List sessions")
 		fmt.Println("  [7] Login / create session (multi + proxy)")
+		fmt.Println("  [8] Login all task.csv (parallel + random proxies)")
 		fmt.Println("  [Q] Quit")
 		fmt.Print("> ")
 		line, _ := in.ReadString('\n')
@@ -127,6 +128,15 @@ func menu(venvPy string) int {
 			args := []string{"login", "--name", name, "--force"}
 			if proxy != "" {
 				args = append(args, "--proxy", proxy)
+			}
+			_ = runBot(venvPy, args...)
+		case "8":
+			fmt.Print("Force re-login even if cookies exist? [y/N]: ")
+			forceLine, _ := in.ReadString('\n')
+			forceAns := strings.TrimSpace(strings.ToLower(forceLine))
+			args := []string{"tasks"}
+			if forceAns == "y" || forceAns == "yes" || forceAns == "1" {
+				args = append(args, "--force")
 			}
 			_ = runBot(venvPy, args...)
 		case "q", "quit", "exit":
@@ -218,7 +228,7 @@ func ensureDeps(venvPy string) error {
 
 func ensureEnvFile() error {
 	if _, err := os.Stat(".env"); err == nil {
-		return nil
+		return ensureCSVTemplates()
 	}
 	fmt.Println("Creating .env from .env.example ...")
 	data, err := os.ReadFile(".env.example")
@@ -236,6 +246,21 @@ func ensureEnvFile() error {
 		_, _ = bufio.NewReader(os.Stdin).ReadBytes('\n')
 	} else {
 		time.Sleep(500 * time.Millisecond)
+	}
+	return ensureCSVTemplates()
+}
+
+func ensureCSVTemplates() error {
+	// Do not overwrite user task.csv / proxy.csv; only hint if missing.
+	if _, err := os.Stat("task.csv"); err != nil {
+		if _, err2 := os.Stat("task.example.csv"); err2 == nil {
+			fmt.Println("Tip: copy task.example.csv -> task.csv and fill login/password rows.")
+		}
+	}
+	if _, err := os.Stat("proxy.csv"); err != nil {
+		if _, err2 := os.Stat("proxy.example.csv"); err2 == nil {
+			fmt.Println("Tip: copy proxy.example.csv -> proxy.csv and fill proxy rows.")
+		}
 	}
 	return nil
 }

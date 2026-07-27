@@ -207,6 +207,31 @@ def cmd_login(config: Config, name: str, proxy: str, force: bool) -> int:
         return 1
 
 
+def cmd_tasks(config: Config, force: bool) -> int:
+    """Login all rows from task.csv in parallel; each picks a random proxy.csv entry."""
+    from pbandai_hk.task_runner import run_tasks_parallel
+
+    setup_logging(config.log_file, level=config.log_level)
+    logger = get_logger("cli")
+    try:
+        results = run_tasks_parallel(config, force=force)
+    except Exception as exc:  # noqa: BLE001
+        log_exception(logger, "tasks command failed", exc)
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Sessions file: {config.sessions_file}")
+    ok = sum(1 for r in results if r.ok)
+    for result in sorted(results, key=lambda r: r.name):
+        status = "ok" if result.ok else f"fail: {result.error}"
+        print(
+            f"- {result.name} {status} "
+            f"proxy={redact_proxy(result.proxy) or '-'} "
+            f"cookie={result.cookie_file or '-'}"
+        )
+    return 0 if ok == len(results) and results else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="P-Bandai HK monitor / cart helper")
     parser.add_argument(
@@ -241,6 +266,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Force browser login even if cookie file exists",
     )
+    tasks_p = sub.add_parser(
+        "tasks",
+        help="Login all task.csv accounts in parallel; each picks a random proxy.csv row",
+    )
+    tasks_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Force browser login even if cookie files already exist",
+    )
 
     args = parser.parse_args(argv)
     config = Config.from_env(_dotenv_path(args.dotenv_path))
@@ -255,6 +289,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_sessions(config)
         if command == "login":
             return cmd_login(config, args.name, args.proxy, args.force)
+        if command == "tasks":
+            return cmd_tasks(config, args.force)
         if command == "loop":
             return cmd_loop(config)
         return cmd_once(config)

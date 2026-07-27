@@ -65,6 +65,19 @@ class PBandaiHkBot:
             redact_proxy(self.config.proxy_url) or "-",
         )
 
+        # CSV tasks: N rows => N parallel sessions, each with a random proxy.
+        from .task_runner import ensure_tasks_ready, task_csv_exists
+
+        if task_csv_exists(self.config):
+            results = ensure_tasks_ready(self.config)
+            failed = [r for r in results if not r.ok]
+            if failed and self.config.enable_add_to_cart:
+                names = ", ".join(r.name for r in failed)
+                raise RuntimeError(
+                    f"CSV task login failed for: {names}. "
+                    "Fix credentials/proxies and retry, or set ENABLE_ADD_TO_CART=0."
+                )
+
         if self.client is None:
             self.sessions = build_runtime_sessions(
                 sessions_file=self.config.sessions_file,

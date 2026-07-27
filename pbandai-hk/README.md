@@ -93,7 +93,23 @@ PROXY_URL=http://user:pass@1.2.3.4:8080
 # or socks5://1.2.3.4:1080
 ```
 
-### Multi account sessions
+### CSV parallel tasks (recommended for many accounts)
+1. Copy examples and fill real values:
+```bash
+cp task.example.csv task.csv
+cp proxy.example.csv proxy.csv
+```
+2. `task.csv` columns: `name,login,password`  
+   `proxy.csv` column: `proxy` (or `host,port,username,password`)
+3. Parallel count = number of rows in `task.csv`. Each task picks one proxy at random.
+```bash
+python web_shopping_bot_hk.py tasks
+# or start once/loop — if task.csv exists it auto-logins all tasks first
+python web_shopping_bot_hk.py loop
+```
+4. Tip: set `BACKGROUND_MODE=1` for headless parallel browsers.
+
+### Multi account sessions (manual)
 1. Create/login sessions (one browser login each):
 ```bash
 python web_shopping_bot_hk.py login --name acc1 --proxy http://user:pass@1.2.3.4:8080
@@ -113,6 +129,7 @@ ENABLE_ADD_TO_CART=1
 Launcher menu also has:
 - `[6] List sessions`
 - `[7] Login / create session (multi + proxy)`
+- `[8] Login all task.csv (parallel + random proxies)`
 
 ## Important `.env` knobs
 
@@ -130,6 +147,10 @@ Launcher menu also has:
 | `PROXY_URL` | Single/fallback proxy |
 | `SESSIONS_FILE` | Multi-session config (`sessions.json`) |
 | `CART_MODE` | `first` / `all` / `round_robin` |
+| `TASK_CSV` | Accounts file (`name,login,password`) |
+| `PROXY_CSV` | Proxy pool; each task picks one at random |
+| `PROXY_ASSIGN_MODE` | `random` or `unique` |
+| `TASK_PARALLEL_WORKERS` | `0` = one worker per task |
 | `EMAIL_USER` | Leave empty to skip email |
 
 ## Cart mode notes
@@ -176,12 +197,16 @@ pbandai-hk/
   web_shopping_bot_hk.py   # CLI entry
   requirements.txt
   .env.example
+  task.example.csv         # copy to task.csv (login/password accounts)
+  proxy.example.csv        # copy to proxy.csv (proxy pool)
   logs/                    # created at runtime
   launcher/main.go         # launcher source
   pbandai_hk/
     api.py                 # HK API client
     bot.py                 # scan / match / optional cart loop
     config.py
+    csv_tasks.py           # task.csv / proxy.csv loaders
+    task_runner.py         # parallel CSV logins
     links.py               # parse direct product URLs/codes
     logging_utils.py       # file/console error logging
     notify.py

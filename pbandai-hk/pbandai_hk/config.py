@@ -40,6 +40,10 @@ class Config:
     proxy_url: str = ""
     sessions_file: str = "sessions.json"
     cart_mode: str = "first"  # first | all | round_robin
+    task_csv: str = "task.csv"
+    proxy_csv: str = "proxy.csv"
+    proxy_assign_mode: str = "random"  # random | unique
+    task_parallel_workers: int = 0  # 0 = one worker per task
     schedule_mode: bool = False
     execute_times: List[str] = field(default_factory=list)
     schedule_polling_period: int = 60
@@ -83,6 +87,10 @@ class Config:
             proxy_url=(os.getenv("PROXY_URL") or "").strip(),
             sessions_file=os.getenv("SESSIONS_FILE") or "sessions.json",
             cart_mode=(os.getenv("CART_MODE") or "first").strip().lower(),
+            task_csv=os.getenv("TASK_CSV") or "task.csv",
+            proxy_csv=os.getenv("PROXY_CSV") or "proxy.csv",
+            proxy_assign_mode=(os.getenv("PROXY_ASSIGN_MODE") or "random").strip().lower(),
+            task_parallel_workers=int(os.getenv("TASK_PARALLEL_WORKERS") or "0"),
             schedule_mode=_as_bool(os.getenv("SCHEDULE_MODE"), False),
             execute_times=_split_csv(os.getenv("EXECUTE_TIME")),
             schedule_polling_period=int(os.getenv("EXECUTE_SCHEDULE_POLLING_PERIOD") or "60"),
@@ -111,3 +119,7 @@ class Config:
             )
         if self.cart_mode not in {"first", "all", "round_robin"}:
             raise ValueError("CART_MODE must be one of: first, all, round_robin")
+        if self.proxy_assign_mode not in {"random", "unique", "unique_random", "shuffle"}:
+            raise ValueError(
+                "PROXY_ASSIGN_MODE must be one of: random, unique, unique_random, shuffle"
+            )

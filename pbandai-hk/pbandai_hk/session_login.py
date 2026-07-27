@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -24,8 +25,15 @@ def login_and_transfer_cookies(
     proxy: str | None = None,
     save_cookie_file: str | Path | None = None,
     force_browser: bool = False,
+    login: str = "",
+    password: str = "",
+    wait_seconds: int = 45,
 ) -> List[Dict[str, Any]]:
-    """Open a browser for manual login, then copy cookies into the API session."""
+    """Open a browser for login, then copy cookies into the API session.
+
+    If login+password are provided, fills the HK login form automatically.
+    Otherwise waits for manual login (Enter in the console).
+    """
     cookie_file = (
         save_cookie_file
         or getattr(config, "cookie_file", "")
@@ -41,8 +49,13 @@ def login_and_transfer_cookies(
         apply_cookies_to_client(client, cookies)
         client.refresh_csrf()
         summary = client.cart_summary()
-        print(f"Session loaded from cookie file. cart summary={summary}")
-        logger.info("loaded cookies from %s summary=%s", cookie_file, summary)
+        print(f"[{client.name}] Session loaded from cookie file. cart summary={summary}")
+        logger.info(
+            "loaded cookies session=%s file=%s summary=%s",
+            client.name,
+            cookie_file,
+            summary,
+        )
         return cookies
 
     effective_proxy = (
@@ -53,36 +66,150 @@ def login_and_transfer_cookies(
     driver = _create_webdriver(config, proxy=effective_proxy)
     try:
         driver.get(config.login_url)
-        print()
-        print("=================================================")
-        print(" Browser login is ready (ignore Chrome ERROR spam)")
-        if effective_proxy:
-            print(f" Proxy: {redact_proxy(effective_proxy)}")
-        print("=================================================")
-        print("1) In the Chrome/Edge window, log in to P-Bandai HK")
-        print("2) Confirm you are logged in (account/cart icon visible)")
-        print("3) Come back to THIS black console window")
-        print("4) Press Enter here to continue")
-        print("=================================================")
-        print()
-        input(">>> Press Enter after login is complete... ")
+        if login and password:
+            print(
+                f"[{client.name}] Auto-login via form "
+                f"(proxy={redact_proxy(effective_proxy) or '-'})"
+            )
+            _autofill_login(driver, login=login, password=password, timeout=wait_seconds)
+            _wait_for_session_cookie(driver, timeout=wait_seconds)
+        else:
+            print()
+            print("=================================================")
+            print(f" Browser login ready for session: {client.name}")
+            print(" (ignore Chrome ERROR spam)")
+            if effective_proxy:
+                print(f" Proxy: {redact_proxy(effective_proxy)}")
+            print("=================================================")
+            print("1) In the Chrome/Edge window, log in to P-Bandai HK")
+            print("2) Confirm you are logged in (account/cart icon visible)")
+            print("3) Come back to THIS black console window")
+            print("4) Press Enter here to continue")
+            print("=================================================")
+            print()
+            input(f">>> [{client.name}] Press Enter after login is complete... ")
+
         cookies = _driver_cookies(driver)
         _apply_driver_cookies(client, cookies)
         client.refresh_csrf()
         summary = client.cart_summary()
-        print(f"Session transferred ({len(cookies)} cookies). cart summary={summary}")
-        logger.info("transferred %s cookies summary=%s", len(cookies), summary)
+        print(
+            f"[{client.name}] Session transferred ({len(cookies)} cookies). "
+            f"cart summary={summary}"
+        )
+        logger.info(
+            "transferred cookies session=%s count=%s summary=%s",
+            client.name,
+            len(cookies),
+            summary,
+        )
         if save_cookie_file:
             path = Path(str(save_cookie_file))
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(cookies, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            print(f"Saved cookies -> {path}")
+            path.write_text(
+                json.dumps(cookies, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            print(f"[{client.name}] Saved cookies -> {path}")
         return cookies
     finally:
         try:
             driver.quit()
         except Exception as exc:  # noqa: BLE001
             log_exception(logger, "driver.quit failed", exc)
+
+
+def _autofill_login(driver: Any, *, login: str, password: str, timeout: int = 45) -> None:
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.keys import Keys
+    from selenium.webdriver.support.ui import WebDriverWait
+
+    wait = WebDriverWait(driver, timeout)
+    email_selectors = [
+        "input#loginId",
+        "input[name='mail']",
+        "input[name='memberId']",
+        "input[name='email']",
+        "input[type='email']",
+        "input[autocomplete='username']",
+    ]
+    password_selectors = [
+        "input#password",
+        "input[name='password']",
+        "input[type='password']",
+        "input[autocomplete='current-password']",
+    ]
+    submit_selectors = [
+        "button[type='submit']",
+        "input[type='submit']",
+        "button.login",
+        "button[class*='login']",
+        "form button",
+    ]
+
+    email_el = _wait_first(wait, By.CSS_SELECTOR, email_selectors)
+    pass_el = _wait_first(wait, By.CSS_SELECTOR, password_selectors)
+    email_el.clear()
+    email_el.send_keys(login)
+    pass_el.clear()
+    pass_el.send_keys(password)
+
+    submitted = False
+    for selector in submit_selectors:
+        try:
+            btn = driver.find_element(By.CSS_SELECTOR, selector)
+            if btn.is_displayed() and btn.is_enabled():
+                btn.click()
+                submitted = True
+                break
+        except Exception:  # noqa: BLE001
+            continue
+    if not submitted:
+        pass_el.send_keys(Keys.ENTER)
+
+    # Give the SPA a moment to process the login POST.
+    time.sleep(1.5)
+
+
+def _wait_first(wait: Any, by: Any, selectors: List[str]) -> Any:
+    last_exc: Optional[Exception] = None
+    for selector in selectors:
+        try:
+            return wait.until(lambda d, s=selector: d.find_element(by, s))
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            continue
+    raise RuntimeError(
+        "Could not find login form fields on the page. "
+        "Try manual login or check LOGIN_URL."
+    ) from last_exc
+
+
+def _wait_for_session_cookie(driver: Any, timeout: int = 45) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            names = {c.get("name", "").upper() for c in driver.get_cookies()}
+            if "SESSION" in names:
+                return
+        except Exception:  # noqa: BLE001
+            pass
+        # Also treat leaving /login as success for SPA redirects.
+        try:
+            current = (driver.current_url or "").lower()
+            if "/login" not in current and "p-bandai.com" in current:
+                # Wait a bit more for cookies to settle
+                time.sleep(1.0)
+                names = {c.get("name", "").upper() for c in driver.get_cookies()}
+                if "SESSION" in names or len(driver.get_cookies()) >= 3:
+                    return
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.5)
+    raise RuntimeError(
+        "Login did not produce a SESSION cookie in time. "
+        "Check credentials / proxy / captcha, then retry."
+    )
 
 
 def _driver_cookies(driver: Any) -> List[Dict[str, Any]]:

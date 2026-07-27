@@ -61,6 +61,7 @@ What do you want to do?
   [5] Re-run setup (deps)
   [6] List sessions
   [7] Login / create session (multi + proxy)
+  [8] Login all task.csv (parallel + random proxies)
   [Q] Quit
 """
         )
@@ -88,6 +89,12 @@ What do you want to do?
             args = ["login", "--name", name, "--force"]
             if proxy:
                 args.extend(["--proxy", proxy])
+            run_bot(vp, *args)
+        elif choice == "8":
+            force = input("Force re-login even if cookies exist? [y/N]: ").strip().lower()
+            args = ["tasks"]
+            if force in {"y", "yes", "1"}:
+                args.append("--force")
             run_bot(vp, *args)
         elif choice in {"q", "quit", "exit"}:
             return 0
