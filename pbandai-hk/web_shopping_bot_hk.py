@@ -30,8 +30,35 @@ def cmd_once(config: Config) -> int:
     bot = PBandaiHkBot(config)
     try:
         bot.prepare()
+        if bot.click_farm is not None:
+            successes = bot.click_farm.run()
+            print(
+                json.dumps(
+                    {
+                        "mode": "click_farm",
+                        "successes": len(successes),
+                        "items": [
+                            {
+                                "instance": s.name,
+                                "payment_url": s.payment_url,
+                                "clicks": s.clicks,
+                            }
+                            for s in successes
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0 if successes else 1
         report = bot.run_once()
     finally:
+        if bot.click_farm is not None:
+            try:
+                bot.click_farm.close()
+            except Exception:  # noqa: BLE001
+                pass
+            bot.click_farm = None
         if bot.warm_pool is not None:
             try:
                 bot.warm_pool.close()
@@ -174,82 +201,19 @@ def cmd_sessions(config: Config) -> int:
 
 
 def cmd_login(config: Config, name: str, proxy: str, force: bool) -> int:
-    from pbandai_hk.api import PBandaiHkClient
-    from pbandai_hk.session_login import login_and_transfer_cookies
-    from pbandai_hk.sessions import SessionSpec, upsert_session_spec
-
-    setup_logging(config.log_file, level=config.log_level)
-    logger = get_logger("cli")
-    proxy = (proxy or config.proxy_url or "").strip()
-    cookie_file = f"sessions/{name}.cookies.json"
-    client = PBandaiHkClient(
-        base_url=config.base_url,
-        area_code=config.area_code,
-        accept_language=config.accept_language,
-        proxy=proxy,
-        name=name,
-    )
-    try:
-        client.bootstrap()
-        login_and_transfer_cookies(
-            config,
-            client,
-            proxy=proxy,
-            save_cookie_file=cookie_file,
-            force_browser=force or True,
-        )
-        upsert_session_spec(
-            config.sessions_file,
-            SessionSpec(
-                name=name,
-                enabled=True,
-                proxy=proxy,
-                cookie_file=cookie_file,
-            ),
-        )
-        print(f"Saved session '{name}' -> {config.sessions_file}")
-        print(f"Cookies -> {cookie_file}")
-        return 0
-    except Exception as exc:  # noqa: BLE001
-        log_exception(logger, f"login failed for session={name}", exc)
-        return 1
+    print("Login removed — use guest click farm instead.")
+    print("Set in .env: ENABLE_ADD_TO_CART=1 CLICK_FARM=1 BROWSER_INSTANCES=20")
+    print("             CLICK_INTERVAL_SECONDS=5 DISCORD_WEBHOOK_URL=<webhook>")
+    print("Then: python web_shopping_bot_hk.py loop")
+    _ = (config, name, proxy, force)
+    return 2
 
 
 def cmd_tasks(config: Config, force: bool) -> int:
-    """Login all rows from task.csv in parallel; each picks a random proxy.csv entry."""
-    from pbandai_hk.task_runner import ensure_csv_templates, run_tasks_parallel
-
-    setup_logging(config.log_file, level=config.log_level)
-    logger = get_logger("cli")
-    ready, messages = ensure_csv_templates(config)
-    for msg in messages:
-        print(msg)
-    if not ready:
-        return 1
-    try:
-        results = run_tasks_parallel(config, force=force)
-    except Exception as exc:  # noqa: BLE001
-        log_exception(logger, "tasks command failed", exc)
-        print(f"ERROR: {exc}", file=sys.stderr)
-        print(
-            "\nHint: proxy.csv accepts lines like:\n"
-            "  host:port:user:pass\n"
-            "  http://user:pass@host:port\n"
-            "  socks5://host:1080\n",
-            file=sys.stderr,
-        )
-        return 1
-
-    print(f"Sessions file: {config.sessions_file}")
-    ok = sum(1 for r in results if r.ok)
-    for result in sorted(results, key=lambda r: r.name):
-        status = "ok" if result.ok else f"fail: {result.error}"
-        print(
-            f"- {result.name} {status} "
-            f"proxy={redact_proxy(result.proxy) or '-'} "
-            f"cookie={result.cookie_file or '-'}"
-        )
-    return 0 if ok == len(results) and results else 1
+    print("Login / task.csv removed — use guest click farm instead.")
+    print("Set CLICK_FARM=1 and optional proxy.csv, then run: loop")
+    _ = (config, force)
+    return 2
 
 
 def cmd_diagnose(config: Config, link_or_code: str) -> int:
@@ -339,7 +303,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("sessions", help="List configured multi-sessions")
     login_p = sub.add_parser(
         "login",
-        help="Interactive browser login for one named session (optional proxy)",
+        help="Removed — use CLICK_FARM=1 guest click farm (no login)",
     )
     login_p.add_argument("--name", required=True, help="Session name, e.g. acc1")
     login_p.add_argument(
@@ -354,7 +318,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     tasks_p = sub.add_parser(
         "tasks",
-        help="Login all task.csv accounts in parallel; each picks a random proxy.csv row",
+        help="Removed — use CLICK_FARM=1 guest click farm (no task.csv login)",
     )
     tasks_p.add_argument(
         "--force",

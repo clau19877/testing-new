@@ -2,5 +2,5 @@
 
 # Printed at startup — if you still see JSONDecodeError on bootstrap()/resp.json(),
 # you are running an OLD folder. Redownload the zip and replace pbandai_hk/.
-__version__ = "0.2.8"
-BUILD_ID = "click-first-20260727"
+__version__ = "0.3.0"
+BUILD_ID = "click-farm-discord-20260728"

@@ -52,6 +52,7 @@ class PBandaiHkBot:
         self.seen_codes: Set[str] = set()
         self._rr_index = 0
         self.warm_pool = None  # WarmBrowserPool | None
+        self.click_farm = None  # ClickFarm | None
         self._next_sleep_hint: Optional[float] = None
 
     def prepare(self) -> None:
@@ -61,17 +62,40 @@ class PBandaiHkBot:
 
         logger.info(
             "prepare start version=%s build=%s area=%s direct=%s search=%s cart=%s "
-            "sessions_file=%s proxy=%s",
+            "click_farm=%s instances=%s interval=%s discord=%s",
             __version__,
             BUILD_ID,
             self.config.area_code,
             self.config.product_codes,
             self.config.search_keywords,
             self.config.enable_add_to_cart,
-            self.config.sessions_file,
-            redact_proxy(self.config.proxy_url) or "-",
+            self.config.click_farm,
+            self.config.browser_instances,
+            self.config.click_interval_seconds,
+            "yes" if self.config.discord_webhook_url else "no",
         )
         print(f"P-Bandai HK bot version={__version__} build={BUILD_ID}")
+
+        # Guest click farm: no login / no task.csv accounts.
+        if self.config.enable_add_to_cart and self.config.click_farm:
+            codes = list(self.config.product_codes)
+            if not codes:
+                raise ValueError(
+                    "CLICK_FARM=1 requires PRODUCT_LINKS or PRODUCT_CODES "
+                    "(browsers park on the product page)"
+                )
+            from .click_farm import ClickFarm
+
+            self.click_farm = ClickFarm(config=self.config, product_code=codes[0])
+            ready = self.click_farm.prepare()
+            if ready <= 0:
+                raise RuntimeError("click farm: no browsers ready")
+            print(
+                f"Click farm ready={ready}/{self.config.browser_instances} "
+                f"| interval={self.config.click_interval_seconds}s "
+                f"| discord={'on' if self.config.discord_webhook_url else 'OFF'}"
+            )
+            return
 
         # CSV tasks: N rows => N parallel sessions, each with a random proxy.
         from .task_runner import ensure_tasks_ready, task_csv_exists
@@ -87,7 +111,7 @@ class PBandaiHkBot:
                     raise RuntimeError(
                         f"CSV task login failed for: {names}. "
                         "Often caused by proxy WAF on /api/context/member. "
-                        "Try menu [8] force re-login, switch proxies, or set ENABLE_ADD_TO_CART=0."
+                        "Or set CLICK_FARM=1 for guest click mode (no login)."
                     )
                 logger.warning(
                     "CSV login partial failure; continuing with %s ok, failed=%s",
@@ -142,6 +166,7 @@ class PBandaiHkBot:
                 print(f"WARNING: {msg}")
 
         if self.config.enable_add_to_cart:
+            # Legacy logged-in path only when click farm is off.
             self._ensure_logged_in_sessions()
             self._maybe_prepare_warm_pool()
 
@@ -806,6 +831,15 @@ class PBandaiHkBot:
     def run_forever(self) -> None:
         self.prepare()
         try:
+            if self.click_farm is not None:
+                logger.info("[farm] starting click loop")
+                successes = self.click_farm.run()
+                print(
+                    f"[farm] finished successes={len(successes)} "
+                    f"links={[s.payment_url for s in successes]}"
+                )
+                return
+
             if self.config.schedule_mode:
                 if not self.config.execute_times:
                     raise ValueError("SCHEDULE_MODE=1 requires EXECUTE_TIME")
@@ -848,6 +882,12 @@ class PBandaiHkBot:
                     logger.info("[loop] sleep %.1fs", sleep_for)
                     time.sleep(sleep_for)
         finally:
+            if self.click_farm is not None:
+                try:
+                    self.click_farm.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                self.click_farm = None
             if self.warm_pool is not None:
                 try:
                     self.warm_pool.close()

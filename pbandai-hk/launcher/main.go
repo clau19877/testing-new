@@ -76,15 +76,13 @@ func menu(venvPy string) int {
 	for {
 		fmt.Println()
 		fmt.Println("What do you want to do?")
-		fmt.Println("  [1] Start monitor loop (recommended)")
-		fmt.Println("  [2] Run one scan")
+		fmt.Println("  [1] Start click farm / monitor loop (recommended)")
+		fmt.Println("  [2] Run one pass")
 		fmt.Println("  [3] Check a direct product link")
 		fmt.Println("  [4] Open .env for editing")
 		fmt.Println("  [0] Reset .env from latest .env.example (backup old)")
 		fmt.Println("  [5] Re-run setup (deps)")
-		fmt.Println("  [6] List sessions")
-		fmt.Println("  [7] Login / create session (multi + proxy)")
-		fmt.Println("  [8] Login all task.csv (parallel + random proxies)")
+		fmt.Println("  [6] List sessions (legacy)")
 		fmt.Println("  [9] Diagnose product cart eligibility (detailed log)")
 		fmt.Println("  [Q] Quit")
 		fmt.Print("> ")
@@ -131,52 +129,9 @@ func menu(venvPy string) int {
 			}
 		case "6":
 			_ = runBot(venvPy, "sessions")
-		case "7":
-			fmt.Print("Session name (e.g. acc1): ")
-			name, _ := in.ReadString('\n')
-			name = strings.TrimSpace(name)
-			if name == "" {
-				name = "acc1"
-			}
-			fmt.Print("Proxy URL (blank for none): ")
-			proxy, _ := in.ReadString('\n')
-			proxy = strings.TrimSpace(proxy)
-			args := []string{"login", "--name", name, "--force"}
-			if proxy != "" {
-				args = append(args, "--proxy", proxy)
-			}
-			_ = runBot(venvPy, args...)
-		case "8":
-			createdCSV := false
-			if copyCSVIfMissing("task.example.csv", "task.csv") {
-				fmt.Println("Created task.csv from task.example.csv.")
-				createdCSV = true
-			}
-			if copyCSVIfMissing("proxy.example.csv", "proxy.csv") {
-				fmt.Println("Created proxy.csv from proxy.example.csv.")
-				createdCSV = true
-			}
-			if createdCSV {
-				fmt.Println("Edit task.csv (login/password) and proxy.csv, then choose [8] again.")
-				fmt.Println("Proxy format: host:port:user:pass   OR   http://user:pass@host:port")
-				continue
-			}
-			if _, err := os.Stat("task.csv"); err != nil {
-				fmt.Println("Missing task.csv. Create it first.")
-				continue
-			}
-			if _, err := os.Stat("proxy.csv"); err != nil {
-				fmt.Println("Missing proxy.csv. Create it first.")
-				continue
-			}
-			fmt.Print("Force re-login even if cookies exist? [y/N]: ")
-			forceLine, _ := in.ReadString('\n')
-			forceAns := strings.TrimSpace(strings.ToLower(forceLine))
-			args := []string{"tasks"}
-			if forceAns == "y" || forceAns == "yes" || forceAns == "1" {
-				args = append(args, "--force")
-			}
-			_ = runBot(venvPy, args...)
+		case "7", "8":
+			fmt.Println("Login removed. Guest click farm needs no accounts.")
+			fmt.Println("Set CLICK_FARM=1, BROWSER_INSTANCES, DISCORD_WEBHOOK_URL in .env")
 		case "9":
 			fmt.Print("Paste product URL or code to diagnose: ")
 			link, _ := in.ReadString('\n')
@@ -386,15 +341,10 @@ func envKeySet(text string) map[string]struct{} {
 }
 
 func ensureCSVTemplates() error {
-	// Do not overwrite user task.csv / proxy.csv; only hint if missing.
-	if _, err := os.Stat("task.csv"); err != nil {
-		if _, err2 := os.Stat("task.example.csv"); err2 == nil {
-			fmt.Println("Tip: copy task.example.csv -> task.csv and fill login/password rows.")
-		}
-	}
+	// Do not overwrite user proxy.csv; only hint if missing.
 	if _, err := os.Stat("proxy.csv"); err != nil {
 		if _, err2 := os.Stat("proxy.example.csv"); err2 == nil {
-			fmt.Println("Tip: copy proxy.example.csv -> proxy.csv and fill proxy rows.")
+			fmt.Println("Tip: copy proxy.example.csv -> proxy.csv for click-farm proxies.")
 		}
 	}
 	return nil

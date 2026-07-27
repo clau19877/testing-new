@@ -6,16 +6,20 @@ JP and HK are different platforms. This module does **not** scrape JP DOM (`#cdu
 
 ## What it does
 
-- Watch **direct product links/codes** you already know
-- Optional keyword poll via `GET /api/search` with `X-G1-Area-Code: hk`
-- Filter sale status with `_f_productStatuses` (same facet encoding as the HK site UI)
-- Match product names (`en` / `zh-HK`) against keyword lists
-- File + console logging (`logs/pbandai_hk.log`), including error tracebacks
+- **Click farm (default):** open N guest Chrome windows, click **PLACE PRE-ORDER** every few seconds, post payment/cart link to Discord on success
+- Optional monitor-only mode (`ENABLE_ADD_TO_CART=0`) for stock watching
+- File + console logging (`logs/pbandai_hk.log`)
 - Optional email notify
-- Optional add-to-cart via `POST /api/cart/addToCart` after manual browser login
-- Immediate loop or scheduled runs (same idea as the JP bot)
+- Optional keyword poll via `GET /api/search` with `X-G1-Area-Code: hk`
 
-Default mode is **monitor + notify only** (`ENABLE_ADD_TO_CART=0`).
+**Login is not required.** Default cart path is guest click farm (`CLICK_FARM=1`).
+
+## Mode overview
+
+| Mode | When | What it does |
+|---|---|---|
+| Click farm (`CLICK_FARM=1`, `ENABLE_ADD_TO_CART=1`) | Drop / pre-order race | Opens N guest Chromes; each clicks PLACE PRE-ORDER every N seconds; Discord webhook gets payment/cart URL on success |
+| Monitor (`ENABLE_ADD_TO_CART=0`) | Watching stock only | Poll product page; print AVAILABLE / SOLD OUT / PREORDER / NOT OPEN |
 
 ## One-click setup & launch
 
@@ -50,95 +54,58 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# edit .env
+# edit .env — set DISCORD_WEBHOOK_URL
 ```
 
 ## Quick use
 
 ```bash
-# check one direct product URL/code
-python web_shopping_bot_hk.py check "https://p-bandai.com/hk/item/A2742450001"
+# continuous click farm / monitor from .env
+python web_shopping_bot_hk.py loop
 
-# one-shot scan (direct links and/or keyword lists from .env)
+# one pass
 python web_shopping_bot_hk.py once
 
-# ad-hoc API search
-python web_shopping_bot_hk.py search "HG"
-
-# continuous loop / schedule from .env
-python web_shopping_bot_hk.py loop
+# check one product URL/code
+python web_shopping_bot_hk.py check "https://p-bandai.com/hk/item/A2891018001"
 ```
 
-### Direct-link `.env` example
+### Click farm `.env` (recommended)
 
 ```env
-PRODUCT_LINKS=https://p-bandai.com/hk/item/A2742450001,https://p-bandai.com/hk/item/A2690472004
-SEARCH_KEYWORDS=
+ENABLE_ADD_TO_CART=1
+CLICK_FARM=1
+BROWSER_INSTANCES=20
+CLICK_INTERVAL_SECONDS=5
+STOP_ON_FIRST_CART=1
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
+PRODUCT_LINKS=https://p-bandai.com/hk/item/A2891018001
+BACKGROUND_MODE=0
+```
+
+Each instance clicks PLACE PRE-ORDER every 5s. On cart success the bot opens cart/checkout and posts the payment (or cart) URL to Discord.
+
+### Monitor-only `.env` example
+
+```env
+PRODUCT_LINKS=https://p-bandai.com/hk/item/A2742450001
 SALE_STATUSES=On,Waiting
 ENABLE_ADD_TO_CART=0
 LOG_FILE=logs/pbandai_hk.log
 RETRY_WAIT=60
 ```
 
-Then:
-
-```bash
-python web_shopping_bot_hk.py once
-# or keep watching
-python web_shopping_bot_hk.py loop
-```
-
 Errors/tracebacks are appended to `logs/pbandai_hk.log`.
 
-## Multi-sessions + proxy
+## Proxies (optional)
 
-### Single proxy (simple)
 ```env
 PROXY_URL=http://user:pass@1.2.3.4:8080
-# or socks5://1.2.3.4:1080
+# or fill proxy.csv — instances round-robin the pool
+PROXY_CSV=proxy.csv
 ```
 
-### CSV parallel tasks (recommended for many accounts)
-1. Copy examples and fill real values:
-```bash
-cp task.example.csv task.csv
-cp proxy.example.csv proxy.csv
-```
-2. `task.csv` columns: `name,login,password`  
-   `proxy.csv` column: `proxy` — one per line. Accepted formats:
-   - `host:port:user:pass` (common provider format)
-   - `http://user:pass@host:port`
-   - `socks5://host:1080`
-   - or columns `host,port,username,password`
-3. Parallel count = number of rows in `task.csv`. Each task picks one proxy at random.
-```bash
-python web_shopping_bot_hk.py tasks
-# or start once/loop — if task.csv exists it auto-logins all tasks first
-python web_shopping_bot_hk.py loop
-```
-4. Tip: set `BACKGROUND_MODE=1` for headless parallel browsers.
-
-### Multi account sessions (manual)
-1. Create/login sessions (one browser login each):
-```bash
-python web_shopping_bot_hk.py login --name acc1 --proxy http://user:pass@1.2.3.4:8080
-python web_shopping_bot_hk.py login --name acc2 --proxy socks5://5.6.7.8:1080
-python web_shopping_bot_hk.py sessions
-```
-2. This writes `sessions.json` + `sessions/*.cookies.json`
-3. Set cart fan-out mode:
-```env
-SESSIONS_FILE=sessions.json
-CART_MODE=first          # stop after first success
-# CART_MODE=all          # try every session
-# CART_MODE=round_robin  # rotate starting session
-ENABLE_ADD_TO_CART=1
-```
-
-Launcher menu also has:
-- `[6] List sessions`
-- `[7] Login / create session (multi + proxy)`
-- `[8] Login all task.csv (parallel + random proxies)`
+Accepted proxy formats: `host:port:user:pass`, `http://user:pass@host:port`, `socks5://host:1080`.
 
 ## Important `.env` knobs
 
@@ -146,83 +113,43 @@ Launcher menu also has:
 |---|---|
 | `PRODUCT_LINKS` | Direct HK item URLs (comma-separated) |
 | `PRODUCT_CODES` | Bare product codes (comma-separated) |
+| `ENABLE_ADD_TO_CART` | `0` monitor only, `1` cart / click farm |
+| `CLICK_FARM` | `1` = guest N-browser click loop (default) |
+| `BROWSER_INSTANCES` | How many Chromes to open (e.g. `20`) |
+| `CLICK_INTERVAL_SECONDS` | Seconds between PLACE PRE-ORDER clicks |
+| `STOP_ON_FIRST_CART` | `1` = stop all instances after first cart success |
+| `DISCORD_WEBHOOK_URL` | Discord webhook; receives payment/cart link |
+| `BACKGROUND_MODE` | `0` headed (recommended), `1` headless |
+| `PROXY_URL` / `PROXY_CSV` | Optional proxies |
 | `SEARCH_KEYWORDS` | Optional keywords for `/api/search` |
-| `PRECHECK_LIST` | Coarse name filter (search mode) |
-| `TARGET_LIST` | Finer name filter (defaults to `PRECHECK_LIST` if empty) |
 | `SALE_STATUSES` | Usually `On,Waiting` |
-| `ENABLE_ADD_TO_CART` | `0` monitor only, `1` cart mode |
-| `SCHEDULE_MODE` | `0` immediate loop, `1` clock schedule |
-| `LOG_FILE` / `LOG_LEVEL` | Error/info logging path and level |
-| `PROXY_URL` | Single/fallback proxy |
-| `SESSIONS_FILE` | Multi-session config (`sessions.json`) |
-| `CART_MODE` | `first` / `all` / `round_robin` |
-| `CART_METHOD` | `auto` / `api` / `browser` / `warm` |
-| `PREWARM_BROWSERS` | `1` = park Chrome on PDP before drop (use with `auto`/`warm`) |
-| `TASK_CSV` | Accounts file (`name,login,password`) |
-| `PROXY_CSV` | Proxy pool; each task picks one at random |
-| `PROXY_ASSIGN_MODE` | `random` or `unique` |
-| `TASK_PARALLEL_WORKERS` | `0` = one worker per task |
+| `LOG_FILE` / `LOG_LEVEL` | Logging path and level |
 | `EMAIL_USER` | Leave empty to skip email |
 
-## Drop / site-crash strategy (warm browsers)
-
-During drops the product **HTML** often 502/503 while `/api/products` and cart still work. Cold-opening Chrome at T-0 usually fails.
+## Drop notes (click farm)
 
 ### Target example: `A2891018001` (GUNDAM CARD GAME 1ST ANNIVERSARY SET)
-API snapshot before open:
-- `preOrderStatus=NotStarted` until `orderStartDate=2026-07-27T08:00:00Z`
-- `availabilityStatus=Waiting`, `purchaseAvailable=false` (soft)
-- `availableQty=2`, `maxQuantity=2` / max per user 2
-- `areaItemNo=AAI0014136HK`
-- Bot now **waits** until order opens (does not cart while `NotStarted`)
-
-Recommended `.env` for this drop:
-
-```env
-ENABLE_ADD_TO_CART=1
-PRODUCT_LINKS=https://p-bandai.com/hk/item/A2891018001
-CART_METHOD=warm
-PREWARM_BROWSERS=1
-BACKGROUND_MODE=0
-CART_MODE=all
-CART_PARALLEL=1
-CART_QTY=1
-REQUIRE_CART_INCREASE=1
-DROP_LEAD_SECONDS=30
-RETRY_WAIT=60
-SALE_STATUSES=On,Waiting
-```
+- Tiny stock; site sits behind F5 / Shape — **click the real button** in headed Chrome
+- Guest carts: no login. Set Discord webhook before the drop
+- Start early so all windows are parked on the PDP
 
 Flow:
-1. Login all sessions (task.csv / menu `[8]`) **before** the drop
-2. Start `loop` early — browsers park on PDP (or HK home if PDP is down)
-3. Console should print `logged in OK` per warm window. If you still see **Sign In** in the header, re-login that account (cookies did not stick). Cart auth follows SESSION cookies + `/api/context/member`, not the header alone.
-4. Bot waits on `orderStartDate` (sleeps until ~T-30s, then fast-polls). After the start time, it will cart even if `preOrderStatus` still says `NotStarted` for a few seconds (API lag).
-5. When open, cart fires via **in-page `fetch('/api/cart/addToCart')`** (no HTML reload)
-6. Success requires cart count increase (`REQUIRE_CART_INCREASE=1`) — no false “clicked / verify on site” exits
+1. Put webhook URL in `.env`
+2. Optional: fill `proxy.csv`
+3. Start menu `[1]` / `loop` — farm opens browsers and clicks every 5s
+4. On success: Discord gets payment/cart link; with `STOP_ON_FIRST_CART=1` other instances stop
 
-Do **not** use cold `CART_METHOD=browser` alone for drops — that relaunches Chrome and reloads HTML under load.
+Launcher menu:
+- `[1]` Start click farm / monitor loop
+- `[4]` Edit `.env`
+- Login menu items removed (guest mode)
 
-## Cart mode notes
-
-When `ENABLE_ADD_TO_CART=1`:
-
-1. Chrome/Edge opens `LOGIN_URL`
-2. You log in manually
-3. Cookies + CSRF are copied into the API client
-4. Matching purchasable items are posted to `/api/cart/addToCart` as:
-
-```json
-[{ "areaItemNo": "AAI........HK", "qty": 1 }]
-```
-
-If Windows shows `WinError 193` during login:
+If Windows shows `WinError 193` starting Chrome:
 - Install/update **Google Chrome** or **Microsoft Edge**
-- Delete the broken driver cache folder: `%USERPROFILE%\.wdm`
+- Delete broken driver cache: `%USERPROFILE%\.wdm`
 - Set `BROWSER=edge` in `.env` and retry
-- Or export cookies to a file and set `COOKIE_FILE=...` to skip Selenium
 
-Cart/checkout still follows P-Bandai / Global-e site rules. Use only with your own account and for personal purchasing.
+Cart/checkout still follows P-Bandai / Global-e site rules.
 
 ## Why a new module was required
 
@@ -238,7 +165,7 @@ Cart/checkout still follows P-Bandai / Global-e site rules. Use only with your o
 ```
 pbandai-hk/
   SetupAndLaunch.bat       # Windows one-click menu
-  OneClickMonitor.bat      # Windows one-click monitor loop
+  OneClickMonitor.bat      # Windows one-click loop
   setup_and_launch.sh      # macOS/Linux one-click
   launch.py                # Python launcher fallback
   build_launcher.sh        # rebuild dist/PBandaiHK(.exe)
@@ -247,21 +174,14 @@ pbandai-hk/
   web_shopping_bot_hk.py   # CLI entry
   requirements.txt
   .env.example
-  task.example.csv         # copy to task.csv (login/password accounts)
   proxy.example.csv        # copy to proxy.csv (proxy pool)
   logs/                    # created at runtime
   launcher/main.go         # launcher source
   pbandai_hk/
-    api.py                 # HK API client
-    bot.py                 # scan / match / optional cart loop
+    click_farm.py          # guest N-browser PLACE PRE-ORDER farm + Discord
+    bot.py                 # scan / match / click farm loop
     config.py
-    csv_tasks.py           # task.csv / proxy.csv loaders
-    task_runner.py         # parallel CSV logins
-    links.py               # parse direct product URLs/codes
-    logging_utils.py       # file/console error logging
-    notify.py
-    session_login.py       # Selenium cookie transfer
-    browser_cart.py        # cold browser add-to-cart
-    warm_cart.py           # pre-warmed browsers for drops
-    diagnostics.py         # cart eligibility diagnose
+    browser_cart.py        # button click helpers
+    diagnostics.py
+    ...
 ```

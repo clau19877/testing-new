@@ -115,16 +115,14 @@ def menu(vp: Path) -> int:
         print(
             """
 What do you want to do?
-  [1] Start monitor loop (recommended)
-  [2] Run one scan
+  [1] Start click farm / monitor loop (recommended)
+  [2] Run one pass
   [3] Check a direct product link
   [4] Open .env for editing
   [0] Reset .env from latest .env.example (backup old)
   [5] Re-run setup (deps)
-  [6] List sessions
-  [7] Login / create session (multi + proxy)
-  [8] Login all task.csv (parallel + random proxies)
-  [9] Diagnose product cart eligibility (detailed log)
+  [6] List sessions (legacy)
+  [9] Diagnose product cart eligibility
   [Q] Quit
 """
         )
@@ -150,37 +148,9 @@ What do you want to do?
             print("Dependencies reinstalled.")
         elif choice == "6":
             run_bot(vp, "sessions")
-        elif choice == "7":
-            name = input("Session name (e.g. acc1): ").strip() or "acc1"
-            proxy = input("Proxy URL (blank for none): ").strip()
-            args = ["login", "--name", name, "--force"]
-            if proxy:
-                args.extend(["--proxy", proxy])
-            run_bot(vp, *args)
-        elif choice == "8":
-            created_csv = False
-            for src_name, dst_name in (
-                ("task.example.csv", "task.csv"),
-                ("proxy.example.csv", "proxy.csv"),
-            ):
-                src = ROOT / src_name
-                dst = ROOT / dst_name
-                if src.exists() and not dst.exists():
-                    shutil.copyfile(src, dst)
-                    print(f"Created {dst_name} from {src_name}.")
-                    created_csv = True
-            if created_csv:
-                print("Edit task.csv (login/password) and proxy.csv, then choose [8] again.")
-                print("Proxy format: host:port:user:pass   OR   http://user:pass@host:port")
-                continue
-            if not (ROOT / "task.csv").exists() or not (ROOT / "proxy.csv").exists():
-                print("Missing task.csv and/or proxy.csv. Create them first.")
-                continue
-            force = input("Force re-login even if cookies exist? [y/N]: ").strip().lower()
-            args = ["tasks"]
-            if force in {"y", "yes", "1"}:
-                args.append("--force")
-            run_bot(vp, *args)
+        elif choice in {"7", "8"}:
+            print("Login removed. Guest click farm needs no accounts.")
+            print("Set CLICK_FARM=1, BROWSER_INSTANCES, DISCORD_WEBHOOK_URL in .env")
         elif choice == "9":
             link = input("Paste product URL or code to diagnose: ").strip()
             if not link:
@@ -191,7 +161,7 @@ What do you want to do?
         elif choice in {"q", "quit", "exit"}:
             return 0
         else:
-            print("Unknown option.")
+            print("Unknown choice.")
 
 
 def open_env() -> None:
