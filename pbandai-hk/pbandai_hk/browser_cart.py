@@ -83,10 +83,25 @@ def browser_add_to_cart(
             (driver.title or "")[:120],
             redact_proxy(effective_proxy) or "-",
         )
-        if "page not available" in (driver.title or "").lower():
-            return False, "browser got PAGE NOT AVAILABLE for product page"
-
-        if not _click_add_to_cart(driver, timeout=45):
+        pdp_down = "page not available" in (driver.title or "").lower()
+        if pdp_down:
+            logger.warning(
+                "browser PDP unavailable session=%s; trying in-page fetch from HK home",
+                client.name,
+            )
+            driver.get(f"{config.base_url}/{config.area_code}/")
+            time.sleep(1.2)
+            if not area_item_no:
+                return False, "browser got PAGE NOT AVAILABLE and no areaItemNo"
+            ok, note = _page_fetch_add_to_cart(
+                driver,
+                area_item_no=area_item_no,
+                qty=qty,
+                csrf=client.csrf_token or "",
+            )
+            if not ok:
+                return False, f"PDP down + {note}"
+        elif not _click_add_to_cart(driver, timeout=45):
             ok, note = _page_fetch_add_to_cart(
                 driver,
                 area_item_no=area_item_no,
@@ -118,13 +133,14 @@ def browser_add_to_cart(
             return True, f"browser-added cart {before}->{after}"
         if after is not None and after > 0 and (before or 0) == 0:
             return True, f"browser-added cart_count={after}"
+        if after is not None and before is not None and after <= before:
+            return False, f"browser click/fetch but cart unchanged {before}->{after}"
         if _page_has_error(driver):
             return False, "browser add-to-cart showed an error on page"
         # Detect login wall.
         try:
             if "sign in" in (driver.page_source or "").lower() and after == before:
-                # Still may have clicked; report inconclusive.
-                pass
+                return False, "browser still on sign-in / cart unchanged"
         except Exception:  # noqa: BLE001
             pass
         return True, "browser pre-order/cart clicked (verify cart on site)"

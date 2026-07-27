@@ -163,26 +163,41 @@ Launcher menu also has:
 
 During drops the product **HTML** often 502/503 while `/api/products` and cart still work. Cold-opening Chrome at T-0 usually fails.
 
-Recommended `.env` for drops:
+### Target example: `A2891018001` (GUNDAM CARD GAME 1ST ANNIVERSARY SET)
+API snapshot before open:
+- `preOrderStatus=NotStarted` until `orderStartDate=2026-07-27T08:00:00Z`
+- `availabilityStatus=Waiting`, `purchaseAvailable=false` (soft)
+- `availableQty=2`, `maxQuantity=2` / max per user 2
+- `areaItemNo=AAI0014136HK`
+- Bot now **waits** until order opens (does not cart while `NotStarted`)
+
+Recommended `.env` for this drop:
 
 ```env
 ENABLE_ADD_TO_CART=1
-PRODUCT_LINKS=https://p-bandai.com/hk/item/YOUR_CODE
+PRODUCT_LINKS=https://p-bandai.com/hk/item/A2891018001
 CART_METHOD=warm
-# or: CART_METHOD=auto + PREWARM_BROWSERS=1
 PREWARM_BROWSERS=1
 BACKGROUND_MODE=0
-RETRY_WAIT=2
+CART_MODE=all
+CART_PARALLEL=1
+CART_QTY=1
+REQUIRE_CART_INCREASE=1
+DROP_LEAD_SECONDS=30
+RETRY_WAIT=60
+SALE_STATUSES=On,Waiting
 ```
 
 Flow:
 1. Login all sessions (task.csv / menu `[8]`) **before** the drop
-2. Start `loop` — browsers open and **park on the product page**
-3. Bot polls eligibility via JSON APIs (not HTML)
-4. When eligible, cart fires via **in-page `fetch('/api/cart/addToCart')`** inside the already-open tab (F5/WAF tokens stay valid; no page reload)
-5. If fetch fails, clicks PLACE PRE-ORDER / ADD TO CART on the open page
+2. Start `loop` early — browsers park on PDP (or HK home if PDP is down)
+3. Bot waits on `preOrderStatus` / `orderStartDate` (sleeps until ~T-30s, then fast-polls)
+4. When open, cart fires via **in-page `fetch('/api/cart/addToCart')`** (no HTML reload)
+5. Success requires cart count increase (`REQUIRE_CART_INCREASE=1`) — no false “clicked / verify on site” exits
 
 Do **not** use cold `CART_METHOD=browser` alone for drops — that relaunches Chrome and reloads HTML under load.
+
+## Cart mode notes
 
 When `ENABLE_ADD_TO_CART=1`:
 

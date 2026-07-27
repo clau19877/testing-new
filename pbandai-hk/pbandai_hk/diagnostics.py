@@ -159,8 +159,40 @@ def _evaluate_eligibility(signals: CartSignals) -> None:
     elif signals.max_qty:
         reasons.append(f"maxQuantity={signals.max_qty}")
 
-    # Important: website can still allow cart when top-level purchaseAvailable=false.
-    # Keep it as a soft signal only.
+    # Pre-order gate: do not fire cart before the order window opens.
+    # Example A2891018001: preOrderStatus=NotStarted until orderStartDate.
+    pre_status = (signals.pre_order_status or "").strip().lower()
+    if pre_status:
+        reasons.append(f"preOrderStatus={signals.pre_order_status}")
+    if pre_status in {"notstarted", "not_started", "beforestart", "before_start"}:
+        blocking.append(
+            f"preOrderStatus={signals.pre_order_status} (order not open yet)"
+        )
+    elif signals.order_start:
+        start_dt = _parse_iso(signals.order_start)
+        if start_dt is not None:
+            now = datetime.now(timezone.utc)
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=timezone.utc)
+            if now < start_dt:
+                blocking.append(
+                    f"orderStartDate={signals.order_start} (opens in "
+                    f"{int((start_dt - now).total_seconds())}s)"
+                )
+            else:
+                reasons.append(f"orderStartDate reached ({signals.order_start})")
+
+    if signals.order_end:
+        end_dt = _parse_iso(signals.order_end)
+        if end_dt is not None:
+            now = datetime.now(timezone.utc)
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=timezone.utc)
+            if now > end_dt:
+                blocking.append(f"orderEndDate passed ({signals.order_end})")
+
+    # Important: website can still allow cart when top-level purchaseAvailable=false
+    # *after* the order window is open (inventory-driven). Keep as soft signal only.
     if signals.purchase_available is True:
         reasons.append("purchaseAvailable=true")
     elif signals.purchase_available is False:
@@ -174,6 +206,31 @@ def _evaluate_eligibility(signals: CartSignals) -> None:
     signals.decision_reasons = reasons
     signals.blocking_reasons = blocking
     signals.cart_eligible = not blocking
+
+
+def seconds_until_order_start(detail: Dict[str, Any]) -> Optional[float]:
+    """Return seconds until orderStartDate, or None if unknown/already open."""
+    info = detail.get("infoSection") or {}
+    order = info.get("orderInfo") or {}
+    start = _parse_iso(str(order.get("orderStartDate") or ""))
+    if start is None:
+        return None
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    delta = (start - datetime.now(timezone.utc)).total_seconds()
+    return delta if delta > 0 else 0.0
+
+
+def _parse_iso(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
 
 
 def is_cart_eligible(

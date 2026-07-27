@@ -184,23 +184,28 @@ class PBandaiHkClient:
     def _hit_from_detail(self, detail: Dict[str, Any], product_code: str) -> ProductHit:
         breadcrumb = detail.get("productBreadcrumb") or {}
         names = breadcrumb.get("productName") or {}
-        info = (detail.get("infoSection") or {}).get("priceInfo") or {}
-        price = info.get("fixedListPrice") or info.get("sellingPrice") or {}
+        info = detail.get("infoSection") or {}
+        price_block = info.get("price") or info.get("priceInfo") or {}
+        price = price_block.get("fixedListPrice") or price_block.get("sellingPrice") or {}
+        general = info.get("generalProdInfo") or {}
         flags = list(detail.get("flags") or [])
-        if detail.get("purchaseAvailable"):
+        availability = str(general.get("availabilityStatus") or "")
+        if detail.get("purchaseAvailable") or availability.lower() == "on":
             sale_status = "On"
         elif any(flag in {"PRE_ORDER_CLOSED", "END_OF_SALE"} for flag in flags):
             sale_status = "End"
+        elif availability:
+            sale_status = availability
         else:
             sale_status = "Waiting"
         return ProductHit(
             product_code=detail.get("productCode") or product_code,
             area_product_no=detail.get("areaProductNo") or "",
             area_code=detail.get("areaCode") or self.area_code.upper(),
-            name_en=names.get("en") or "",
-            name_zh_hk=names.get("zh-HK") or "",
+            name_en=names.get("en") or (info.get("productName") or {}).get("en") or "",
+            name_zh_hk=names.get("zh-HK") or (info.get("productName") or {}).get("zh-HK") or "",
             sale_status=sale_status,
-            product_type="",
+            product_type=str(info.get("productType") or ""),
             price_amount=price.get("amount"),
             currency=price.get("currency"),
             flags=flags,

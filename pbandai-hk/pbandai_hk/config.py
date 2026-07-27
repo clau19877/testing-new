@@ -44,6 +44,12 @@ class Config:
     # Pre-open browsers on product page before drop (survives HTML crashes).
     # auto cart_method will prefer warm pool when PREWARM_BROWSERS=1.
     prewarm_browsers: bool = False
+    # Soft "clicked verify on site" without cart count increase = failure.
+    require_cart_increase: bool = True
+    # When waiting for orderStartDate, wake this many seconds early then fast-poll.
+    drop_lead_seconds: int = 30
+    # Parallel cart attempts when CART_MODE=all (important for low-stock drops).
+    cart_parallel: bool = True
     task_csv: str = "task.csv"
     proxy_csv: str = "proxy.csv"
     proxy_assign_mode: str = "random"  # random | unique
@@ -93,6 +99,9 @@ class Config:
             cart_mode=(os.getenv("CART_MODE") or "first").strip().lower(),
             cart_method=(os.getenv("CART_METHOD") or "auto").strip().lower(),
             prewarm_browsers=_as_bool(os.getenv("PREWARM_BROWSERS"), False),
+            require_cart_increase=_as_bool(os.getenv("REQUIRE_CART_INCREASE"), True),
+            drop_lead_seconds=int(os.getenv("DROP_LEAD_SECONDS") or "30"),
+            cart_parallel=_as_bool(os.getenv("CART_PARALLEL"), True),
             task_csv=os.getenv("TASK_CSV") or "task.csv",
             proxy_csv=os.getenv("PROXY_CSV") or "proxy.csv",
             proxy_assign_mode=(os.getenv("PROXY_ASSIGN_MODE") or "random").strip().lower(),

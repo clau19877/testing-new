@@ -52,6 +52,7 @@ class PBandaiHkBot:
         self.seen_codes: Set[str] = set()
         self._rr_index = 0
         self.warm_pool = None  # WarmBrowserPool | None
+        self._next_sleep_hint: Optional[float] = None
 
     def prepare(self) -> None:
         setup_logging(self.config.log_file, level=self.config.log_level)
@@ -229,6 +230,7 @@ class PBandaiHkBot:
         report = RunReport()
         allowed = {s.lower() for s in self.config.sale_statuses}
         assert self.client is not None
+        self._next_sleep_hint = None
 
         # 1) Direct product links / codes
         for code in list(self.remaining_direct_codes):
@@ -259,7 +261,11 @@ class PBandaiHkBot:
                     source="direct",
                 )
                 if self.config.enable_add_to_cart:
-                    from .diagnostics import is_cart_eligible, log_cart_diagnosis
+                    from .diagnostics import (
+                        is_cart_eligible,
+                        log_cart_diagnosis,
+                        seconds_until_order_start,
+                    )
 
                     picked = self.client.pick_area_item_no(detail) or ""
                     signals = is_cart_eligible(
@@ -273,6 +279,12 @@ class PBandaiHkBot:
                         session_name=self.client.name,
                         stage="direct-scan",
                     )
+                    until = seconds_until_order_start(detail)
+                    if until is not None and until > 0:
+                        lead = max(0, int(self.config.drop_lead_seconds))
+                        hint = max(1.0, until - lead)
+                        if self._next_sleep_hint is None or hint < self._next_sleep_hint:
+                            self._next_sleep_hint = hint
                     if not signals.cart_eligible:
                         result.detail_note = (
                             "waiting: " + "; ".join(signals.blocking_reasons)
@@ -398,24 +410,56 @@ class PBandaiHkBot:
         successes: List[str] = []
         failures: List[str] = []
 
-        for runtime in sessions:
-            client = runtime.client
-            ok, note = self._add_with_client(client, product, detail=detail)
-            if ok:
-                successes.append(client.name)
-                result.added_to_cart = True
-                result.session_name = client.name
-                result.detail_note = note
-                logger.info("[cart] session=%s %s", client.name, note)
-                if self.config.cart_mode == "first" or self.config.cart_mode == "round_robin":
-                    self.seen_codes.add(product.product_code)
-                    return
-            else:
-                failures.append(f"{client.name}:{note}")
-                logger.warning("[cart] session=%s failed: %s", client.name, note)
+        # Low-stock drops (e.g. A2891018001 availableQty=2): fire all sessions together.
+        use_parallel = (
+            self.config.cart_mode == "all"
+            and self.config.cart_parallel
+            and len(sessions) > 1
+        )
+        if use_parallel:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            print(f"[cart] parallel add across {len(sessions)} sessions")
+            logger.info("[cart] parallel add sessions=%s", len(sessions))
+            with ThreadPoolExecutor(max_workers=len(sessions)) as pool:
+                futures = {
+                    pool.submit(self._add_with_client, runtime.client, product, detail): runtime
+                    for runtime in sessions
+                }
+                for fut in as_completed(futures):
+                    runtime = futures[fut]
+                    try:
+                        ok, note = fut.result()
+                    except Exception as exc:  # noqa: BLE001
+                        ok, note = False, str(exc)
+                    if ok:
+                        successes.append(runtime.client.name)
+                        logger.info("[cart] session=%s %s", runtime.client.name, note)
+                    else:
+                        failures.append(f"{runtime.client.name}:{note}")
+                        logger.warning(
+                            "[cart] session=%s failed: %s", runtime.client.name, note
+                        )
+        else:
+            for runtime in sessions:
+                client = runtime.client
+                ok, note = self._add_with_client(client, product, detail=detail)
+                if ok:
+                    successes.append(client.name)
+                    result.added_to_cart = True
+                    result.session_name = client.name
+                    result.detail_note = note
+                    logger.info("[cart] session=%s %s", client.name, note)
+                    if self.config.cart_mode in {"first", "round_robin"}:
+                        self.seen_codes.add(product.product_code)
+                        return
+                else:
+                    failures.append(f"{client.name}:{note}")
+                    logger.warning("[cart] session=%s failed: %s", client.name, note)
 
         if successes:
             result.added_to_cart = True
+            result.session_name = successes[0]
             result.all_sessions_ok = len(successes) >= len(sessions) and not failures
             result.detail_note = (
                 f"sessions_ok={','.join(successes)}; failed={','.join(failures) or '-'}"
@@ -461,14 +505,24 @@ class PBandaiHkBot:
                 if not area_item_no:
                     return False, "no areaItemNo"
 
+                qty = int(self.config.cart_qty)
+                if signals.max_qty is not None and signals.max_qty > 0:
+                    qty = max(1, min(qty, int(signals.max_qty)))
+
                 if method == "browser":
-                    return self._browser_add(client, product, area_item_no)
+                    return self._finalize_cart_result(
+                        self._browser_add(client, product, area_item_no, qty=qty)
+                    )
                 if method == "warm":
-                    return self._warm_add(client, product, area_item_no)
+                    return self._finalize_cart_result(
+                        self._warm_add(client, product, area_item_no, qty=qty)
+                    )
 
                 # auto: prefer warm pool (no HTML reload) when ready
                 if self.warm_pool is not None and self.warm_pool.ready_count > 0:
-                    ok, note = self._warm_add(client, product, area_item_no)
+                    ok, note = self._finalize_cart_result(
+                        self._warm_add(client, product, area_item_no, qty=qty)
+                    )
                     if ok:
                         return True, note
                     logger.warning(
@@ -479,19 +533,20 @@ class PBandaiHkBot:
 
                 logger.info(
                     "[cart] session=%s attempting API add areaItemNo=%s "
-                    "purchaseAvailable=%s availableQty=%s",
+                    "purchaseAvailable=%s availableQty=%s qty=%s",
                     client.name,
                     area_item_no,
                     signals.purchase_available,
                     signals.available_qty,
+                    qty,
                 )
                 try:
                     client.add_to_cart(
                         area_item_no,
-                        qty=self.config.cart_qty,
+                        qty=qty,
                         product_code=product.product_code,
                     )
-                    return True, f"api-added via {area_item_no}"
+                    return True, f"api-added via {area_item_no} qty={qty}"
                 except Exception as api_exc:  # noqa: BLE001
                     msg = str(api_exc)
                     waf_blocked = (
@@ -508,10 +563,14 @@ class PBandaiHkBot:
                         )
                         # Prefer warm again if pool still alive (no cold launch)
                         if self.warm_pool is not None and self.warm_pool.ready_count > 0:
-                            ok, note = self._warm_add(client, product, area_item_no)
+                            ok, note = self._finalize_cart_result(
+                                self._warm_add(client, product, area_item_no, qty=qty)
+                            )
                             if ok:
                                 return True, note
-                        return self._browser_add(client, product, area_item_no)
+                        return self._finalize_cart_result(
+                            self._browser_add(client, product, area_item_no, qty=qty)
+                        )
                     raise
             except Exception as exc:  # noqa: BLE001
                 last_note = f"attempt {attempt}/{retries} failed: {exc}"
@@ -525,11 +584,27 @@ class PBandaiHkBot:
                 time.sleep(1)
         return False, last_note
 
+    def _finalize_cart_result(self, result: tuple[bool, str]) -> tuple[bool, str]:
+        ok, note = result
+        if not ok:
+            return ok, note
+        if not self.config.require_cart_increase:
+            return ok, note
+        soft = "verify cart on site" in (note or "").lower()
+        if soft:
+            logger.warning(
+                "[cart] rejecting soft success (no cart-count increase): %s",
+                note,
+            )
+            return False, f"unverified: {note}"
+        return ok, note
+
     def _warm_add(
         self,
         client: PBandaiHkClient,
         product: ProductHit,
         area_item_no: str,
+        qty: Optional[int] = None,
     ) -> tuple[bool, str]:
         if self.warm_pool is None or self.warm_pool.ready_count <= 0:
             return False, "warm pool not ready"
@@ -541,7 +616,7 @@ class PBandaiHkBot:
             client,
             product_code=product.product_code,
             area_item_no=area_item_no,
-            qty=self.config.cart_qty,
+            qty=int(qty if qty is not None else self.config.cart_qty),
         )
 
     def _browser_add(
@@ -549,6 +624,7 @@ class PBandaiHkBot:
         client: PBandaiHkClient,
         product: ProductHit,
         area_item_no: str,
+        qty: Optional[int] = None,
     ) -> tuple[bool, str]:
         from .browser_cart import browser_add_to_cart
 
@@ -564,7 +640,7 @@ class PBandaiHkBot:
             client,
             product_code=product.product_code,
             area_item_no=area_item_no,
-            qty=self.config.cart_qty,
+            qty=int(qty if qty is not None else self.config.cart_qty),
             proxy=client.proxy or self.config.proxy_url,
             cookie_file=cookie_file,
         )
@@ -643,8 +719,16 @@ class PBandaiHkBot:
                     ):
                         logger.info("[loop] all targets handled; exiting")
                         break
-                    logger.info("[loop] sleep %ss", self.config.retry_wait)
-                    time.sleep(self.config.retry_wait)
+                    sleep_for = float(self.config.retry_wait)
+                    if self._next_sleep_hint is not None:
+                        # Wake near orderStartDate instead of blind RETRY_WAIT polling.
+                        sleep_for = min(sleep_for, float(self._next_sleep_hint))
+                        # Near drop: poll fast.
+                        if self._next_sleep_hint <= max(5, self.config.drop_lead_seconds):
+                            sleep_for = min(sleep_for, 1.0)
+                    sleep_for = max(0.5, sleep_for)
+                    logger.info("[loop] sleep %.1fs", sleep_for)
+                    time.sleep(sleep_for)
         finally:
             if self.warm_pool is not None:
                 try:

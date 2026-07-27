@@ -101,14 +101,16 @@ class WarmBrowserPool:
         ):
             return
         product_url = self._product_url(product_code)
+        home = f"{self.config.base_url}/{self.config.area_code}/"
         for wb in self.browsers:
             if wb.driver is None:
                 continue
             try:
                 url = (wb.driver.current_url or "").lower()
+                title = (wb.driver.title or "").lower()
                 if (
                     product_code.lower() in url
-                    and "page not available" not in (wb.driver.title or "").lower()
+                    and "page not available" not in title
                 ):
                     wb.product_code = product_code
                     wb.ready = True
@@ -117,13 +119,30 @@ class WarmBrowserPool:
                 print(f"[warm] repark {wb.name} -> {product_code}")
                 wb.driver.get(product_url)
                 _wait_for_product_ready(wb.driver, timeout=45)
+                title = (wb.driver.title or "").lower()
+                if "page not available" in title:
+                    logger.warning(
+                        "[warm] repark PDP down for %s; staying on HK home",
+                        wb.name,
+                    )
+                    wb.driver.get(home)
+                    time.sleep(1.0)
                 wb.product_code = product_code
                 wb.ready = True
                 wb.last_error = ""
             except Exception as exc:  # noqa: BLE001
-                wb.ready = False
-                wb.last_error = str(exc)
-                log_exception(logger, f"warm repark failed session={wb.name}", exc)
+                # Keep browser alive on HK origin if possible.
+                try:
+                    wb.driver.get(home)
+                    time.sleep(1.0)
+                    wb.product_code = product_code
+                    wb.ready = True
+                    wb.last_error = f"repark fallback home: {exc}"
+                    logger.warning("[warm] %s repark fallback home: %s", wb.name, exc)
+                except Exception as exc2:  # noqa: BLE001
+                    wb.ready = False
+                    wb.last_error = str(exc2)
+                    log_exception(logger, f"warm repark failed session={wb.name}", exc2)
         self.product_code = product_code
 
     def add_to_cart(
@@ -258,20 +277,36 @@ class WarmBrowserPool:
             driver.get(product_url)
             _wait_for_product_ready(driver, timeout=60)
             title = (driver.title or "").lower()
-            if "page not available" in title:
+            page_ok = "page not available" not in title
+            if not page_ok:
                 # Soft retry once — site flaky before drop
                 time.sleep(2.0)
                 driver.get(product_url)
                 _wait_for_product_ready(driver, timeout=40)
                 title = (driver.title or "").lower()
-            if "page not available" in title:
-                wb.last_error = "PAGE NOT AVAILABLE while warming"
-                logger.error("[warm] %s: %s", client.name, wb.last_error)
-                print(f"[warm] {client.name}: {wb.last_error}")
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
+                page_ok = "page not available" not in title
+
+            if not page_ok:
+                # Critical for drops: HTML PDP may 502 while cart API works.
+                # Stay on HK origin so F5 hooks + cookies are live; in-page fetch
+                # still posts /api/cart/addToCart without needing the PDP DOM.
+                home = f"{self.config.base_url}/{self.config.area_code}/"
+                logger.warning(
+                    "[warm] %s PDP unavailable; parking on %s for in-page fetch",
+                    client.name,
+                    home,
+                )
+                print(
+                    f"[warm] {client.name}: PDP PAGE NOT AVAILABLE — "
+                    f"parking on HK home for in-page cart fetch"
+                )
+                driver.get(home)
+                time.sleep(1.5)
+                wb.driver = driver
+                wb.ready = True
+                wb.product_code = product_code
+                wb.last_error = "pdp unavailable; home-parked"
+                logger.info("[warm] home-parked session=%s", client.name)
                 return wb
 
             # Nudge page JS / F5 hooks
@@ -324,4 +359,6 @@ class WarmBrowserPool:
             return True, f"{note} cart {before}->{after}"
         if after is not None and after > 0 and (before or 0) == 0:
             return True, f"{note} cart_count={after}"
+        if after is not None and before is not None and after <= before:
+            return False, f"{note} but cart unchanged {before}->{after}"
         return True, f"{note} (verify cart on site)"
