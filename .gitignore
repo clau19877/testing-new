@@ -16,3 +16,9 @@ node_modules
 # Foundry files
 /out
 /cache_forge
+# P-Bandai HK module
+pbandai-hk/.venv/
+pbandai-hk/.env
+
+__pycache__/
+*.pyc
