@@ -51,21 +51,42 @@ def browser_add_to_cart(
         f"[{client.name}] Browser add-to-cart {product_code} "
         f"(proxy={redact_proxy(effective_proxy) or '-'})"
     )
-    driver = _create_webdriver(config, proxy=effective_proxy)
+    # Prefer headed browser; headless often hits "Page not available".
+    original_bg = bool(config.background_mode)
+    config.background_mode = False
+    driver = None
     try:
+        driver = _create_webdriver(config, proxy=effective_proxy)
+        try:
+            driver.execute_cdp_cmd(
+                "Page.addScriptToEvaluateOnNewDocument",
+                {
+                    "source": (
+                        "Object.defineProperty(navigator, 'webdriver', "
+                        "{get: () => undefined})"
+                    )
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
         # Seed domain before adding cookies.
         driver.get(f"{config.base_url}/{config.area_code}/")
-        time.sleep(1.0)
+        time.sleep(1.5)
         _load_cookies_into_driver(driver, cookies)
         driver.get(product_url)
+        _wait_for_product_ready(driver, timeout=60)
         logger.info(
-            "browser cart opened session=%s url=%s proxy=%s",
+            "browser cart opened session=%s url=%s title=%s proxy=%s",
             client.name,
-            product_url,
+            driver.current_url,
+            (driver.title or "")[:120],
             redact_proxy(effective_proxy) or "-",
         )
+        if "page not available" in (driver.title or "").lower():
+            return False, "browser got PAGE NOT AVAILABLE for product page"
+
         if not _click_add_to_cart(driver, timeout=45):
-            # Fallback: call fetch() inside the page with browser cookies/WAF context.
             ok, note = _page_fetch_add_to_cart(
                 driver,
                 area_item_no=area_item_no,
@@ -75,7 +96,7 @@ def browser_add_to_cart(
             if not ok:
                 return False, note
         else:
-            time.sleep(2.0)
+            time.sleep(2.5)
 
         # Transfer refreshed cookies back to API client for verification.
         fresh = _driver_cookies(driver)
@@ -95,17 +116,46 @@ def browser_add_to_cart(
 
         if after is not None and before is not None and after > before:
             return True, f"browser-added cart {before}->{after}"
-        if after is not None and after > 0:
+        if after is not None and after > 0 and (before or 0) == 0:
             return True, f"browser-added cart_count={after}"
-        # Click seemed to work but summary unchanged — still report soft success if no error toast.
         if _page_has_error(driver):
             return False, "browser add-to-cart showed an error on page"
-        return True, "browser add-to-cart clicked (verify cart on site)"
-    finally:
+        # Detect login wall.
         try:
-            driver.quit()
-        except Exception as exc:  # noqa: BLE001
-            log_exception(logger, "driver.quit failed", exc)
+            if "sign in" in (driver.page_source or "").lower() and after == before:
+                # Still may have clicked; report inconclusive.
+                pass
+        except Exception:  # noqa: BLE001
+            pass
+        return True, "browser pre-order/cart clicked (verify cart on site)"
+    finally:
+        config.background_mode = original_bg
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception as exc:  # noqa: BLE001
+                log_exception(logger, "driver.quit failed", exc)
+
+
+def _wait_for_product_ready(driver: Any, timeout: int = 60) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        title = (driver.title or "").lower()
+        if "page not available" in title:
+            time.sleep(1.0)
+            continue
+        try:
+            source = driver.page_source or ""
+            if (
+                "PLACE PRE-ORDER" in source
+                or "ADD TO CART" in source
+                or "加入購物車" in source
+                or "c-input-quantity" in source
+            ):
+                return
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.5)
 
 
 def _safe_cart_count(client: "PBandaiHkClient") -> Optional[int]:
@@ -146,10 +196,16 @@ def _click_add_to_cart(driver: Any, timeout: int = 45) -> bool:
 
     deadline = time.time() + timeout
     text_needles = [
+        "PLACE PRE-ORDER",
+        "Place Pre-Order",
+        "PLACE ORDER",
+        "Place Order",
         "ADD TO CART",
         "Add to cart",
         "加入購物車",
         "カートに追加",
+        "預購",
+        "立即預訂",
     ]
     css_candidates = [
         "button[class*='cart']",

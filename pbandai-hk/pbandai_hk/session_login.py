@@ -124,9 +124,11 @@ def _autofill_login(driver: Any, *, login: str, password: str, timeout: int = 60
     from selenium.webdriver.common.keys import Keys
 
     email_css = (
-        "input#loginId, input[name='mail'], input[name='memberId'], "
-        "input[name='email'], input[type='email'], input[autocomplete='username'], "
+        "input#e-mail_address, input#loginId, input[name='mail'], input[name='memberId'], "
+        "input[name='email'], input[type='email'], input[autocomplete='email'], "
+        "input[autocomplete='username'], "
         "input[placeholder*='mail'], input[placeholder*='Mail'], "
+        "input[placeholder*='E-mail'], input[placeholder*='Email'], "
         "input[placeholder*='ID'], input[placeholder*='Id']"
     )
     password_css = (
@@ -225,28 +227,35 @@ def _wait_visible(driver: Any, by: Any, selector: str, timeout: int = 60) -> Any
 
 
 def _wait_for_session_cookie(driver: Any, timeout: int = 60) -> None:
-    print("  waiting for SESSION cookie...")
+    print("  waiting for login to complete...")
     deadline = time.time() + timeout
+    saw_session = False
+    left_login = False
     while time.time() < deadline:
         try:
             names = {c.get("name", "").upper() for c in driver.get_cookies()}
             if "SESSION" in names:
-                print("  SESSION cookie found")
-                return
+                saw_session = True
         except Exception:  # noqa: BLE001
             pass
-        # Also treat leaving /login as success for SPA redirects.
         try:
             current = (driver.current_url or "").lower()
             if "/login" not in current and "p-bandai.com" in current:
-                time.sleep(1.0)
-                names = {c.get("name", "").upper() for c in driver.get_cookies()}
-                if "SESSION" in names or len(driver.get_cookies()) >= 3:
-                    print("  login redirect detected")
-                    return
+                left_login = True
         except Exception:  # noqa: BLE001
             pass
+        # Strong success: left /login with a SESSION cookie.
+        if saw_session and left_login:
+            print("  login redirect detected")
+            return
+        # Soft success after enough time with SESSION only.
+        if saw_session and time.time() + 15 > deadline:
+            print("  SESSION cookie found")
+            return
         time.sleep(0.5)
+    if saw_session:
+        print("  SESSION cookie found (still on login page; verify credentials)")
+        return
     raise RuntimeError(
         "Login did not produce a SESSION cookie in time. "
         "Check credentials / proxy / captcha, then retry."
