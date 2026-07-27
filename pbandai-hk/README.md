@@ -28,6 +28,11 @@ Default mode is **monitor + notify only** (`ENABLE_ADD_TO_CART=0`).
 
 First run creates `.venv`, installs deps, and copies `.env` for you.
 
+If you already have an old `.env`, either:
+- Launcher menu **`[0] Reset .env from latest .env.example`** (backs up old file), or
+- Copy `pbandai-hk/.env.example` → `pbandai-hk/.env` yourself  
+The Windows zip now includes both `.env` and `.env.example` (drop-ready for `A2891018001`).
+
 ### macOS / Linux
 ```bash
 ./setup_and_launch.sh

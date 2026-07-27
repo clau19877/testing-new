@@ -80,6 +80,7 @@ func menu(venvPy string) int {
 		fmt.Println("  [2] Run one scan")
 		fmt.Println("  [3] Check a direct product link")
 		fmt.Println("  [4] Open .env for editing")
+		fmt.Println("  [0] Reset .env from latest .env.example (backup old)")
 		fmt.Println("  [5] Re-run setup (deps)")
 		fmt.Println("  [6] List sessions")
 		fmt.Println("  [7] Login / create session (multi + proxy)")
@@ -112,6 +113,15 @@ func menu(venvPy string) int {
 				fmt.Println("Edit this file manually:", mustAbs(".env"))
 			} else {
 				fmt.Println("Opened .env — edit/save it, then continue here.")
+			}
+		case "0":
+			fmt.Print("Replace .env with .env.example? [y/N]: ")
+			ans, _ := in.ReadString('\n')
+			ans = strings.TrimSpace(strings.ToLower(ans))
+			if ans == "y" || ans == "yes" || ans == "1" {
+				if err := resetEnvFromExample(); err != nil {
+					fmt.Println("Reset .env failed:", err)
+				}
 			}
 		case "5":
 			if err := ensureDeps(venvPy); err != nil {
@@ -266,6 +276,12 @@ func ensureDeps(venvPy string) error {
 
 func ensureEnvFile() error {
 	if _, err := os.Stat(".env"); err == nil {
+		if n, err := mergeMissingEnvKeys(".env.example", ".env"); err != nil {
+			fmt.Println("WARNING: could not merge new .env keys:", err)
+		} else if n > 0 {
+			fmt.Printf("Updated .env with %d new key(s) from .env.example\n", n)
+			fmt.Println("Review .env — new drop settings may need values.")
+		}
 		return ensureCSVTemplates()
 	}
 	fmt.Println("Creating .env from .env.example ...")
@@ -286,6 +302,87 @@ func ensureEnvFile() error {
 		time.Sleep(500 * time.Millisecond)
 	}
 	return ensureCSVTemplates()
+}
+
+func resetEnvFromExample() error {
+	data, err := os.ReadFile(".env.example")
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(".env"); err == nil {
+		bak := fmt.Sprintf(".env.bak.%d", time.Now().Unix())
+		old, err := os.ReadFile(".env")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(bak, old, 0o644); err != nil {
+			return err
+		}
+		fmt.Println("Backed up old .env ->", bak)
+	}
+	if err := os.WriteFile(".env", data, 0o644); err != nil {
+		return err
+	}
+	fmt.Println("Replaced .env with latest .env.example")
+	return openEnvFile()
+}
+
+func mergeMissingEnvKeys(examplePath, envPath string) (int, error) {
+	exampleData, err := os.ReadFile(examplePath)
+	if err != nil {
+		return 0, err
+	}
+	envData, err := os.ReadFile(envPath)
+	if err != nil {
+		return 0, err
+	}
+	existing := envKeySet(string(envData))
+	var toAppend []string
+	for _, raw := range strings.Split(string(exampleData), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
+			continue
+		}
+		key := strings.TrimSpace(strings.SplitN(line, "=", 2)[0])
+		if key == "" {
+			continue
+		}
+		if _, ok := existing[key]; ok {
+			continue
+		}
+		toAppend = append(toAppend, strings.TrimRight(raw, "\r\n"))
+		existing[key] = struct{}{}
+	}
+	if len(toAppend) == 0 {
+		return 0, nil
+	}
+	f, err := os.OpenFile(envPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	if _, err := f.WriteString("\n# --- keys added from .env.example ---\n"); err != nil {
+		return 0, err
+	}
+	if _, err := f.WriteString(strings.Join(toAppend, "\n") + "\n"); err != nil {
+		return 0, err
+	}
+	return len(toAppend), nil
+}
+
+func envKeySet(text string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
+			continue
+		}
+		key := strings.TrimSpace(strings.SplitN(line, "=", 2)[0])
+		if key != "" {
+			out[key] = struct{}{}
+		}
+	}
+	return out
 }
 
 func ensureCSVTemplates() error {

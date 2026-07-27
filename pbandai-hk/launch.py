@@ -34,13 +34,74 @@ def ensure_setup() -> Path:
     print("Installing/updating dependencies...")
     run([str(vp), "-m", "pip", "install", "--upgrade", "pip"])
     run([str(vp), "-m", "pip", "install", "-r", "requirements.txt"])
+    ensure_env_file()
+    return vp
+
+
+def ensure_env_file() -> None:
+    """Create .env from example, or append any missing keys from .env.example."""
     env = ROOT / ".env"
     example = ROOT / ".env.example"
+    if not example.exists():
+        print("WARNING: .env.example missing")
+        return
     if not env.exists():
         print("Creating .env from .env.example ...")
         shutil.copyfile(example, env)
-        print(f"Edit {env} and set PRODUCT_LINKS, then re-run.")
-    return vp
+        print(f"Edit {env} then re-run.")
+        return
+    added = merge_missing_env_keys(example, env)
+    if added:
+        print(f"Updated .env with {len(added)} new key(s): {', '.join(added)}")
+        print("Review .env — new drop settings may need values.")
+
+
+def merge_missing_env_keys(example: Path, env: Path) -> list[str]:
+    """Append KEY= lines from example that are absent in .env. Never overwrite."""
+    existing = _env_keys(env.read_text(encoding="utf-8", errors="replace"))
+    example_text = example.read_text(encoding="utf-8", errors="replace")
+    to_append: list[str] = []
+    added_keys: list[str] = []
+    for raw in example_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key = line.split("=", 1)[0].strip()
+        if not key or key in existing:
+            continue
+        to_append.append(raw.rstrip("\n"))
+        added_keys.append(key)
+        existing.add(key)
+    if to_append:
+        with env.open("a", encoding="utf-8") as fh:
+            fh.write("\n# --- keys added from .env.example ---\n")
+            fh.write("\n".join(to_append) + "\n")
+    return added_keys
+
+
+def _env_keys(text: str) -> set[str]:
+    keys: set[str] = set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        keys.add(line.split("=", 1)[0].strip())
+    return keys
+
+
+def reset_env_from_example() -> None:
+    example = ROOT / ".env.example"
+    env = ROOT / ".env"
+    if not example.exists():
+        print(".env.example not found")
+        return
+    if env.exists():
+        bak = ROOT / f".env.bak.{int(__import__('time').time())}"
+        shutil.copyfile(env, bak)
+        print(f"Backed up old .env -> {bak.name}")
+    shutil.copyfile(example, env)
+    print("Replaced .env with latest .env.example")
+    open_env()
 
 
 def run_bot(vp: Path, *args: str) -> int:
@@ -58,6 +119,7 @@ What do you want to do?
   [2] Run one scan
   [3] Check a direct product link
   [4] Open .env for editing
+  [0] Reset .env from latest .env.example (backup old)
   [5] Re-run setup (deps)
   [6] List sessions
   [7] Login / create session (multi + proxy)
@@ -79,6 +141,10 @@ What do you want to do?
             run_bot(vp, "check", link)
         elif choice == "4":
             open_env()
+        elif choice == "0":
+            ans = input("Replace .env with .env.example? [y/N]: ").strip().lower()
+            if ans in {"y", "yes", "1"}:
+                reset_env_from_example()
         elif choice == "5":
             ensure_setup()
             print("Dependencies reinstalled.")
