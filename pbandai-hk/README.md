@@ -6,9 +6,11 @@ JP and HK are different platforms. This module does **not** scrape JP DOM (`#cdu
 
 ## What it does
 
-- Poll HK catalog via `GET /api/search` with `X-G1-Area-Code: hk`
+- Watch **direct product links/codes** you already know
+- Optional keyword poll via `GET /api/search` with `X-G1-Area-Code: hk`
 - Filter sale status with `_f_productStatuses` (same facet encoding as the HK site UI)
 - Match product names (`en` / `zh-HK`) against keyword lists
+- File + console logging (`logs/pbandai_hk.log`), including error tracebacks
 - Optional email notify
 - Optional add-to-cart via `POST /api/cart/addToCart` after manual browser login
 - Immediate loop or scheduled runs (same idea as the JP bot)
@@ -29,7 +31,10 @@ cp .env.example .env
 ## Quick use
 
 ```bash
-# one-shot scan using PRECHECK/TARGET lists
+# check one direct product URL/code
+python web_shopping_bot_hk.py check "https://p-bandai.com/hk/item/A2742450001"
+
+# one-shot scan (direct links and/or keyword lists from .env)
 python web_shopping_bot_hk.py once
 
 # ad-hoc API search
@@ -39,16 +44,39 @@ python web_shopping_bot_hk.py search "HG"
 python web_shopping_bot_hk.py loop
 ```
 
+### Direct-link `.env` example
+
+```env
+PRODUCT_LINKS=https://p-bandai.com/hk/item/A2742450001,https://p-bandai.com/hk/item/A2690472004
+SEARCH_KEYWORDS=
+SALE_STATUSES=On,Waiting
+ENABLE_ADD_TO_CART=0
+LOG_FILE=logs/pbandai_hk.log
+```
+
+Then:
+
+```bash
+python web_shopping_bot_hk.py once
+# or keep watching
+python web_shopping_bot_hk.py loop
+```
+
+Errors/tracebacks are appended to `logs/pbandai_hk.log`.
+
 ## Important `.env` knobs
 
 | Key | Purpose |
 |---|---|
-| `SEARCH_KEYWORDS` | Keywords used to query `/api/search` |
-| `PRECHECK_LIST` | Coarse name filter |
+| `PRODUCT_LINKS` | Direct HK item URLs (comma-separated) |
+| `PRODUCT_CODES` | Bare product codes (comma-separated) |
+| `SEARCH_KEYWORDS` | Optional keywords for `/api/search` |
+| `PRECHECK_LIST` | Coarse name filter (search mode) |
 | `TARGET_LIST` | Finer name filter (defaults to `PRECHECK_LIST` if empty) |
 | `SALE_STATUSES` | Usually `On,Waiting` |
 | `ENABLE_ADD_TO_CART` | `0` monitor only, `1` cart mode |
 | `SCHEDULE_MODE` | `0` immediate loop, `1` clock schedule |
+| `LOG_FILE` / `LOG_LEVEL` | Error/info logging path and level |
 | `EMAIL_USER` | Leave empty to skip email |
 
 ## Cart mode notes
@@ -82,10 +110,13 @@ pbandai-hk/
   web_shopping_bot_hk.py   # CLI entry
   requirements.txt
   .env.example
+  logs/                    # created at runtime
   pbandai_hk/
     api.py                 # HK API client
     bot.py                 # scan / match / optional cart loop
     config.py
+    links.py               # parse direct product URLs/codes
+    logging_utils.py       # file/console error logging
     notify.py
     session_login.py       # Selenium cookie transfer
 ```

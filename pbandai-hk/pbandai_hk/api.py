@@ -145,6 +145,59 @@ class PBandaiHkClient:
         resp.raise_for_status()
         return resp.json()
 
+    def get_products_bulk(self, product_codes: List[str], *, limit: int = 50) -> List[ProductHit]:
+        if not product_codes:
+            return []
+        resp = self.session.get(
+            self._url("/api/search/bulk"),
+            params={
+                "productCodes": ",".join(product_codes),
+                "limit": limit,
+                "excludeOutOfStock": "false",
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        rows = payload if isinstance(payload, list) else payload.get("products") or []
+        return [self._to_hit(raw) for raw in rows]
+
+    def resolve_direct_product(self, product_code: str) -> tuple[ProductHit, Dict[str, Any]]:
+        """Resolve a direct product code/link target into listing + detail payloads."""
+        detail = self.get_product(product_code)
+        bulk = self.get_products_bulk([product_code], limit=1)
+        if bulk:
+            hit = bulk[0]
+        else:
+            hit = self._hit_from_detail(detail, product_code)
+        return hit, detail
+
+    def _hit_from_detail(self, detail: Dict[str, Any], product_code: str) -> ProductHit:
+        breadcrumb = detail.get("productBreadcrumb") or {}
+        names = breadcrumb.get("productName") or {}
+        info = (detail.get("infoSection") or {}).get("priceInfo") or {}
+        price = info.get("fixedListPrice") or info.get("sellingPrice") or {}
+        flags = list(detail.get("flags") or [])
+        if detail.get("purchaseAvailable"):
+            sale_status = "On"
+        elif any(flag in {"PRE_ORDER_CLOSED", "END_OF_SALE"} for flag in flags):
+            sale_status = "End"
+        else:
+            sale_status = "Waiting"
+        return ProductHit(
+            product_code=detail.get("productCode") or product_code,
+            area_product_no=detail.get("areaProductNo") or "",
+            area_code=detail.get("areaCode") or self.area_code.upper(),
+            name_en=names.get("en") or "",
+            name_zh_hk=names.get("zh-HK") or "",
+            sale_status=sale_status,
+            product_type="",
+            price_amount=price.get("amount"),
+            currency=price.get("currency"),
+            flags=flags,
+            url=f"{self.base_url}/{self.area_code}/item/{product_code}",
+        )
+
     def cart_summary(self) -> Dict[str, Any]:
         resp = self.session.get(
             self._url("/api/cart/summary"),

@@ -4,6 +4,8 @@ from typing import List
 
 from dotenv import load_dotenv
 
+from .links import extract_product_codes
+
 
 def _split_csv(value: str | None) -> List[str]:
     if not value:
@@ -23,6 +25,8 @@ class Config:
     base_url: str = "https://p-bandai.com"
     accept_language: str = "en"
     search_keywords: List[str] = field(default_factory=list)
+    product_links: List[str] = field(default_factory=list)
+    product_codes: List[str] = field(default_factory=list)
     precheck_list: List[str] = field(default_factory=list)
     target_list: List[str] = field(default_factory=list)
     sale_statuses: List[str] = field(default_factory=lambda: ["On", "Waiting"])
@@ -42,17 +46,24 @@ class Config:
     receiver_email: str = ""
     smtp_server: str = "smtp.gmail.com"
     smtp_port: int = 587
+    log_file: str = "logs/pbandai_hk.log"
+    log_level: str = "INFO"
 
     @classmethod
     def from_env(cls, dotenv_path: str | None = None) -> "Config":
         load_dotenv(dotenv_path)
         precheck = _split_csv(os.getenv("PRECHECK_LIST"))
         target = _split_csv(os.getenv("TARGET_LIST"))
+        product_links = _split_csv(os.getenv("PRODUCT_LINKS"))
+        explicit_codes = _split_csv(os.getenv("PRODUCT_CODES"))
+        product_codes = extract_product_codes([*product_links, *explicit_codes])
         return cls(
             area_code=(os.getenv("AREA_CODE") or "hk").lower(),
             base_url=(os.getenv("BASE_URL") or "https://p-bandai.com").rstrip("/"),
             accept_language=os.getenv("ACCEPT_LANGUAGE") or "en",
             search_keywords=_split_csv(os.getenv("SEARCH_KEYWORDS")),
+            product_links=product_links,
+            product_codes=product_codes,
             precheck_list=precheck,
             target_list=target or list(precheck),
             sale_statuses=_split_csv(os.getenv("SALE_STATUSES")) or ["On", "Waiting"],
@@ -72,10 +83,17 @@ class Config:
             receiver_email=os.getenv("RECEIVER_EMAIL") or "",
             smtp_server=os.getenv("SMTP_SERVER") or "smtp.gmail.com",
             smtp_port=int(os.getenv("SMTP_PORT") or "587"),
+            log_file=os.getenv("LOG_FILE") or "logs/pbandai_hk.log",
+            log_level=(os.getenv("LOG_LEVEL") or "INFO").upper(),
         )
 
     def validate(self) -> None:
-        if not self.search_keywords:
-            raise ValueError("SEARCH_KEYWORDS is required")
-        if not self.precheck_list and not self.target_list:
-            raise ValueError("Set PRECHECK_LIST and/or TARGET_LIST")
+        has_links = bool(self.product_codes)
+        has_search = bool(self.search_keywords)
+        if not has_links and not has_search:
+            raise ValueError("Set PRODUCT_LINKS/PRODUCT_CODES and/or SEARCH_KEYWORDS")
+        if has_search and not self.precheck_list and not self.target_list:
+            raise ValueError(
+                "SEARCH_KEYWORDS requires PRECHECK_LIST and/or TARGET_LIST "
+                "(not needed for direct PRODUCT_LINKS)"
+            )

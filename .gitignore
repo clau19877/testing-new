@@ -19,6 +19,8 @@ node_modules
 # P-Bandai HK module
 pbandai-hk/.venv/
 pbandai-hk/.env
+pbandai-hk/logs/
+pbandai-hk.zip
 
 __pycache__/
 *.pyc

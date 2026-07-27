@@ -8,8 +8,11 @@ import schedule
 
 from .api import PBandaiHkClient, ProductHit
 from .config import Config
+from .logging_utils import get_logger, log_exception, setup_logging
 from .notify import maybe_send_email
 from .session_login import login_and_transfer_cookies
+
+logger = get_logger("bot")
 
 
 @dataclass
@@ -20,6 +23,7 @@ class MatchResult:
     area_item_no: Optional[str] = None
     added_to_cart: bool = False
     detail_note: str = ""
+    source: str = "search"  # search | direct
 
 
 @dataclass
@@ -42,20 +46,99 @@ class PBandaiHkBot:
             accept_language=config.accept_language,
         )
         self.remaining_targets: List[str] = list(config.target_list)
+        self.remaining_direct_codes: List[str] = list(config.product_codes)
         self.seen_codes: Set[str] = set()
 
     def prepare(self) -> None:
+        setup_logging(self.config.log_file, level=self.config.log_level)
         self.config.validate()
-        self.client.bootstrap()
+        logger.info(
+            "prepare start area=%s direct=%s search=%s cart=%s",
+            self.config.area_code,
+            self.config.product_codes,
+            self.config.search_keywords,
+            self.config.enable_add_to_cart,
+        )
+        try:
+            self.client.bootstrap()
+        except Exception as exc:  # noqa: BLE001
+            log_exception(logger, "bootstrap failed", exc)
+            raise
         if self.config.enable_add_to_cart:
-            login_and_transfer_cookies(self.config, self.client)
+            try:
+                login_and_transfer_cookies(self.config, self.client)
+            except Exception as exc:  # noqa: BLE001
+                log_exception(logger, "login/cookie transfer failed", exc)
+                raise
 
     def run_once(self) -> RunReport:
         report = RunReport()
+        allowed = {s.lower() for s in self.config.sale_statuses}
+
+        # 1) Direct product links / codes
+        for code in list(self.remaining_direct_codes):
+            try:
+                hit, detail = self.client.resolve_direct_product(code)
+                report.scanned += 1
+                logger.info(
+                    "[direct] %s status=%s purchaseAvailable=%s name=%s",
+                    code,
+                    hit.sale_status,
+                    detail.get("purchaseAvailable"),
+                    hit.display_name,
+                )
+                if allowed and hit.sale_status.lower() not in allowed:
+                    logger.info(
+                        "[direct] skip %s due to sale_status=%s",
+                        code,
+                        hit.sale_status,
+                    )
+                    continue
+                if code in self.seen_codes and not self.config.enable_add_to_cart:
+                    continue
+
+                result = MatchResult(
+                    product=hit,
+                    matched_keyword=code,
+                    purchase_available=bool(detail.get("purchaseAvailable")),
+                    source="direct",
+                )
+                if self.config.enable_add_to_cart:
+                    self._try_add_to_cart(result, report, detail=detail)
+                    if result.added_to_cart and code in self.remaining_direct_codes:
+                        self.remaining_direct_codes.remove(code)
+                else:
+                    result.detail_note = (
+                        f"monitor-only purchaseAvailable={detail.get('purchaseAvailable')}"
+                    )
+                    self.seen_codes.add(code)
+                report.matches.append(result)
+            except Exception as exc:  # noqa: BLE001
+                msg = f"direct link failed for '{code}': {exc}"
+                report.errors.append(msg)
+                log_exception(logger, msg, exc)
+
+        # 2) Keyword search (optional)
+        if self.config.search_keywords:
+            self._scan_search(report)
+
+        self._notify(report)
+        if report.errors:
+            logger.error("run finished with %s error(s)", len(report.errors))
+        else:
+            logger.info(
+                "run finished scanned=%s matches=%s added=%s",
+                report.scanned,
+                len(report.matches),
+                report.added_count,
+            )
+        return report
+
+    def _scan_search(self, report: RunReport) -> None:
         precheck = self.config.precheck_list or self.remaining_targets
         targets = self.remaining_targets
-
         candidates: List[ProductHit] = []
+
         for keyword in self.config.search_keywords:
             try:
                 page_hits = self.client.iter_search_products(
@@ -66,13 +149,12 @@ class PBandaiHkBot:
                 )
                 report.scanned += len(page_hits)
                 candidates.extend(page_hits)
-                print(f"[search] '{keyword}' -> {len(page_hits)} hits")
+                logger.info("[search] '%s' -> %s hits", keyword, len(page_hits))
             except Exception as exc:  # noqa: BLE001
                 msg = f"search failed for '{keyword}': {exc}"
-                print(msg)
                 report.errors.append(msg)
+                log_exception(logger, msg, exc)
 
-        # de-dupe by product code while preserving order
         unique: List[ProductHit] = []
         seen: Set[str] = set()
         for hit in candidates:
@@ -91,10 +173,13 @@ class PBandaiHkBot:
             if hit.product_code in self.seen_codes and not self.config.enable_add_to_cart:
                 continue
 
-            result = MatchResult(product=hit, matched_keyword=fine)
-            print(
-                f"[match] {hit.sale_status} {hit.product_code} "
-                f"{hit.display_name} (kw={fine})"
+            result = MatchResult(product=hit, matched_keyword=fine, source="search")
+            logger.info(
+                "[match] %s %s %s (kw=%s)",
+                hit.sale_status,
+                hit.product_code,
+                hit.display_name,
+                fine,
             )
 
             if self.config.enable_add_to_cart:
@@ -107,33 +192,42 @@ class PBandaiHkBot:
 
             report.matches.append(result)
 
-        self._notify(report)
-        return report
-
-    def _try_add_to_cart(self, result: MatchResult, report: RunReport) -> None:
+    def _try_add_to_cart(
+        self,
+        result: MatchResult,
+        report: RunReport,
+        detail: Optional[dict] = None,
+    ) -> None:
         product = result.product
         retries = self.config.add_cart_retry_count
         for attempt in range(1, retries + 1):
             try:
-                detail = self.client.get_product(product.product_code)
-                result.purchase_available = bool(detail.get("purchaseAvailable"))
-                area_item_no = self.client.pick_area_item_no(detail)
+                product_detail = detail or self.client.get_product(product.product_code)
+                result.purchase_available = bool(product_detail.get("purchaseAvailable"))
+                area_item_no = self.client.pick_area_item_no(product_detail)
                 result.area_item_no = area_item_no
                 if not result.purchase_available:
                     result.detail_note = "purchaseAvailable=false"
+                    logger.info("[cart] not purchasable yet: %s", product.product_code)
                     return
                 if not area_item_no:
                     result.detail_note = "no areaItemNo"
+                    logger.warning("[cart] missing areaItemNo for %s", product.product_code)
                     return
                 self.client.add_to_cart(area_item_no, qty=self.config.cart_qty)
                 result.added_to_cart = True
                 result.detail_note = f"added via {area_item_no}"
                 self.seen_codes.add(product.product_code)
-                print(f"[cart] added {product.product_code}")
+                logger.info("[cart] added %s via %s", product.product_code, area_item_no)
                 return
             except Exception as exc:  # noqa: BLE001
                 result.detail_note = f"attempt {attempt}/{retries} failed: {exc}"
-                print(f"[cart] {result.detail_note}")
+                log_exception(
+                    logger,
+                    f"add-to-cart failed for {product.product_code} "
+                    f"(attempt {attempt}/{retries})",
+                    exc,
+                )
                 time.sleep(1)
         report.errors.append(
             f"failed to add {product.product_code}: {result.detail_note}"
@@ -144,6 +238,7 @@ class PBandaiHkBot:
             subject = "P-Bandai HK: no matches"
             body = (
                 "P-Bandai HK notify\n"
+                f"direct={','.join(self.remaining_direct_codes)}\n"
                 f"targets={','.join(self.remaining_targets)}\n"
                 f"scanned={report.scanned}\n"
                 "No matching products this run.\n"
@@ -157,6 +252,7 @@ class PBandaiHkBot:
                 subject = "P-Bandai HK: errors"
             lines = [
                 "P-Bandai HK notify",
+                f"direct={','.join(self.remaining_direct_codes)}",
                 f"targets={','.join(self.remaining_targets)}",
                 f"scanned={report.scanned}",
                 "",
@@ -168,7 +264,7 @@ class PBandaiHkBot:
                     price = f" | {p.price_amount} {p.currency or ''}".rstrip()
                 lines.append(
                     f"- [{p.sale_status}] {p.display_name}{price}\n"
-                    f"  code={p.product_code} kw={match.matched_keyword}\n"
+                    f"  code={p.product_code} source={match.source} kw={match.matched_keyword}\n"
                     f"  {p.url}\n"
                     f"  note={match.detail_note}"
                 )
@@ -178,8 +274,12 @@ class PBandaiHkBot:
                 lines.extend(f"- {err}" for err in report.errors)
             body = "\n".join(lines) + "\n"
 
-        status = maybe_send_email(self.config, subject, body)
-        print(f"[email] {status}")
+        try:
+            status = maybe_send_email(self.config, subject, body)
+            logger.info("[email] %s", status)
+        except Exception as exc:  # noqa: BLE001
+            log_exception(logger, "email notify failed", exc)
+            report.errors.append(f"email notify failed: {exc}")
 
     def run_forever(self) -> None:
         self.prepare()
@@ -188,20 +288,19 @@ class PBandaiHkBot:
                 raise ValueError("SCHEDULE_MODE=1 requires EXECUTE_TIME")
             for when in self.config.execute_times:
                 schedule.every().day.at(when).do(self.run_once)
-                print(f"[schedule] registered {when}")
-            print("[schedule] waiting...")
+                logger.info("[schedule] registered %s", when)
+            logger.info("[schedule] waiting...")
             while True:
                 schedule.run_pending()
                 time.sleep(self.config.schedule_polling_period)
         else:
-            print("[loop] immediate mode")
+            logger.info("[loop] immediate mode")
             while True:
-                report = self.run_once()
-                if self.config.enable_add_to_cart and not self.remaining_targets:
-                    print("[loop] all targets handled; exiting")
+                self.run_once()
+                if self.config.enable_add_to_cart and not (
+                    self.remaining_targets or self.remaining_direct_codes
+                ):
+                    logger.info("[loop] all targets handled; exiting")
                     break
-                if not self.config.enable_add_to_cart and report.matches:
-                    # monitor mode keeps running, but can exit early if desired later
-                    pass
-                print(f"[loop] sleep {self.config.retry_wait}s")
+                logger.info("[loop] sleep %ss", self.config.retry_wait)
                 time.sleep(self.config.retry_wait)
