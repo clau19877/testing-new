@@ -100,7 +100,11 @@ cp task.example.csv task.csv
 cp proxy.example.csv proxy.csv
 ```
 2. `task.csv` columns: `name,login,password`  
-   `proxy.csv` column: `proxy` (or `host,port,username,password`)
+   `proxy.csv` column: `proxy` — one per line. Accepted formats:
+   - `host:port:user:pass` (common provider format)
+   - `http://user:pass@host:port`
+   - `socks5://host:1080`
+   - or columns `host,port,username,password`
 3. Parallel count = number of rows in `task.csv`. Each task picks one proxy at random.
 ```bash
 python web_shopping_bot_hk.py tasks

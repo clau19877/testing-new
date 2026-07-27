@@ -131,6 +131,28 @@ func menu(venvPy string) int {
 			}
 			_ = runBot(venvPy, args...)
 		case "8":
+			createdCSV := false
+			if copyCSVIfMissing("task.example.csv", "task.csv") {
+				fmt.Println("Created task.csv from task.example.csv.")
+				createdCSV = true
+			}
+			if copyCSVIfMissing("proxy.example.csv", "proxy.csv") {
+				fmt.Println("Created proxy.csv from proxy.example.csv.")
+				createdCSV = true
+			}
+			if createdCSV {
+				fmt.Println("Edit task.csv (login/password) and proxy.csv, then choose [8] again.")
+				fmt.Println("Proxy format: host:port:user:pass   OR   http://user:pass@host:port")
+				continue
+			}
+			if _, err := os.Stat("task.csv"); err != nil {
+				fmt.Println("Missing task.csv. Create it first.")
+				continue
+			}
+			if _, err := os.Stat("proxy.csv"); err != nil {
+				fmt.Println("Missing proxy.csv. Create it first.")
+				continue
+			}
 			fmt.Print("Force re-login even if cookies exist? [y/N]: ")
 			forceLine, _ := in.ReadString('\n')
 			forceAns := strings.TrimSpace(strings.ToLower(forceLine))
@@ -263,6 +285,21 @@ func ensureCSVTemplates() error {
 		}
 	}
 	return nil
+}
+
+func copyCSVIfMissing(exampleName, destName string) bool {
+	if _, err := os.Stat(destName); err == nil {
+		return false
+	}
+	data, err := os.ReadFile(exampleName)
+	if err != nil {
+		return false
+	}
+	if err := os.WriteFile(destName, data, 0o644); err != nil {
+		fmt.Println("Could not create", destName, ":", err)
+		return false
+	}
+	return true
 }
 
 func openEnvFile() error {

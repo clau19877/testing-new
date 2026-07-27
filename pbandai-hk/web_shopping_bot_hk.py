@@ -209,15 +209,27 @@ def cmd_login(config: Config, name: str, proxy: str, force: bool) -> int:
 
 def cmd_tasks(config: Config, force: bool) -> int:
     """Login all rows from task.csv in parallel; each picks a random proxy.csv entry."""
-    from pbandai_hk.task_runner import run_tasks_parallel
+    from pbandai_hk.task_runner import ensure_csv_templates, run_tasks_parallel
 
     setup_logging(config.log_file, level=config.log_level)
     logger = get_logger("cli")
+    ready, messages = ensure_csv_templates(config)
+    for msg in messages:
+        print(msg)
+    if not ready:
+        return 1
     try:
         results = run_tasks_parallel(config, force=force)
     except Exception as exc:  # noqa: BLE001
         log_exception(logger, "tasks command failed", exc)
         print(f"ERROR: {exc}", file=sys.stderr)
+        print(
+            "\nHint: proxy.csv accepts lines like:\n"
+            "  host:port:user:pass\n"
+            "  http://user:pass@host:port\n"
+            "  socks5://host:1080\n",
+            file=sys.stderr,
+        )
         return 1
 
     print(f"Sessions file: {config.sessions_file}")

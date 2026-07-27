@@ -91,6 +91,24 @@ What do you want to do?
                 args.extend(["--proxy", proxy])
             run_bot(vp, *args)
         elif choice == "8":
+            created_csv = False
+            for src_name, dst_name in (
+                ("task.example.csv", "task.csv"),
+                ("proxy.example.csv", "proxy.csv"),
+            ):
+                src = ROOT / src_name
+                dst = ROOT / dst_name
+                if src.exists() and not dst.exists():
+                    shutil.copyfile(src, dst)
+                    print(f"Created {dst_name} from {src_name}.")
+                    created_csv = True
+            if created_csv:
+                print("Edit task.csv (login/password) and proxy.csv, then choose [8] again.")
+                print("Proxy format: host:port:user:pass   OR   http://user:pass@host:port")
+                continue
+            if not (ROOT / "task.csv").exists() or not (ROOT / "proxy.csv").exists():
+                print("Missing task.csv and/or proxy.csv. Create them first.")
+                continue
             force = input("Force re-login even if cookies exist? [y/N]: ").strip().lower()
             args = ["tasks"]
             if force in {"y", "yes", "1"}:

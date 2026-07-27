@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from .api import PBandaiHkClient
 from .csv_tasks import AssignedTask, assign_proxies, describe_assignment, load_proxies_csv, load_tasks_csv
@@ -32,7 +33,56 @@ def task_csv_exists(config: "Config") -> bool:
     return path.exists() and path.is_file()
 
 
+def ensure_csv_templates(config: "Config") -> Tuple[bool, List[str]]:
+    """Create task.csv / proxy.csv from examples when missing.
+
+    Returns (ready, messages). ready=False means user still needs to edit files.
+    """
+    messages: List[str] = []
+    created = False
+
+    pairs = (
+        (Path(config.task_csv), Path("task.example.csv")),
+        (Path(config.proxy_csv), Path("proxy.example.csv")),
+    )
+    for dest, example in pairs:
+        if dest.exists():
+            continue
+        if example.exists():
+            shutil.copyfile(example, dest)
+            messages.append(f"Created {dest} from {example.name} — edit it with your real values.")
+            created = True
+        else:
+            messages.append(
+                f"Missing {dest} (and no {example.name} template found). "
+                f"Create {dest} manually."
+            )
+
+    if created:
+        messages.append(
+            "Fill login/password in task.csv and proxies in proxy.csv, then run option [8] again.\n"
+            "Proxy formats accepted:\n"
+            "  host:port:user:pass\n"
+            "  http://user:pass@host:port\n"
+            "  socks5://host:1080"
+        )
+        return False, messages
+
+    missing = [str(p) for p, _ in pairs if not p.exists()]
+    if missing:
+        return False, messages or [f"Missing CSV file(s): {', '.join(missing)}"]
+    return True, messages
+
+
 def load_and_assign_tasks(config: "Config") -> List[AssignedTask]:
+    ready, messages = ensure_csv_templates(config)
+    for msg in messages:
+        print(msg)
+    if not ready:
+        raise FileNotFoundError(
+            "task.csv / proxy.csv not ready. "
+            "Edit the created CSV files, then retry."
+        )
     tasks = load_tasks_csv(config.task_csv)
     proxies = load_proxies_csv(config.proxy_csv)
     assigned = assign_proxies(
