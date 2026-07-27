@@ -122,12 +122,18 @@ What do you want to do?
 
 def open_env() -> None:
     env = ROOT / ".env"
-    if os.name == "nt":
-        os.startfile(str(env))  # type: ignore[attr-defined]
-    elif sys.platform == "darwin":
-        subprocess.Popen(["open", str(env)])
-    else:
-        subprocess.Popen(["xdg-open", str(env)])
+    print(f"Opening {env} ...")
+    try:
+        if os.name == "nt":
+            os.startfile(str(env))  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(env)])
+        else:
+            subprocess.Popen(["xdg-open", str(env)])
+        print("Edit and save the file, then come back here.")
+    except Exception as exc:  # noqa: BLE001
+        print(f"Could not open editor automatically: {exc}")
+        print(f"Please edit this file manually:\n  {env}")
 
 
 def main() -> int:

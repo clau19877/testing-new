@@ -106,7 +106,12 @@ func menu(venvPy string) int {
 				fmt.Println("Check failed. See logs/pbandai_hk.log")
 			}
 		case "4":
-			_ = openEnvFile()
+			if err := openEnvFile(); err != nil {
+				fmt.Println("Could not open .env:", err)
+				fmt.Println("Edit this file manually:", mustAbs(".env"))
+			} else {
+				fmt.Println("Opened .env — edit/save it, then continue here.")
+			}
 		case "5":
 			if err := ensureDeps(venvPy); err != nil {
 				fmt.Println("Setup error:", err)

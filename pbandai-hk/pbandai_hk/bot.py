@@ -218,10 +218,17 @@ class PBandaiHkBot:
                     source="direct",
                 )
                 if self.config.enable_add_to_cart:
-                    self._try_add_to_cart(result, report, detail=detail)
-                    if result.added_to_cart and code in self.remaining_direct_codes:
-                        if self.config.cart_mode != "all" or result.all_sessions_ok:
-                            self.remaining_direct_codes.remove(code)
+                    if not result.purchase_available:
+                        result.detail_note = "waiting: purchaseAvailable=false"
+                        logger.info(
+                            "[wait] %s on sale but not purchasable yet",
+                            code,
+                        )
+                    else:
+                        self._try_add_to_cart(result, report, detail=detail)
+                        if result.added_to_cart and code in self.remaining_direct_codes:
+                            if self.config.cart_mode != "all" or result.all_sessions_ok:
+                                self.remaining_direct_codes.remove(code)
                 else:
                     result.detail_note = (
                         f"monitor-only purchaseAvailable={detail.get('purchaseAvailable')}"
