@@ -135,20 +135,24 @@ def browser_add_to_cart(
             time.sleep(1.2)
             if not area_item_no:
                 return False, "browser got PAGE NOT AVAILABLE and no areaItemNo"
-            ok, note = _page_fetch_add_to_cart(
+            ok, note = _page_fetch_add_to_cart_burst(
                 driver,
                 area_item_no=area_item_no,
                 qty=qty,
                 csrf=client.csrf_token or "",
+                attempts=12,
+                gap=0.12,
             )
             if not ok:
                 return False, f"PDP down + {note}"
         elif not _click_add_to_cart(driver, timeout=45):
-            ok, note = _page_fetch_add_to_cart(
+            ok, note = _page_fetch_add_to_cart_burst(
                 driver,
                 area_item_no=area_item_no,
                 qty=qty,
                 csrf=client.csrf_token or "",
+                attempts=12,
+                gap=0.12,
             )
             if not ok:
                 return False, note
@@ -582,6 +586,25 @@ def _click_add_to_cart(driver: Any, timeout: int = 45) -> bool:
     return False
 
 
+def _is_retryable_cart_note(note: str) -> bool:
+    text = (note or "").lower()
+    needles = (
+        "503",
+        "502",
+        "500",
+        "504",
+        "429",
+        "html error",
+        "page not available",
+        "timeout",
+        "timed out",
+        "abort",
+        "connection",
+        "click=no button",
+    )
+    return any(n in text for n in needles)
+
+
 def _page_fetch_add_to_cart(
     driver: Any,
     *,
@@ -598,17 +621,36 @@ def _page_fetch_add_to_cart(
     const callback = arguments[arguments.length - 1];
     (async () => {
       try {
-        const csrf =
-          csrfArg ||
-          document.querySelector('meta[name="csrf-token"]')?.content ||
-          document.querySelector('meta[name="_csrf"]')?.content ||
-          document.querySelector('input[name="_csrf"]')?.value ||
-          '';
+        const area = (location.pathname.split('/')[1] || 'hk').toLowerCase();
+        let csrf = csrfArg || '';
+        // Refresh CSRF from member context when possible (stale token can fail cart).
+        try {
+          const m = await fetch('/api/context/member', {
+            method: 'GET',
+            credentials: 'include',
+            headers: {
+              'Accept': 'application/json, text/plain, */*',
+              'X-Requested-With': 'XMLHttpRequest',
+              'X-G1-Area-Code': area,
+            },
+          });
+          const mj = await m.json().catch(() => null);
+          if (mj && mj.csrfToken) csrf = mj.csrfToken;
+        } catch (e) {}
+        if (!csrf) {
+          csrf =
+            document.querySelector('meta[name="csrf-token"]')?.content ||
+            document.querySelector('meta[name="_csrf"]')?.content ||
+            document.querySelector('input[name="_csrf"]')?.value ||
+            '';
+        }
         const headers = {
           'Content-Type': 'application/json',
           'Accept': 'application/json, text/plain, */*',
           'X-Requested-With': 'XMLHttpRequest',
-          'X-G1-Area-Code': 'hk',
+          'X-G1-Area-Code': area,
+          'Origin': location.origin,
+          'Referer': location.href,
         };
         if (csrf) {
           headers['X-CSRF-TOKEN'] = csrf;
@@ -622,7 +664,7 @@ def _page_fetch_add_to_cart(
           body: JSON.stringify([{areaItemNo, qty}]),
         });
         const text = await resp.text();
-        callback({status: resp.status, body: text.slice(0, 800)});
+        callback({status: resp.status, body: text.slice(0, 800), csrf: !!csrf});
       } catch (err) {
         callback({status: 0, body: String(err)});
       }
@@ -640,6 +682,31 @@ def _page_fetch_add_to_cart(
     except Exception as exc:  # noqa: BLE001
         log_exception(logger, "in-page fetch addToCart failed", exc)
         return False, f"browser-fetch error: {exc}"
+
+
+def _page_fetch_add_to_cart_burst(
+    driver: Any,
+    *,
+    area_item_no: str,
+    qty: int,
+    csrf: str,
+    attempts: int = 12,
+    gap: float = 0.12,
+) -> tuple[bool, str]:
+    """Hammer addToCart; drops often return 503 HTML for a few seconds."""
+    last = "browser-fetch not attempted"
+    for i in range(1, max(1, attempts) + 1):
+        ok, note = _page_fetch_add_to_cart(
+            driver, area_item_no=area_item_no, qty=qty, csrf=csrf
+        )
+        if ok:
+            return True, f"{note} (burst {i}/{attempts})"
+        last = note
+        if not _is_retryable_cart_note(note):
+            return False, note
+        if i < attempts:
+            time.sleep(gap)
+    return False, last
 
 
 def _page_has_error(driver: Any) -> bool:

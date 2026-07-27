@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from .browser_cart import (
     _click_add_to_cart,
     _load_cookies_into_driver,
-    _page_fetch_add_to_cart,
+    _page_fetch_add_to_cart_burst,
     _safe_cart_count,
     _wait_for_product_ready,
     force_vue_member_refresh,
@@ -168,29 +168,71 @@ class WarmBrowserPool:
         before = _safe_cart_count(client)
         csrf = getattr(client, "csrf_token", "") or ""
 
-        # 1) In-page fetch — no navigation / no HTML reload. F5 hooks attach tokens.
-        ok, note = _page_fetch_add_to_cart(
+        # 1) Burst in-page fetch — drops return 503 HTML for seconds; keep hammering.
+        ok, note = _page_fetch_add_to_cart_burst(
             wb.driver,
             area_item_no=area_item_no,
             qty=qty,
             csrf=csrf,
+            attempts=16,
+            gap=0.1,
         )
         if ok:
             return self._verify(client, wb, before, f"warm-inpage {note}")
 
-        # 2) Click PLACE PRE-ORDER / ADD TO CART on the already-open page.
+        # 2) Quick click only — don't burn 12s when PDP has no button under 503.
         logger.warning(
-            "[warm] in-page fetch failed session=%s (%s); trying click",
+            "[warm] in-page burst failed session=%s (%s); trying short click",
             client.name,
             note,
         )
-        print(f"[{client.name}] warm fetch failed ({note[:120]}); clicking button")
-        clicked = _click_add_to_cart(wb.driver, timeout=12)
+        print(f"[{client.name}] warm fetch failed ({note[:120]}); short click")
+        clicked = _click_add_to_cart(wb.driver, timeout=3)
         if clicked:
-            time.sleep(2.0)
-            return self._verify(client, wb, before, "warm-click PLACE PRE-ORDER/CART")
+            time.sleep(1.5)
+            verified = self._verify(client, wb, before, "warm-click PLACE PRE-ORDER/CART")
+            if verified[0]:
+                return verified
 
-        return False, f"warm failed: fetch={note}; click=no button"
+        # 3) Repark on HK origin (or PDP) and burst again — HTML may recover.
+        home = f"{self.config.base_url}/{self.config.area_code}/"
+        product_url = self._product_url(product_code)
+        try:
+            print(f"[{client.name}] warm repark + burst retry")
+            wb.driver.get(home)
+            time.sleep(0.6)
+            force_vue_member_refresh(wb.driver)
+            ok2, note2 = _page_fetch_add_to_cart_burst(
+                wb.driver,
+                area_item_no=area_item_no,
+                qty=qty,
+                csrf=csrf,
+                attempts=12,
+                gap=0.1,
+            )
+            if ok2:
+                return self._verify(client, wb, before, f"warm-repark-home {note2}")
+            try:
+                wb.driver.get(product_url)
+                _wait_for_product_ready(wb.driver, timeout=8)
+            except Exception:  # noqa: BLE001
+                pass
+            ok3, note3 = _page_fetch_add_to_cart_burst(
+                wb.driver,
+                area_item_no=area_item_no,
+                qty=qty,
+                csrf=csrf,
+                attempts=10,
+                gap=0.1,
+            )
+            if ok3:
+                return self._verify(client, wb, before, f"warm-repark-pdp {note3}")
+            note = f"{note}; repark={note2}; pdp={note3}"
+        except Exception as exc:  # noqa: BLE001
+            note = f"{note}; repark-error={exc}"
+            log_exception(logger, f"warm repark burst failed session={client.name}", exc)
+
+        return False, f"warm failed: fetch={note}; click={'yes' if clicked else 'no button'}"
 
     def close(self) -> None:
         for wb in self.browsers:

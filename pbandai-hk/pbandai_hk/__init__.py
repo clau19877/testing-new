@@ -2,5 +2,5 @@
 
 # Printed at startup — if you still see JSONDecodeError on bootstrap()/resp.json(),
 # you are running an OLD folder. Redownload the zip and replace pbandai_hk/.
-__version__ = "0.2.5"
-BUILD_ID = "drop-lag-20260727"
+__version__ = "0.2.6"
+BUILD_ID = "cart-503-20260727"

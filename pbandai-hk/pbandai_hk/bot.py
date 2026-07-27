@@ -499,6 +499,12 @@ class PBandaiHkBot:
         report.errors.append(
             f"failed to add {product.product_code}: {result.detail_note}"
         )
+        # Keep pressure on the drop instead of sleeping RETRY_WAIT (60s) after 503s.
+        if any(_is_retryable_cart_failure(f) for f in failures):
+            self._next_sleep_hint = 0.25
+            logger.info(
+                "[cart] retryable failures — next loop sleep ~0.25s (keep trying)"
+            )
 
     def _add_with_client(
         self,
@@ -508,12 +514,17 @@ class PBandaiHkBot:
     ) -> tuple[bool, str]:
         from .diagnostics import is_cart_eligible, log_cart_diagnosis
 
-        retries = self.config.add_cart_retry_count
+        retries = max(1, int(self.config.add_cart_retry_count))
         last_note = "unknown"
         method = self.config.cart_method
         for attempt in range(1, retries + 1):
             try:
-                product_detail = detail or client.get_product(product.product_code)
+                # Refresh product after first attempt so sold-out / status updates apply.
+                product_detail = (
+                    detail if (attempt == 1 and detail is not None) else client.get_product(product.product_code)
+                )
+                if attempt > 1:
+                    detail = None
                 area_item_no = client.pick_area_item_no(product_detail)
                 signals = is_cart_eligible(
                     product_detail,
@@ -537,13 +548,50 @@ class PBandaiHkBot:
                     qty = max(1, min(qty, int(signals.max_qty)))
 
                 if method == "browser":
-                    return self._finalize_cart_result(
+                    ok, note = self._finalize_cart_result(
                         self._browser_add(client, product, area_item_no, qty=qty)
                     )
+                    if ok:
+                        return True, note
+                    last_note = note
+                    if attempt < retries and _is_retryable_cart_failure(note):
+                        time.sleep(0.2)
+                        continue
+                    return False, note
+
                 if method == "warm":
-                    return self._finalize_cart_result(
+                    ok, note = self._finalize_cart_result(
                         self._warm_add(client, product, area_item_no, qty=qty)
                     )
+                    if ok:
+                        return True, note
+                    last_note = note
+                    logger.warning(
+                        "[cart] session=%s warm attempt %s/%s failed: %s",
+                        client.name,
+                        attempt,
+                        retries,
+                        note[:180],
+                    )
+                    if attempt < retries and _is_retryable_cart_failure(note):
+                        try:
+                            client.refresh_csrf(required=False)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        time.sleep(0.15)
+                        continue
+                    # Last ditch: API once (often WAF 501, but cheap).
+                    if attempt >= retries:
+                        try:
+                            client.add_to_cart(
+                                area_item_no,
+                                qty=qty,
+                                product_code=product.product_code,
+                            )
+                            return True, f"api-added via {area_item_no} qty={qty} (after warm)"
+                        except Exception as api_exc:  # noqa: BLE001
+                            return False, f"{last_note}; api={api_exc}"
+                    continue
 
                 # auto: prefer warm pool (no HTML reload) when ready
                 if self.warm_pool is not None and self.warm_pool.ready_count > 0:
@@ -552,6 +600,7 @@ class PBandaiHkBot:
                     )
                     if ok:
                         return True, note
+                    last_note = note
                     logger.warning(
                         "[cart] session=%s warm failed (%s); trying API",
                         client.name,
@@ -576,28 +625,41 @@ class PBandaiHkBot:
                     return True, f"api-added via {area_item_no} qty={qty}"
                 except Exception as api_exc:  # noqa: BLE001
                     msg = str(api_exc)
+                    last_note = msg
                     waf_blocked = (
                         "501" in msg
+                        or "503" in msg
+                        or "502" in msg
                         or "WAF" in msg
                         or "HTML" in msg
                         or "Page not available" in msg
                     )
                     if method == "auto" and waf_blocked:
                         logger.warning(
-                            "[cart] session=%s API blocked (%s); falling back to browser",
+                            "[cart] session=%s API blocked (%s); falling back to browser/warm",
                             client.name,
                             msg[:160],
                         )
-                        # Prefer warm again if pool still alive (no cold launch)
                         if self.warm_pool is not None and self.warm_pool.ready_count > 0:
                             ok, note = self._finalize_cart_result(
                                 self._warm_add(client, product, area_item_no, qty=qty)
                             )
                             if ok:
                                 return True, note
-                        return self._finalize_cart_result(
+                            last_note = note
+                        ok, note = self._finalize_cart_result(
                             self._browser_add(client, product, area_item_no, qty=qty)
                         )
+                        if ok:
+                            return True, note
+                        last_note = note
+                        if attempt < retries and _is_retryable_cart_failure(last_note):
+                            time.sleep(0.2)
+                            continue
+                        raise
+                    if attempt < retries and _is_retryable_cart_failure(msg):
+                        time.sleep(0.2)
+                        continue
                     raise
             except Exception as exc:  # noqa: BLE001
                 last_note = f"attempt {attempt}/{retries} failed: {exc}"
@@ -608,7 +670,7 @@ class PBandaiHkBot:
                     exc,
                 )
                 detail = None
-                time.sleep(1)
+                time.sleep(0.3 if attempt < retries else 0)
         return False, last_note
 
     def _finalize_cart_result(self, result: tuple[bool, str]) -> tuple[bool, str]:
@@ -759,9 +821,12 @@ class PBandaiHkBot:
                                 lead,
                             )
                         else:
-                            # Near drop / API may lag on preOrderStatus — poll hard.
+                            # Near drop / retryable 503 pressure — poll hard.
                             sleep_for = min(sleep_for, 0.25)
-                            logger.info("[loop] near drop — fast poll")
+                            if hint <= 1.0:
+                                logger.info("[loop] cart pressure / near drop — fast poll")
+                            else:
+                                logger.info("[loop] near drop — fast poll")
                     sleep_for = max(0.2, sleep_for)
                     logger.info("[loop] sleep %.1fs", sleep_for)
                     time.sleep(sleep_for)
@@ -772,3 +837,25 @@ class PBandaiHkBot:
                 except Exception:  # noqa: BLE001
                     pass
                 self.warm_pool = None
+
+
+def _is_retryable_cart_failure(note: str) -> bool:
+    text = (note or "").lower()
+    needles = (
+        "503",
+        "502",
+        "500",
+        "504",
+        "429",
+        "html error",
+        "page not available",
+        "timeout",
+        "timed out",
+        "abort",
+        "connection",
+        "click=no button",
+        "no button",
+        "warm failed",
+        "waf",
+    )
+    return any(n in text for n in needles)
