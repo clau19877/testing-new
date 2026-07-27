@@ -84,6 +84,7 @@ func menu(venvPy string) int {
 		fmt.Println("  [6] List sessions")
 		fmt.Println("  [7] Login / create session (multi + proxy)")
 		fmt.Println("  [8] Login all task.csv (parallel + random proxies)")
+		fmt.Println("  [9] Diagnose product cart eligibility (detailed log)")
 		fmt.Println("  [Q] Quit")
 		fmt.Print("> ")
 		line, _ := in.ReadString('\n')
@@ -166,6 +167,16 @@ func menu(venvPy string) int {
 				args = append(args, "--force")
 			}
 			_ = runBot(venvPy, args...)
+		case "9":
+			fmt.Print("Paste product URL or code to diagnose: ")
+			link, _ := in.ReadString('\n')
+			link = strings.TrimSpace(link)
+			if link == "" {
+				fmt.Println("No link provided.")
+				continue
+			}
+			_ = runBot(venvPy, "diagnose", link)
+			fmt.Println("See logs/pbandai_hk.log and logs/diagnostics/")
 		case "q", "quit", "exit":
 			return 0
 		default:

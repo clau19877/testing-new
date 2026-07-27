@@ -62,6 +62,7 @@ What do you want to do?
   [6] List sessions
   [7] Login / create session (multi + proxy)
   [8] Login all task.csv (parallel + random proxies)
+  [9] Diagnose product cart eligibility (detailed log)
   [Q] Quit
 """
         )
@@ -114,6 +115,13 @@ What do you want to do?
             if force in {"y", "yes", "1"}:
                 args.append("--force")
             run_bot(vp, *args)
+        elif choice == "9":
+            link = input("Paste product URL or code to diagnose: ").strip()
+            if not link:
+                print("No link provided.")
+                continue
+            run_bot(vp, "diagnose", link)
+            print("Also see logs/pbandai_hk.log and logs/diagnostics/")
         elif choice in {"q", "quit", "exit"}:
             return 0
         else:

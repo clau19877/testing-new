@@ -244,6 +244,72 @@ def cmd_tasks(config: Config, force: bool) -> int:
     return 0 if ok == len(results) and results else 1
 
 
+def cmd_diagnose(config: Config, link_or_code: str) -> int:
+    """Full cart-eligibility diagnosis for one product (logs + JSON snapshot)."""
+    from pbandai_hk.api import PBandaiHkClient
+    from pbandai_hk.diagnostics import format_signals_text, is_cart_eligible, log_cart_diagnosis
+    from pbandai_hk.sessions import build_runtime_sessions
+
+    setup_logging(config.log_file, level="DEBUG")
+    logger = get_logger("cli")
+    code = extract_product_code(link_or_code)
+    if not code:
+        logger.error("could not parse product code from: %s", link_or_code)
+        return 1
+
+    sessions = build_runtime_sessions(
+        sessions_file=config.sessions_file,
+        base_url=config.base_url,
+        area_code=config.area_code,
+        accept_language=config.accept_language,
+        fallback_proxy=config.proxy_url,
+        cookie_file=config.cookie_file,
+    )
+    # Prefer first logged-in session; fall back to anonymous client.
+    clients = [runtime.client for runtime in sessions] or [
+        PBandaiHkClient(
+            base_url=config.base_url,
+            area_code=config.area_code,
+            accept_language=config.accept_language,
+            proxy=config.proxy_url,
+            name="anonymous",
+        )
+    ]
+
+    exit_code = 0
+    for client in clients:
+        try:
+            client.bootstrap()
+            hit, detail = client.resolve_direct_product(code)
+            picked = client.pick_area_item_no(detail) or ""
+            signals = is_cart_eligible(
+                detail,
+                product_code=code,
+                sale_status=hit.sale_status,
+                picked_area_item_no=picked,
+            )
+            path = log_cart_diagnosis(
+                signals,
+                session_name=client.name,
+                stage="diagnose-cmd",
+            )
+            print("=" * 60)
+            print(f"session={client.name} proxy={redact_proxy(client.proxy) or '-'}")
+            print(format_signals_text(signals))
+            print(f"snapshot={path}")
+            print(f"log_file={config.log_file}")
+            if signals.cart_eligible:
+                print("RESULT: cart should be attempted (even if purchaseAvailable=false)")
+            else:
+                print("RESULT: cart blocked by hard reasons above")
+                exit_code = 1
+        except Exception as exc:  # noqa: BLE001
+            exit_code = 1
+            log_exception(logger, f"diagnose failed session={client.name}", exc)
+            print(f"ERROR session={client.name}: {exc}", file=sys.stderr)
+    return exit_code
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="P-Bandai HK monitor / cart helper")
     parser.add_argument(
@@ -287,6 +353,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Force browser login even if cookie files already exist",
     )
+    diagnose_p = sub.add_parser(
+        "diagnose",
+        help="Full cart-eligibility diagnosis for one product (writes logs/diagnostics/*.json)",
+    )
+    diagnose_p.add_argument("link", help="Direct product URL or product code")
 
     args = parser.parse_args(argv)
     config = Config.from_env(_dotenv_path(args.dotenv_path))
@@ -297,6 +368,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_search(config, args.keyword)
         if command == "check":
             return cmd_check(config, args.link)
+        if command == "diagnose":
+            return cmd_diagnose(config, args.link)
         if command == "sessions":
             return cmd_sessions(config)
         if command == "login":

@@ -218,13 +218,33 @@ class PBandaiHkBot:
                     source="direct",
                 )
                 if self.config.enable_add_to_cart:
-                    if not result.purchase_available:
-                        result.detail_note = "waiting: purchaseAvailable=false"
+                    from .diagnostics import is_cart_eligible, log_cart_diagnosis
+
+                    picked = self.client.pick_area_item_no(detail) or ""
+                    signals = is_cart_eligible(
+                        detail,
+                        product_code=code,
+                        sale_status=hit.sale_status,
+                        picked_area_item_no=picked,
+                    )
+                    log_cart_diagnosis(
+                        signals,
+                        session_name=self.client.name,
+                        stage="direct-scan",
+                    )
+                    if not signals.cart_eligible:
+                        result.detail_note = (
+                            "waiting: " + "; ".join(signals.blocking_reasons)
+                            or "not cart-eligible"
+                        )
                         logger.info(
-                            "[wait] %s on sale but not purchasable yet",
+                            "[wait] %s not cart-eligible yet (%s)",
                             code,
+                            result.detail_note,
                         )
                     else:
+                        # Note: top-level purchaseAvailable can be false while the
+                        # site still allows add-to-cart (inventory/availability).
                         self._try_add_to_cart(result, report, detail=detail)
                         if result.added_to_cart and code in self.remaining_direct_codes:
                             if self.config.cart_mode != "all" or result.all_sessions_ok:
@@ -374,17 +394,38 @@ class PBandaiHkBot:
         product: ProductHit,
         detail: Optional[dict] = None,
     ) -> tuple[bool, str]:
+        from .diagnostics import is_cart_eligible, log_cart_diagnosis
+
         retries = self.config.add_cart_retry_count
         last_note = "unknown"
         for attempt in range(1, retries + 1):
             try:
                 product_detail = detail or client.get_product(product.product_code)
-                purchase_available = bool(product_detail.get("purchaseAvailable"))
                 area_item_no = client.pick_area_item_no(product_detail)
-                if not purchase_available:
-                    return False, "purchaseAvailable=false"
+                signals = is_cart_eligible(
+                    product_detail,
+                    product_code=product.product_code,
+                    sale_status=product.sale_status,
+                    picked_area_item_no=area_item_no or "",
+                )
+                if attempt == 1 or not signals.cart_eligible:
+                    log_cart_diagnosis(
+                        signals,
+                        session_name=client.name,
+                        stage=f"add-attempt-{attempt}",
+                    )
+                if not signals.cart_eligible:
+                    return False, "not-eligible: " + "; ".join(signals.blocking_reasons)
                 if not area_item_no:
                     return False, "no areaItemNo"
+                logger.info(
+                    "[cart] session=%s attempting add areaItemNo=%s "
+                    "purchaseAvailable=%s availableQty=%s",
+                    client.name,
+                    area_item_no,
+                    signals.purchase_available,
+                    signals.available_qty,
+                )
                 client.add_to_cart(area_item_no, qty=self.config.cart_qty)
                 return True, f"added via {area_item_no}"
             except Exception as exc:  # noqa: BLE001
@@ -395,6 +436,8 @@ class PBandaiHkBot:
                     f"(attempt {attempt}/{retries})",
                     exc,
                 )
+                # Force fresh product detail on retry
+                detail = None
                 time.sleep(1)
         return False, last_note
 
