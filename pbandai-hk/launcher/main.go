@@ -81,6 +81,8 @@ func menu(venvPy string) int {
 		fmt.Println("  [3] Check a direct product link")
 		fmt.Println("  [4] Open .env for editing")
 		fmt.Println("  [5] Re-run setup (deps)")
+		fmt.Println("  [6] List sessions")
+		fmt.Println("  [7] Login / create session (multi + proxy)")
 		fmt.Println("  [Q] Quit")
 		fmt.Print("> ")
 		line, _ := in.ReadString('\n')
@@ -110,6 +112,23 @@ func menu(venvPy string) int {
 			} else {
 				fmt.Println("Dependencies reinstalled.")
 			}
+		case "6":
+			_ = runBot(venvPy, "sessions")
+		case "7":
+			fmt.Print("Session name (e.g. acc1): ")
+			name, _ := in.ReadString('\n')
+			name = strings.TrimSpace(name)
+			if name == "" {
+				name = "acc1"
+			}
+			fmt.Print("Proxy URL (blank for none): ")
+			proxy, _ := in.ReadString('\n')
+			proxy = strings.TrimSpace(proxy)
+			args := []string{"login", "--name", name, "--force"}
+			if proxy != "" {
+				args = append(args, "--proxy", proxy)
+			}
+			_ = runBot(venvPy, args...)
 		case "q", "quit", "exit":
 			return 0
 		default:

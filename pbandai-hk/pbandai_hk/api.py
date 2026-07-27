@@ -41,10 +41,16 @@ class PBandaiHkClient:
         area_code: str = "hk",
         accept_language: str = "en",
         session: Optional[requests.Session] = None,
+        proxy: str | None = None,
+        name: str = "default",
     ) -> None:
+        from .proxy_util import parse_proxy
+
         self.base_url = base_url.rstrip("/")
         self.area_code = area_code.lower()
         self.accept_language = accept_language
+        self.name = name
+        self.proxy = (proxy or "").strip()
         self.session = session or requests.Session()
         self.csrf_token: Optional[str] = None
         self.session.headers.update(
@@ -62,6 +68,9 @@ class PBandaiHkClient:
                 "Content-Type": "application/json",
             }
         )
+        parsed = parse_proxy(self.proxy)
+        if parsed:
+            self.session.proxies.update(parsed.requests_proxies())
 
     def _url(self, path: str) -> str:
         if not path.startswith("/"):

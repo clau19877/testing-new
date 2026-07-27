@@ -37,6 +37,9 @@ class Config:
     login_url: str = "https://p-bandai.com/hk/login"
     browser: str = "auto"
     cookie_file: str = ""
+    proxy_url: str = ""
+    sessions_file: str = "sessions.json"
+    cart_mode: str = "first"  # first | all | round_robin
     schedule_mode: bool = False
     execute_times: List[str] = field(default_factory=list)
     schedule_polling_period: int = 60
@@ -50,6 +53,7 @@ class Config:
     smtp_port: int = 587
     log_file: str = "logs/pbandai_hk.log"
     log_level: str = "INFO"
+    force_browser_login: bool = False
 
     @classmethod
     def from_env(cls, dotenv_path: str | None = None) -> "Config":
@@ -76,6 +80,9 @@ class Config:
             login_url=os.getenv("LOGIN_URL") or "https://p-bandai.com/hk/login",
             browser=(os.getenv("BROWSER") or "auto").lower(),
             cookie_file=os.getenv("COOKIE_FILE") or "",
+            proxy_url=(os.getenv("PROXY_URL") or "").strip(),
+            sessions_file=os.getenv("SESSIONS_FILE") or "sessions.json",
+            cart_mode=(os.getenv("CART_MODE") or "first").strip().lower(),
             schedule_mode=_as_bool(os.getenv("SCHEDULE_MODE"), False),
             execute_times=_split_csv(os.getenv("EXECUTE_TIME")),
             schedule_polling_period=int(os.getenv("EXECUTE_SCHEDULE_POLLING_PERIOD") or "60"),
@@ -89,6 +96,7 @@ class Config:
             smtp_port=int(os.getenv("SMTP_PORT") or "587"),
             log_file=os.getenv("LOG_FILE") or "logs/pbandai_hk.log",
             log_level=(os.getenv("LOG_LEVEL") or "INFO").upper(),
+            force_browser_login=_as_bool(os.getenv("FORCE_BROWSER_LOGIN"), False),
         )
 
     def validate(self) -> None:
@@ -101,3 +109,5 @@ class Config:
                 "SEARCH_KEYWORDS requires PRECHECK_LIST and/or TARGET_LIST "
                 "(not needed for direct PRODUCT_LINKS)"
             )
+        if self.cart_mode not in {"first", "all", "round_robin"}:
+            raise ValueError("CART_MODE must be one of: first, all, round_robin")

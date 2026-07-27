@@ -59,6 +59,8 @@ What do you want to do?
   [3] Check a direct product link
   [4] Open .env for editing
   [5] Re-run setup (deps)
+  [6] List sessions
+  [7] Login / create session (multi + proxy)
   [Q] Quit
 """
         )
@@ -78,6 +80,15 @@ What do you want to do?
         elif choice == "5":
             ensure_setup()
             print("Dependencies reinstalled.")
+        elif choice == "6":
+            run_bot(vp, "sessions")
+        elif choice == "7":
+            name = input("Session name (e.g. acc1): ").strip() or "acc1"
+            proxy = input("Proxy URL (blank for none): ").strip()
+            args = ["login", "--name", name, "--force"]
+            if proxy:
+                args.extend(["--proxy", proxy])
+            run_bot(vp, *args)
         elif choice in {"q", "quit", "exit"}:
             return 0
         else:

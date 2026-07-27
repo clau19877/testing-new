@@ -1,0 +1,16 @@
+{
+  "sessions": [
+    {
+      "name": "acc1",
+      "enabled": true,
+      "proxy": "http://user:pass@1.2.3.4:8080",
+      "cookie_file": "sessions/acc1.cookies.json"
+    },
+    {
+      "name": "acc2",
+      "enabled": true,
+      "proxy": "socks5://1.2.3.4:1080",
+      "cookie_file": "sessions/acc2.cookies.json"
+    }
+  ]
+}

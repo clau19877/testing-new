@@ -72,6 +72,7 @@ SEARCH_KEYWORDS=
 SALE_STATUSES=On,Waiting
 ENABLE_ADD_TO_CART=0
 LOG_FILE=logs/pbandai_hk.log
+RETRY_WAIT=60
 ```
 
 Then:
@@ -83,6 +84,35 @@ python web_shopping_bot_hk.py loop
 ```
 
 Errors/tracebacks are appended to `logs/pbandai_hk.log`.
+
+## Multi-sessions + proxy
+
+### Single proxy (simple)
+```env
+PROXY_URL=http://user:pass@1.2.3.4:8080
+# or socks5://1.2.3.4:1080
+```
+
+### Multi account sessions
+1. Create/login sessions (one browser login each):
+```bash
+python web_shopping_bot_hk.py login --name acc1 --proxy http://user:pass@1.2.3.4:8080
+python web_shopping_bot_hk.py login --name acc2 --proxy socks5://5.6.7.8:1080
+python web_shopping_bot_hk.py sessions
+```
+2. This writes `sessions.json` + `sessions/*.cookies.json`
+3. Set cart fan-out mode:
+```env
+SESSIONS_FILE=sessions.json
+CART_MODE=first          # stop after first success
+# CART_MODE=all          # try every session
+# CART_MODE=round_robin  # rotate starting session
+ENABLE_ADD_TO_CART=1
+```
+
+Launcher menu also has:
+- `[6] List sessions`
+- `[7] Login / create session (multi + proxy)`
 
 ## Important `.env` knobs
 
@@ -97,6 +127,9 @@ Errors/tracebacks are appended to `logs/pbandai_hk.log`.
 | `ENABLE_ADD_TO_CART` | `0` monitor only, `1` cart mode |
 | `SCHEDULE_MODE` | `0` immediate loop, `1` clock schedule |
 | `LOG_FILE` / `LOG_LEVEL` | Error/info logging path and level |
+| `PROXY_URL` | Single/fallback proxy |
+| `SESSIONS_FILE` | Multi-session config (`sessions.json`) |
+| `CART_MODE` | `first` / `all` / `round_robin` |
 | `EMAIL_USER` | Leave empty to skip email |
 
 ## Cart mode notes

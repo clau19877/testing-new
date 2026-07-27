@@ -21,6 +21,8 @@ pbandai-hk/.venv/
 pbandai-hk/.env
 pbandai-hk/logs/
 pbandai-hk.zip
+pbandai-hk/sessions.json
+pbandai-hk/sessions/*.cookies.json
 
 __pycache__/
 *.pyc
