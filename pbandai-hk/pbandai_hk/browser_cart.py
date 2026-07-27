@@ -1,0 +1,262 @@
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+from .logging_utils import get_logger, log_exception
+from .proxy_util import redact_proxy
+from .session_login import _create_webdriver, _driver_cookies
+
+if TYPE_CHECKING:
+    from .api import PBandaiHkClient
+    from .config import Config
+
+logger = get_logger("browser_cart")
+
+
+def browser_add_to_cart(
+    config: "Config",
+    client: "PBandaiHkClient",
+    *,
+    product_code: str,
+    area_item_no: str = "",
+    qty: int = 1,
+    proxy: str = "",
+    cookie_file: str | Path | None = None,
+) -> tuple[bool, str]:
+    """Add to cart by driving a real browser (bypasses API WAF 501 on POST)."""
+    from .sessions import apply_cookies_to_client, load_cookies_file
+
+    product_url = f"{config.base_url}/{config.area_code}/item/{product_code}"
+    effective_proxy = proxy or client.proxy or config.proxy_url or ""
+    before = _safe_cart_count(client)
+
+    cookies: List[Dict[str, Any]] = []
+    if cookie_file and Path(str(cookie_file)).exists():
+        cookies = load_cookies_file(Path(str(cookie_file)))
+    elif client.session.cookies:
+        for c in client.session.cookies:
+            cookies.append(
+                {
+                    "name": c.name,
+                    "value": c.value,
+                    "domain": c.domain or ".p-bandai.com",
+                    "path": c.path or "/",
+                }
+            )
+
+    print(
+        f"[{client.name}] Browser add-to-cart {product_code} "
+        f"(proxy={redact_proxy(effective_proxy) or '-'})"
+    )
+    driver = _create_webdriver(config, proxy=effective_proxy)
+    try:
+        # Seed domain before adding cookies.
+        driver.get(f"{config.base_url}/{config.area_code}/")
+        time.sleep(1.0)
+        _load_cookies_into_driver(driver, cookies)
+        driver.get(product_url)
+        logger.info(
+            "browser cart opened session=%s url=%s proxy=%s",
+            client.name,
+            product_url,
+            redact_proxy(effective_proxy) or "-",
+        )
+        if not _click_add_to_cart(driver, timeout=45):
+            # Fallback: call fetch() inside the page with browser cookies/WAF context.
+            ok, note = _page_fetch_add_to_cart(
+                driver,
+                area_item_no=area_item_no,
+                qty=qty,
+                csrf=client.csrf_token or "",
+            )
+            if not ok:
+                return False, note
+        else:
+            time.sleep(2.0)
+
+        # Transfer refreshed cookies back to API client for verification.
+        fresh = _driver_cookies(driver)
+        if fresh:
+            apply_cookies_to_client(client, fresh)
+            if cookie_file:
+                Path(str(cookie_file)).write_text(
+                    json.dumps(fresh, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+        try:
+            client.refresh_csrf()
+            after = _safe_cart_count(client)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("cart summary refresh failed: %s", exc)
+            after = None
+
+        if after is not None and before is not None and after > before:
+            return True, f"browser-added cart {before}->{after}"
+        if after is not None and after > 0:
+            return True, f"browser-added cart_count={after}"
+        # Click seemed to work but summary unchanged — still report soft success if no error toast.
+        if _page_has_error(driver):
+            return False, "browser add-to-cart showed an error on page"
+        return True, "browser add-to-cart clicked (verify cart on site)"
+    finally:
+        try:
+            driver.quit()
+        except Exception as exc:  # noqa: BLE001
+            log_exception(logger, "driver.quit failed", exc)
+
+
+def _safe_cart_count(client: "PBandaiHkClient") -> Optional[int]:
+    try:
+        summary = client.cart_summary()
+        return int(summary.get("totalItemCount") or 0)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _load_cookies_into_driver(driver: Any, cookies: List[Dict[str, Any]]) -> None:
+    for cookie in cookies:
+        name = cookie.get("name")
+        value = cookie.get("value")
+        if not name:
+            continue
+        item = {
+            "name": name,
+            "value": value,
+            "path": cookie.get("path") or "/",
+        }
+        domain = cookie.get("domain") or ".p-bandai.com"
+        # Selenium wants domain without leading scheme; keep leading dot when present.
+        item["domain"] = domain
+        try:
+            driver.add_cookie(item)
+        except Exception:  # noqa: BLE001
+            # Retry without domain if rejected.
+            try:
+                item.pop("domain", None)
+                driver.add_cookie(item)
+            except Exception:
+                continue
+
+
+def _click_add_to_cart(driver: Any, timeout: int = 45) -> bool:
+    from selenium.webdriver.common.by import By
+
+    deadline = time.time() + timeout
+    text_needles = [
+        "ADD TO CART",
+        "Add to cart",
+        "加入購物車",
+        "カートに追加",
+    ]
+    css_candidates = [
+        "button[class*='cart']",
+        "button[class*='Cart']",
+        "button[type='button']",
+        "button",
+    ]
+    _ = css_candidates  # reserved for future strict selectors
+    while time.time() < deadline:
+        # Prefer buttons by visible text.
+        try:
+            buttons = driver.find_elements(By.TAG_NAME, "button")
+            for btn in buttons:
+                try:
+                    if not btn.is_displayed() or not btn.is_enabled():
+                        continue
+                    label = (btn.text or btn.get_attribute("aria-label") or "").strip()
+                    if any(n.lower() in label.lower() for n in text_needles):
+                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                        time.sleep(0.3)
+                        try:
+                            btn.click()
+                        except Exception:  # noqa: BLE001
+                            driver.execute_script("arguments[0].click();", btn)
+                        logger.info("clicked add-to-cart button text=%r", label[:80])
+                        return True
+                except Exception:  # noqa: BLE001
+                    continue
+        except Exception:  # noqa: BLE001
+            pass
+
+        # XPath contains text.
+        for needle in text_needles:
+            try:
+                xpath = (
+                    f"//button[contains(translate(., 'abcdefghijklmnopqrstuvwxyz', "
+                    f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '{needle.upper()}')]"
+                )
+                els = driver.find_elements(By.XPATH, xpath)
+                for el in els:
+                    if el.is_displayed() and el.is_enabled():
+                        driver.execute_script("arguments[0].click();", el)
+                        logger.info("clicked add-to-cart xpath needle=%s", needle)
+                        return True
+            except Exception:  # noqa: BLE001
+                continue
+        time.sleep(0.5)
+    logger.warning("could not find add-to-cart button within %ss", timeout)
+    return False
+
+
+def _page_fetch_add_to_cart(
+    driver: Any,
+    *,
+    area_item_no: str,
+    qty: int,
+    csrf: str,
+) -> tuple[bool, str]:
+    if not area_item_no:
+        return False, "browser fallback: no areaItemNo for in-page fetch"
+    script = """
+    const areaItemNo = arguments[0];
+    const qty = arguments[1];
+    const csrf = arguments[2];
+    const callback = arguments[arguments.length - 1];
+    const headers = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json, text/plain, */*',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+    if (csrf) headers['X-CSRF-TOKEN'] = csrf;
+    fetch('/api/cart/addToCart', {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body: JSON.stringify([{areaItemNo, qty}])
+    }).then(async (resp) => {
+      const text = await resp.text();
+      callback({status: resp.status, body: text.slice(0, 500)});
+    }).catch((err) => callback({status: 0, body: String(err)}));
+    """
+    try:
+        driver.set_script_timeout(30)
+        result = driver.execute_async_script(script, area_item_no, int(qty), csrf or "")
+        status = int((result or {}).get("status") or 0)
+        body = str((result or {}).get("body") or "")
+        logger.info("in-page fetch addToCart status=%s body=%s", status, body[:200])
+        if 200 <= status < 300:
+            return True, f"browser-fetch added status={status}"
+        return False, f"browser-fetch addToCart failed status={status}: {_short_error(body)}"
+    except Exception as exc:  # noqa: BLE001
+        log_exception(logger, "in-page fetch addToCart failed", exc)
+        return False, f"browser-fetch error: {exc}"
+
+
+def _page_has_error(driver: Any) -> bool:
+    try:
+        text = (driver.page_source or "").lower()
+        return "page not available" in text or "unable to add" in text
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _short_error(text: str) -> str:
+    low = text.lower()
+    if "<html" in low or "<!doctype" in low:
+        if "page not available" in low:
+            return "HTML error page (WAF/501 Page not available)"
+        return f"HTML error page ({len(text)} chars)"
+    return text[:240]

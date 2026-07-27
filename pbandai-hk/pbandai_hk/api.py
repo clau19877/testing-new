@@ -221,26 +221,38 @@ class PBandaiHkClient:
         area_item_no: str,
         qty: int = 1,
         event_pickup_specified_pickup_sn: Optional[int] = None,
+        *,
+        product_code: str = "",
     ) -> Dict[str, Any]:
         if not self.csrf_token:
             self.refresh_csrf()
         item: Dict[str, Any] = {"areaItemNo": area_item_no, "qty": qty}
         if event_pickup_specified_pickup_sn is not None:
             item["eventPickupSpecifiedPickupSn"] = event_pickup_specified_pickup_sn
+        headers = self._auth_headers()
+        if product_code:
+            headers["Referer"] = f"{self.base_url}/{self.area_code}/item/{product_code}"
+        headers.setdefault("Origin", self.base_url)
         resp = self.session.post(
             self._url("/api/cart/addToCart"),
             json=[item],
-            headers=self._auth_headers(),
+            headers=headers,
             timeout=30,
         )
         if resp.status_code >= 400:
-            detail: Any
-            try:
-                detail = resp.json()
-            except Exception:
-                detail = resp.text
+            detail = _response_error_detail(resp)
             raise RuntimeError(f"addToCart failed ({resp.status_code}): {detail}")
-        return resp.json()
+        # Some gateways return 200 HTML by mistake; require JSON-ish body.
+        ctype = (resp.headers.get("content-type") or "").lower()
+        if "html" in ctype:
+            raise RuntimeError(
+                f"addToCart failed (unexpected HTML {resp.status_code}): "
+                f"{_short_html_error(resp.text)}"
+            )
+        try:
+            return resp.json()
+        except Exception:
+            return {"raw": resp.text[:500]}
 
     def pick_area_item_no(self, product_detail: Dict[str, Any]) -> Optional[str]:
         area_item_nos = product_detail.get("areaItemNos") or []
@@ -278,3 +290,20 @@ class PBandaiHkClient:
             flags=list(raw.get("flags") or []),
             url=f"{self.base_url}/{self.area_code}/item/{code}",
         )
+
+
+def _response_error_detail(resp: Any) -> str:
+    try:
+        data = resp.json()
+        return str(data)
+    except Exception:
+        return _short_html_error(resp.text or "")
+
+
+def _short_html_error(text: str) -> str:
+    low = (text or "").lower()
+    if "<html" in low or "<!doctype" in low:
+        if "page not available" in low:
+            return "HTML WAF/error page (Page not available)"
+        return f"HTML error page ({len(text)} chars)"
+    return (text or "")[:300]

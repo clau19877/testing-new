@@ -398,6 +398,7 @@ class PBandaiHkBot:
 
         retries = self.config.add_cart_retry_count
         last_note = "unknown"
+        method = self.config.cart_method
         for attempt in range(1, retries + 1):
             try:
                 product_detail = detail or client.get_product(product.product_code)
@@ -418,16 +419,41 @@ class PBandaiHkBot:
                     return False, "not-eligible: " + "; ".join(signals.blocking_reasons)
                 if not area_item_no:
                     return False, "no areaItemNo"
+
+                if method == "browser":
+                    return self._browser_add(client, product, area_item_no)
+
                 logger.info(
-                    "[cart] session=%s attempting add areaItemNo=%s "
+                    "[cart] session=%s attempting API add areaItemNo=%s "
                     "purchaseAvailable=%s availableQty=%s",
                     client.name,
                     area_item_no,
                     signals.purchase_available,
                     signals.available_qty,
                 )
-                client.add_to_cart(area_item_no, qty=self.config.cart_qty)
-                return True, f"added via {area_item_no}"
+                try:
+                    client.add_to_cart(
+                        area_item_no,
+                        qty=self.config.cart_qty,
+                        product_code=product.product_code,
+                    )
+                    return True, f"api-added via {area_item_no}"
+                except Exception as api_exc:  # noqa: BLE001
+                    msg = str(api_exc)
+                    waf_blocked = (
+                        "501" in msg
+                        or "WAF" in msg
+                        or "HTML" in msg
+                        or "Page not available" in msg
+                    )
+                    if method == "auto" and waf_blocked:
+                        logger.warning(
+                            "[cart] session=%s API blocked (%s); falling back to browser",
+                            client.name,
+                            msg[:160],
+                        )
+                        return self._browser_add(client, product, area_item_no)
+                    raise
             except Exception as exc:  # noqa: BLE001
                 last_note = f"attempt {attempt}/{retries} failed: {exc}"
                 log_exception(
@@ -436,10 +462,34 @@ class PBandaiHkBot:
                     f"(attempt {attempt}/{retries})",
                     exc,
                 )
-                # Force fresh product detail on retry
                 detail = None
                 time.sleep(1)
         return False, last_note
+
+    def _browser_add(
+        self,
+        client: PBandaiHkClient,
+        product: ProductHit,
+        area_item_no: str,
+    ) -> tuple[bool, str]:
+        from .browser_cart import browser_add_to_cart
+
+        cookie_file = ""
+        for runtime in self.sessions:
+            if runtime.client is client or runtime.client.name == client.name:
+                cookie_file = getattr(runtime.spec, "cookie_file", "") or ""
+                break
+        if not cookie_file:
+            cookie_file = f"sessions/{client.name}.cookies.json"
+        return browser_add_to_cart(
+            self.config,
+            client,
+            product_code=product.product_code,
+            area_item_no=area_item_no,
+            qty=self.config.cart_qty,
+            proxy=client.proxy or self.config.proxy_url,
+            cookie_file=cookie_file,
+        )
 
     def _notify(self, report: RunReport) -> None:
         session_names = ",".join(s.client.name for s in self.sessions) or "-"

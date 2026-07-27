@@ -40,6 +40,7 @@ class Config:
     proxy_url: str = ""
     sessions_file: str = "sessions.json"
     cart_mode: str = "first"  # first | all | round_robin
+    cart_method: str = "auto"  # auto | api | browser
     task_csv: str = "task.csv"
     proxy_csv: str = "proxy.csv"
     proxy_assign_mode: str = "random"  # random | unique
@@ -87,6 +88,7 @@ class Config:
             proxy_url=(os.getenv("PROXY_URL") or "").strip(),
             sessions_file=os.getenv("SESSIONS_FILE") or "sessions.json",
             cart_mode=(os.getenv("CART_MODE") or "first").strip().lower(),
+            cart_method=(os.getenv("CART_METHOD") or "auto").strip().lower(),
             task_csv=os.getenv("TASK_CSV") or "task.csv",
             proxy_csv=os.getenv("PROXY_CSV") or "proxy.csv",
             proxy_assign_mode=(os.getenv("PROXY_ASSIGN_MODE") or "random").strip().lower(),
@@ -119,6 +121,8 @@ class Config:
             )
         if self.cart_mode not in {"first", "all", "round_robin"}:
             raise ValueError("CART_MODE must be one of: first, all, round_robin")
+        if self.cart_method not in {"auto", "api", "browser"}:
+            raise ValueError("CART_METHOD must be one of: auto, api, browser")
         if self.proxy_assign_mode not in {"random", "unique", "unique_random", "shuffle"}:
             raise ValueError(
                 "PROXY_ASSIGN_MODE must be one of: random, unique, unique_random, shuffle"
