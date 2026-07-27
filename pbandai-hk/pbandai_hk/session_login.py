@@ -29,12 +29,16 @@ def login_and_transfer_cookies(config: "Config", client: "PBandaiHkClient") -> N
     try:
         driver.get(config.login_url)
         print()
-        print("A browser window should open to P-Bandai HK login.")
-        print("1) Log in with your account")
-        print("2) Wait until you can see the logged-in shop page")
-        print("3) Return here and press Enter")
+        print("=================================================")
+        print(" Browser login is ready (ignore Chrome ERROR spam)")
+        print("=================================================")
+        print("1) In the Chrome/Edge window, log in to P-Bandai HK")
+        print("2) Confirm you are logged in (account/cart icon visible)")
+        print("3) Come back to THIS black console window")
+        print("4) Press Enter here to continue")
+        print("=================================================")
         print()
-        input("Press Enter after login is complete... ")
+        input(">>> Press Enter after login is complete... ")
         count = 0
         for cookie in driver.get_cookies():
             client.session.cookies.set(
@@ -96,12 +100,19 @@ def _common_options(options: Any, config: "Config") -> Any:
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    # Reduce noisy Chrome/DevTools console spam on Windows.
+    options.add_argument("--log-level=3")
+    options.add_argument("--disable-notifications")
+    options.add_argument("--disable-background-networking")
     options.add_argument(
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
     )
     try:
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option(
+            "excludeSwitches",
+            ["enable-automation", "enable-logging"],
+        )
         options.add_experimental_option("useAutomationExtension", False)
     except Exception:  # noqa: BLE001
         pass
