@@ -90,19 +90,20 @@ def browser_add_to_cart(
             cookie_stats.get("failed"),
         )
         driver.get(home)
-        time.sleep(1.0)
-        auth = verify_browser_logged_in(driver, timeout=15.0)
+        time.sleep(1.2)
+        auth = verify_browser_logged_in(driver, timeout=12.0)
         if not auth.get("ok"):
             # One retry: re-inject then reload.
             _load_cookies_into_driver(driver, cookies)
             driver.get(home)
-            time.sleep(1.0)
-            auth = verify_browser_logged_in(driver, timeout=12.0)
+            time.sleep(1.2)
+            auth = verify_browser_logged_in(driver, timeout=10.0)
         if auth.get("ok"):
             print(
                 f"[{client.name}] Browser login OK "
                 f"(member={auth.get('member_id') or auth.get('email') or 'yes'})"
             )
+            force_vue_member_refresh(driver)
         else:
             print(
                 f"[{client.name}] Browser NOT logged in "
@@ -115,6 +116,8 @@ def browser_add_to_cart(
             )
         driver.get(product_url)
         _wait_for_product_ready(driver, timeout=60)
+        if auth.get("ok"):
+            force_vue_member_refresh(driver)
         logger.info(
             "browser cart opened session=%s url=%s title=%s proxy=%s",
             client.name,
@@ -258,6 +261,21 @@ def _load_cookies_into_driver(driver: Any, cookies: List[Dict[str, Any]]) -> Dic
         driver.execute_cdp_cmd("Network.enable", {})
     except Exception:  # noqa: BLE001
         pass
+    # Drop guest cookies from the first navigation so a site-issued SESSION
+    # cannot shadow the real login SESSION we are about to inject.
+    try:
+        driver.execute_cdp_cmd("Network.clearBrowserCookies", {})
+    except Exception:  # noqa: BLE001
+        try:
+            driver.delete_all_cookies()
+        except Exception:  # noqa: BLE001
+            pass
+
+    base_urls = (
+        "https://p-bandai.com/",
+        "https://p-bandai.com/hk/",
+        "https://www.p-bandai.com/",
+    )
 
     for cookie in cookies:
         name = str(cookie.get("name") or "").strip()
@@ -269,35 +287,57 @@ def _load_cookies_into_driver(driver: Any, cookies: List[Dict[str, Any]]) -> Dic
         path = str(cookie.get("path") or "/") or "/"
         secure = bool(cookie.get("secure", True))
         http_only = bool(cookie.get("httpOnly", name.upper().startswith("SESSION")))
-        same_site = str(cookie.get("sameSite") or cookie.get("same_site") or "").strip()
+        same_site = str(cookie.get("sameSite") or cookie.get("same_site") or "Lax").strip()
         expiry = _cookie_expiry(cookie)
+        value_s = str(value)
 
         applied = False
-        cdp_payload: Dict[str, Any] = {
-            "name": name,
-            "value": str(value),
-            "domain": domain,
-            "path": path,
-            "secure": secure,
-            "httpOnly": http_only,
-        }
-        if expiry is not None:
-            cdp_payload["expires"] = expiry
-        if same_site:
-            normalized = same_site[:1].upper() + same_site[1:].lower()
-            if normalized.lower() == "none":
-                normalized = "None"
-            cdp_payload["sameSite"] = normalized
-        try:
-            result = driver.execute_cdp_cmd("Network.setCookie", cdp_payload)
-            applied = bool((result or {}).get("success", True))
-        except Exception:  # noqa: BLE001
-            applied = False
+        # Prefer URL-scoped CDP cookies — domain-only setCookie often lands in the
+        # jar but is not sent on document/API requests in Chromium.
+        for url in base_urls:
+            cdp_payload: Dict[str, Any] = {
+                "name": name,
+                "value": value_s,
+                "url": url,
+                "path": path,
+                "secure": secure,
+                "httpOnly": http_only,
+            }
+            if expiry is not None:
+                cdp_payload["expires"] = expiry
+            if same_site:
+                normalized = same_site[:1].upper() + same_site[1:].lower()
+                if normalized.lower() == "none":
+                    normalized = "None"
+                cdp_payload["sameSite"] = normalized
+            try:
+                result = driver.execute_cdp_cmd("Network.setCookie", cdp_payload)
+                if bool((result or {}).get("success", True)):
+                    applied = True
+            except Exception:  # noqa: BLE001
+                continue
+
+        if not applied:
+            cdp_payload = {
+                "name": name,
+                "value": value_s,
+                "domain": domain,
+                "path": path,
+                "secure": secure,
+                "httpOnly": http_only,
+            }
+            if expiry is not None:
+                cdp_payload["expires"] = expiry
+            try:
+                result = driver.execute_cdp_cmd("Network.setCookie", cdp_payload)
+                applied = bool((result or {}).get("success", True))
+            except Exception:  # noqa: BLE001
+                applied = False
 
         if not applied:
             item: Dict[str, Any] = {
                 "name": name,
-                "value": str(value),
+                "value": value_s,
                 "path": path,
                 "domain": domain,
                 "secure": secure,
@@ -324,25 +364,32 @@ def _load_cookies_into_driver(driver: Any, cookies: List[Dict[str, Any]]) -> Dic
     return stats
 
 
-def driver_has_session_cookie(driver: Any) -> bool:
+def session_cookie_value(driver: Any) -> str:
     try:
-        result = driver.execute_cdp_cmd("Network.getAllCookies", {})
+        result = driver.execute_cdp_cmd(
+            "Network.getCookies",
+            {"urls": ["https://p-bandai.com/", "https://p-bandai.com/hk/"]},
+        )
         for cookie in result.get("cookies") or []:
             if str(cookie.get("name") or "").upper().startswith("SESSION"):
-                return True
+                return str(cookie.get("value") or "")
     except Exception:  # noqa: BLE001
         pass
     try:
         for cookie in driver.get_cookies():
             if str(cookie.get("name") or "").upper().startswith("SESSION"):
-                return True
+                return str(cookie.get("value") or "")
     except Exception:  # noqa: BLE001
-        return False
-    return False
+        return ""
+    return ""
+
+
+def driver_has_session_cookie(driver: Any) -> bool:
+    return bool(session_cookie_value(driver))
 
 
 def verify_browser_logged_in(driver: Any, timeout: float = 20.0) -> Dict[str, Any]:
-    """Confirm member context after cookie inject (header UI can lag; API is truth)."""
+    """Confirm login via /api/context/member.loggedInMember (not csrfToken alone)."""
     deadline = time.time() + max(3.0, timeout)
     last: Dict[str, Any] = {"ok": False, "reason": "not-checked", "has_session": False}
     try:
@@ -350,29 +397,39 @@ def verify_browser_logged_in(driver: Any, timeout: float = 20.0) -> Dict[str, An
     except Exception:  # noqa: BLE001
         pass
 
+    # Match site axios headers — area code matters for member context.
     script = """
         const callback = arguments[arguments.length - 1];
+        const area = (location.pathname.split('/')[1] || 'hk').toLowerCase();
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), 8000);
         fetch('/api/context/member', {
             method: 'GET',
             credentials: 'include',
-            headers: { 'Accept': 'application/json' },
+            headers: {
+                'Accept': 'application/json, text/plain, */*',
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-G1-Area-Code': area,
+            },
             signal: ctrl.signal,
         }).then(async (resp) => {
             clearTimeout(timer);
             const text = await resp.text();
             let json = null;
             try { json = JSON.parse(text); } catch (e) { json = null; }
+            const member = json && json.loggedInMember ? json.loggedInMember : null;
             callback({
                 status: resp.status,
                 hasJson: !!json,
-                result: json && json.result ? json.result : null,
-                bodyPreview: String(text || '').slice(0, 160),
+                keys: json ? Object.keys(json).slice(0, 12) : [],
+                isLoggedIn: !!(member && member.isLoggedIn),
+                member: member,
+                csrf: !!(json && json.csrfToken),
+                bodyPreview: String(text || '').slice(0, 180),
             });
         }).catch((err) => {
             clearTimeout(timer);
-            callback({ status: 0, hasJson: false, result: null, error: String(err) });
+            callback({ status: 0, hasJson: false, isLoggedIn: false, error: String(err) });
         });
     """
     while time.time() < deadline:
@@ -384,53 +441,79 @@ def verify_browser_logged_in(driver: Any, timeout: float = 20.0) -> Dict[str, An
             time.sleep(0.8)
             continue
 
-        result = (payload or {}).get("result") if isinstance(payload, dict) else None
+        status = int((payload or {}).get("status") or 0) if isinstance(payload, dict) else 0
+        is_logged_in = bool((payload or {}).get("isLoggedIn")) if isinstance(payload, dict) else False
+        member = (payload or {}).get("member") if isinstance(payload, dict) else None
         member_id = ""
         email = ""
-        if isinstance(result, dict):
+        if isinstance(member, dict):
             member_id = str(
-                result.get("memberId")
-                or result.get("id")
-                or result.get("loginId")
-                or result.get("userId")
+                member.get("memberId")
+                or member.get("memberNo")
+                or member.get("dwhLinkageNo")
+                or member.get("loginId")
+                or member.get("id")
                 or ""
             ).strip()
-            email = str(result.get("email") or result.get("mailAddress") or "").strip()
-            # Some HK payloads nest identity under member/profile.
-            if not member_id and isinstance(result.get("member"), dict):
-                nested = result["member"]
-                member_id = str(
-                    nested.get("memberId") or nested.get("id") or nested.get("loginId") or ""
-                ).strip()
-                email = email or str(nested.get("email") or nested.get("mailAddress") or "").strip()
-        status = int((payload or {}).get("status") or 0) if isinstance(payload, dict) else 0
-        if has_session and (member_id or email):
+            email = str(
+                member.get("email")
+                or member.get("mailAddress")
+                or member.get("emailAddress")
+                or ""
+            ).strip()
+        if is_logged_in and has_session:
             return {
                 "ok": True,
                 "has_session": True,
-                "member_id": member_id,
+                "member_id": member_id or "logged-in",
                 "email": email,
                 "status": status,
             }
-        # SESSION present + 200 JSON usually means logged in even if fields differ.
-        if has_session and status == 200 and isinstance(result, dict) and result:
-            return {
-                "ok": True,
-                "has_session": True,
-                "member_id": member_id or "present",
-                "email": email,
-                "status": status,
-            }
+        keys = (payload or {}).get("keys") if isinstance(payload, dict) else []
         last = {
             "ok": False,
             "has_session": has_session,
             "status": status,
+            "keys": keys,
             "reason": (payload or {}).get("error")
-            or (payload or {}).get("bodyPreview")
-            or "member-context-empty",
+            or (
+                "guest-context (SESSION present but no loggedInMember — cookie not sent/accepted)"
+                if has_session and status == 200
+                else (payload or {}).get("bodyPreview") or "member-context-empty"
+            ),
         }
         time.sleep(0.8)
     return last
+
+
+def force_vue_member_refresh(driver: Any) -> None:
+    """Nudge SPA header: site boots from window.USER_DATA and may not refreshMember()."""
+    script = """
+        const callback = arguments[arguments.length - 1];
+        const area = (location.pathname.split('/')[1] || 'hk').toLowerCase();
+        fetch('/api/context/member', {
+            method: 'GET',
+            credentials: 'include',
+            headers: {
+                'Accept': 'application/json, text/plain, */*',
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-G1-Area-Code': area,
+            },
+        }).then(async (resp) => {
+            const json = await resp.json().catch(() => null);
+            if (json) {
+                try { window.USER_DATA = Object.assign({}, window.USER_DATA || {}, json); } catch (e) {}
+            }
+            // Soft UI hint: replace Sign In link text if member logged in.
+            const logged = !!(json && json.loggedInMember && json.loggedInMember.isLoggedIn);
+            callback({ ok: logged, keys: json ? Object.keys(json).slice(0, 8) : [] });
+        }).catch((err) => callback({ ok: false, error: String(err) }));
+    """
+    try:
+        driver.set_script_timeout(12)
+        driver.execute_async_script(script)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _click_add_to_cart(driver: Any, timeout: int = 45) -> bool:

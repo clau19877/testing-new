@@ -26,6 +26,8 @@ from .browser_cart import (
     _page_fetch_add_to_cart,
     _safe_cart_count,
     _wait_for_product_ready,
+    force_vue_member_refresh,
+    session_cookie_value,
     verify_browser_logged_in,
 )
 from .logging_utils import get_logger, log_exception
@@ -281,6 +283,11 @@ class WarmBrowserPool:
             home = f"{self.config.base_url}/{self.config.area_code}/"
             driver.get(home)
             time.sleep(1.2)
+            expected_session = ""
+            for c in cookies:
+                if str(c.get("name") or "").upper().startswith("SESSION"):
+                    expected_session = str(c.get("value") or "")
+                    break
             cookie_stats = _load_cookies_into_driver(driver, cookies)
             logger.info(
                 "[warm] cookies session=%s total=%s applied=%s sessionCookies=%s failed=%s",
@@ -295,29 +302,47 @@ class WarmBrowserPool:
                 f"{cookie_stats.get('applied')}/{cookie_stats.get('total')} "
                 f"SESSION={cookie_stats.get('session')}"
             )
-            # Hard reload so Vue boots with SESSION (otherwise header stays Sign In).
+            # Hard reload so document request carries SESSION (SSR USER_DATA + Vue).
             driver.get(home)
-            time.sleep(1.0)
-            auth = verify_browser_logged_in(driver, timeout=15.0)
+            time.sleep(1.2)
+            after_session = session_cookie_value(driver)
+            if expected_session and after_session and after_session != expected_session:
+                logger.warning(
+                    "[warm] %s SESSION overwritten by site after reload "
+                    "(injected len=%s now len=%s) — re-injecting",
+                    client.name,
+                    len(expected_session),
+                    len(after_session),
+                )
+                print(
+                    f"[warm] {client.name}: SESSION overwritten by guest cookie; re-injecting"
+                )
+                _load_cookies_into_driver(driver, cookies)
+                driver.get(home)
+                time.sleep(1.2)
+            auth = verify_browser_logged_in(driver, timeout=12.0)
             if not auth.get("ok"):
                 _load_cookies_into_driver(driver, cookies)
                 driver.get(home)
-                time.sleep(1.0)
-                auth = verify_browser_logged_in(driver, timeout=12.0)
+                time.sleep(1.2)
+                auth = verify_browser_logged_in(driver, timeout=10.0)
             if auth.get("ok"):
                 who = auth.get("email") or auth.get("member_id") or "yes"
                 print(f"[warm] {client.name}: logged in OK ({who})")
                 logger.info("[warm] login OK session=%s auth=%s", client.name, auth)
+                force_vue_member_refresh(driver)
             else:
                 print(
                     f"[warm] {client.name}: NOT logged in in browser "
-                    f"(SESSION={auth.get('has_session')} reason={str(auth.get('reason'))[:80]})"
+                    f"(SESSION={auth.get('has_session')} reason={str(auth.get('reason'))[:100]})"
                 )
                 logger.warning("[warm] login verify failed session=%s auth=%s", client.name, auth)
                 wb.last_error = f"browser not logged in: {auth.get('reason')}"
 
             driver.get(product_url)
             _wait_for_product_ready(driver, timeout=60)
+            if auth.get("ok"):
+                force_vue_member_refresh(driver)
             title = (driver.title or "").lower()
             page_ok = "page not available" not in title
             if not page_ok:
@@ -343,6 +368,8 @@ class WarmBrowserPool:
                 )
                 driver.get(home)
                 time.sleep(1.5)
+                if auth.get("ok"):
+                    force_vue_member_refresh(driver)
                 wb.driver = driver
                 # Still mark ready for in-page fetch if SESSION exists; cart needs auth.
                 wb.ready = bool(auth.get("ok") or auth.get("has_session") or cookie_stats.get("session"))
