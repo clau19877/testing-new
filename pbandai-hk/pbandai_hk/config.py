@@ -58,6 +58,11 @@ class Config:
     click_interval_seconds: float = 5.0
     # Keep all instances running after a cart success (Discord still notified).
     stop_on_first_cart: bool = False
+    # Parallel Chrome open, but stagger first PDP navigation to reduce origin 500s.
+    open_stagger_seconds: float = 0.4
+    # Retries when first PDP visit returns 500 / "page not available".
+    open_pdp_retries: int = 8
+    open_pdp_retry_wait: float = 2.0
     discord_webhook_url: str = ""
     task_csv: str = "task.csv"
     proxy_csv: str = "proxy.csv"
@@ -116,6 +121,9 @@ class Config:
             click_at_second=int(os.getenv("CLICK_AT_SECOND") or "0"),
             click_interval_seconds=float(os.getenv("CLICK_INTERVAL_SECONDS") or "5"),
             stop_on_first_cart=_as_bool(os.getenv("STOP_ON_FIRST_CART"), False),
+            open_stagger_seconds=float(os.getenv("OPEN_STAGGER_SECONDS") or "0.4"),
+            open_pdp_retries=int(os.getenv("OPEN_PDP_RETRIES") or "8"),
+            open_pdp_retry_wait=float(os.getenv("OPEN_PDP_RETRY_WAIT") or "2"),
             discord_webhook_url=(os.getenv("DISCORD_WEBHOOK_URL") or "").strip(),
             task_csv=os.getenv("TASK_CSV") or "task.csv",
             proxy_csv=os.getenv("PROXY_CSV") or "proxy.csv",
@@ -157,6 +165,12 @@ class Config:
             raise ValueError("CLICK_AT_SECOND must be -1 (interval mode) or 0..59")
         if self.click_interval_seconds <= 0:
             raise ValueError("CLICK_INTERVAL_SECONDS must be > 0")
+        if self.open_stagger_seconds < 0:
+            raise ValueError("OPEN_STAGGER_SECONDS must be >= 0")
+        if self.open_pdp_retries < 1:
+            raise ValueError("OPEN_PDP_RETRIES must be >= 1")
+        if self.open_pdp_retry_wait < 0:
+            raise ValueError("OPEN_PDP_RETRY_WAIT must be >= 0")
         if self.proxy_assign_mode not in {"random", "unique", "unique_random", "shuffle"}:
             raise ValueError(
                 "PROXY_ASSIGN_MODE must be one of: random, unique, unique_random, shuffle"

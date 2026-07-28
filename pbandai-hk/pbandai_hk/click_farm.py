@@ -120,13 +120,17 @@ class ClickFarm:
             self.config.stop_on_first_cart,
         )
 
-        # Launch all Chromes in parallel so they come up together.
-        print(f"[farm] launching {n} Chrome(s) in parallel...")
+        # Launch all Chromes in parallel; each staggers its first PDP hit to cut 500s.
+        stagger = max(0.0, float(self.config.open_stagger_seconds))
+        print(
+            f"[farm] launching {n} Chrome(s) in parallel "
+            f"(PDP stagger={stagger}s, retries={self.config.open_pdp_retries})..."
+        )
         slots = [(f"inst{i + 1:02d}", proxies[i] if i < len(proxies) else "") for i in range(n)]
         opened: List[Optional[FarmBrowser]] = [None] * n
 
         def _launch(idx: int, name: str, proxy: str) -> None:
-            opened[idx] = self._open_one(name, proxy, product_url)
+            opened[idx] = self._open_one(name, proxy, product_url, index=idx)
 
         with ThreadPoolExecutor(max_workers=n) as pool:
             futs = [
@@ -147,9 +151,15 @@ class ClickFarm:
 
     def run(self) -> List[FarmBrowser]:
         """Click forever (or until stop) — each ready browser on its own thread."""
-        workers = [b for b in self.browsers if b.ready and b.driver is not None]
+        # Include not-yet-ready windows (driver alive) so they can heal into the farm.
+        workers = [b for b in self.browsers if b.driver is not None]
         if not workers:
-            raise RuntimeError("click farm: no ready browsers")
+            raise RuntimeError("click farm: no browsers with a live driver")
+        initially_ready = sum(1 for b in workers if b.ready)
+        print(
+            f"[farm] workers={len(workers)} (ready now={initially_ready}; "
+            "others will heal before clicks)"
+        )
 
         schedule = self._schedule_label()
         print(
@@ -221,6 +231,16 @@ class ClickFarm:
             if self._stop.is_set():
                 return
             try:
+                # Heal first-visit / mid-run 500s before attempting ATC.
+                if self._page_looks_bad(wb.driver) or not wb.ready:
+                    print(f"[{wb.name}] PDP looks bad — healing before click")
+                    if self._recover_pdp(wb):
+                        wb.ready = True
+                        print(f"[{wb.name}] PDP healed")
+                    else:
+                        print(f"[{wb.name}] PDP still down — skip this minute")
+                        continue
+
                 self._ensure_hook(wb.driver)
                 before = self._read_last(wb.driver)
                 clicked = _click_add_to_cart(wb.driver, timeout=3)
@@ -244,10 +264,17 @@ class ClickFarm:
                         # Keep going — already reparked on PDP inside _extract_payment_link.
                 else:
                     logger.warning("[farm] %s no button (click #%s)", wb.name, wb.clicks)
+                    # Button missing often means soft 500 / SPA not hydrated.
+                    if self._page_looks_bad(wb.driver):
+                        self._recover_pdp(wb)
             except Exception as exc:  # noqa: BLE001
                 wb.last_error = str(exc)
                 log_exception(logger, f"farm worker error {wb.name}", exc)
                 print(f"[{wb.name}] error: {exc}")
+                try:
+                    self._recover_pdp(wb)
+                except Exception:  # noqa: BLE001
+                    pass
 
     def _await_success(
         self,
@@ -426,7 +453,14 @@ class ClickFarm:
             log_exception(logger, f"discord webhook failed {wb.name}", exc)
             print(f"[{wb.name}] Discord webhook error: {exc}")
 
-    def _open_one(self, name: str, proxy: str, product_url: str) -> FarmBrowser:
+    def _open_one(
+        self,
+        name: str,
+        proxy: str,
+        product_url: str,
+        *,
+        index: int = 0,
+    ) -> FarmBrowser:
         wb = FarmBrowser(name=name, proxy=proxy)
         driver = None
         try:
@@ -445,23 +479,36 @@ class ClickFarm:
                 )
             except Exception:  # noqa: BLE001
                 pass
+
+            # Stagger first PDP navigation across parallel launches (Chrome opens
+            # together; origin hits are spread to reduce first-visit 500s).
+            stagger = max(0.0, float(self.config.open_stagger_seconds)) * max(0, index)
+            if stagger > 0:
+                print(f"[farm] {name} wait {stagger:.1f}s before PDP (stagger)")
+                time.sleep(stagger)
+
             home = f"{self.config.base_url}/{self.config.area_code}/"
-            driver.get(home)
-            time.sleep(1.0)
-            driver.get(product_url)
-            _wait_for_product_ready(driver, timeout=60)
-            title = (driver.title or "").lower()
-            if "page not available" in title:
-                time.sleep(2.0)
-                driver.get(product_url)
-                _wait_for_product_ready(driver, timeout=40)
-                title = (driver.title or "").lower()
+            try:
+                driver.get(home)
+                time.sleep(1.0)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[farm] %s home load soft-fail: %s", name, exc)
+
+            ok = self._load_pdp_with_retries(driver, product_url, home=home, name=name)
             self._ensure_hook(driver)
             wb.driver = driver
-            wb.ready = "page not available" not in title
+            wb.ready = ok
             if not wb.ready:
-                wb.last_error = "PDP page not available"
-                print(f"[farm] {name} PDP unavailable")
+                wb.last_error = "PDP page not available after retries"
+                print(
+                    f"[farm] {name} PDP still unavailable after retries — "
+                    "keeping browser; will heal before clicks"
+                )
+                # Keep driver alive on home so worker can heal later.
+                try:
+                    driver.get(home)
+                except Exception:  # noqa: BLE001
+                    pass
             else:
                 print(f"[farm] ready {name}")
         except Exception as exc:  # noqa: BLE001
@@ -476,6 +523,113 @@ class ClickFarm:
                     pass
             wb.driver = None
         return wb
+
+    def _load_pdp_with_retries(
+        self,
+        driver: Any,
+        product_url: str,
+        *,
+        home: str,
+        name: str,
+    ) -> bool:
+        retries = max(1, int(self.config.open_pdp_retries))
+        base_wait = max(0.0, float(self.config.open_pdp_retry_wait))
+        for attempt in range(1, retries + 1):
+            try:
+                driver.get(product_url)
+                _wait_for_product_ready(driver, timeout=45)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[farm] %s PDP get attempt %s error: %s", name, attempt, exc)
+            if not self._page_looks_bad(driver):
+                if attempt > 1:
+                    print(f"[farm] {name} PDP OK on attempt {attempt}/{retries}")
+                return True
+            reason = self._page_bad_reason(driver)
+            print(f"[farm] {name} PDP bad attempt {attempt}/{retries}: {reason}")
+            logger.warning("[farm] %s PDP bad attempt=%s/%s reason=%s", name, attempt, retries, reason)
+            if attempt >= retries:
+                break
+            # Re-warm on home between retries (often clears sticky 500 HTML).
+            try:
+                driver.get(home)
+                time.sleep(0.8)
+            except Exception:  # noqa: BLE001
+                pass
+            wait = base_wait * attempt
+            end = time.time() + wait
+            while time.time() < end and not self._stop.is_set():
+                time.sleep(min(0.2, end - time.time()))
+        return False
+
+    def _recover_pdp(self, wb: FarmBrowser) -> bool:
+        driver = wb.driver
+        if driver is None:
+            return False
+        product_url = self._product_url()
+        home = f"{self.config.base_url}/{self.config.area_code}/"
+        ok = self._load_pdp_with_retries(
+            driver,
+            product_url,
+            home=home,
+            name=wb.name,
+        )
+        if ok:
+            self._ensure_hook(driver)
+            wb.ready = True
+            wb.last_error = ""
+        return ok
+
+    def _page_looks_bad(self, driver: Any) -> bool:
+        return bool(self._page_bad_reason(driver))
+
+    def _page_bad_reason(self, driver: Any) -> str:
+        """Return short reason if PDP/error page looks unhealthy; else ''."""
+        try:
+            title = (driver.title or "").strip()
+        except Exception:  # noqa: BLE001
+            return "title unreadable"
+        low_title = title.lower()
+        if "page not available" in low_title:
+            return f"title={title[:80]}"
+        if any(x in low_title for x in ("500", "502", "503", "error", "unavailable")):
+            return f"title={title[:80]}"
+        try:
+            source = (driver.page_source or "")[:12000].lower()
+        except Exception:  # noqa: BLE001
+            return "page_source unreadable"
+        markers = (
+            "page not available",
+            "http error 500",
+            "http error 502",
+            "http error 503",
+            "internal server error",
+            "bad gateway",
+            "service unavailable",
+            "something went wrong",
+        )
+        for m in markers:
+            if m in source:
+                return m
+        # Healthy PDP usually has cart CTA or qty control once SPA hydrates.
+        healthy = (
+            "place pre-order" in source
+            or "add to cart" in source
+            or "加入購物車" in source
+            or "c-input-quantity" in source
+            or "/item/" in (getattr(driver, "current_url", "") or "").lower()
+        )
+        # If still on item URL but no CTA yet, treat as soft-bad only when title empty
+        # or body tiny (blank SPA shell after 500).
+        if "/item/" in (getattr(driver, "current_url", "") or "").lower():
+            if healthy:
+                return ""
+            if len(source) < 800:
+                return "empty/short page body"
+            # SPA mid-load — not necessarily bad; allow click attempt.
+            return ""
+        if not healthy and "p-bandai.com" in source:
+            return "not on healthy PDP"
+        return ""
 
     def _product_url(self) -> str:
         return f"{self.config.base_url}/{self.config.area_code}/item/{self.product_code}"
