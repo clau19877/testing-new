@@ -120,12 +120,25 @@ class ClickFarm:
             self.config.stop_on_first_cart,
         )
 
-        # Launch sequentially to avoid ChromeDriver stampede; click loop is parallel.
-        for i in range(n):
-            name = f"inst{i + 1:02d}"
-            proxy = proxies[i] if i < len(proxies) else ""
-            wb = self._open_one(name, proxy, product_url)
-            self.browsers.append(wb)
+        # Launch all Chromes in parallel so they come up together.
+        print(f"[farm] launching {n} Chrome(s) in parallel...")
+        slots = [(f"inst{i + 1:02d}", proxies[i] if i < len(proxies) else "") for i in range(n)]
+        opened: List[Optional[FarmBrowser]] = [None] * n
+
+        def _launch(idx: int, name: str, proxy: str) -> None:
+            opened[idx] = self._open_one(name, proxy, product_url)
+
+        with ThreadPoolExecutor(max_workers=n) as pool:
+            futs = [
+                pool.submit(_launch, i, name, proxy) for i, (name, proxy) in enumerate(slots)
+            ]
+            for fut in futs:
+                try:
+                    fut.result()
+                except Exception as exc:  # noqa: BLE001
+                    log_exception(logger, "farm parallel launch error", exc)
+
+        self.browsers = [b for b in opened if b is not None]
 
         ready = sum(1 for b in self.browsers if b.ready)
         print(f"[farm] ready={ready}/{n}")
