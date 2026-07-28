@@ -2,5 +2,5 @@
 
 # Printed at startup — if you still see JSONDecodeError on bootstrap()/resp.json(),
 # you are running an OLD folder. Redownload the zip and replace pbandai_hk/.
-__version__ = "0.3.4"
-BUILD_ID = "oos-hard-refresh-20260729"
+__version__ = "0.3.5"
+BUILD_ID = "us-item-N2890904001-20260729"

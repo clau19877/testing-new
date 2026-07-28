@@ -35,7 +35,7 @@ First run creates `.venv`, installs deps, and copies `.env` for you.
 If you already have an old `.env`, either:
 - Launcher menu **`[0] Reset .env from latest .env.example`** (backs up old file), or
 - Copy `pbandai-hk/.env.example` → `pbandai-hk/.env` yourself  
-The Windows zip now includes both `.env` and `.env.example` (drop-ready for `A2891018001`).
+The Windows zip now includes both `.env` and `.env.example` (drop-ready for `N2890904001`).
 
 ### macOS / Linux
 ```bash
@@ -67,7 +67,7 @@ python web_shopping_bot_hk.py loop
 python web_shopping_bot_hk.py once
 
 # check one product URL/code
-python web_shopping_bot_hk.py check "https://p-bandai.com/hk/item/A2891018001"
+python web_shopping_bot_hk.py check "https://p-bandai.com/us/item/N2890904001"
 ```
 
 ### Click farm `.env` (recommended)
@@ -79,7 +79,7 @@ BROWSER_INSTANCES=20
 CLICK_AT_SECOND=0
 STOP_ON_FIRST_CART=0
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
-PRODUCT_LINKS=https://p-bandai.com/hk/item/A2891018001
+PRODUCT_LINKS=https://p-bandai.com/us/item/N2890904001
 BACKGROUND_MODE=0
 ```
 
@@ -133,7 +133,7 @@ Accepted proxy formats: `host:port:user:pass`, `http://user:pass@host:port`, `so
 
 ## Drop notes (click farm)
 
-### Target example: `A2891018001` (GUNDAM CARD GAME 1ST ANNIVERSARY SET)
+### Target example: `N2890904001` (GUNDAM CARD GAME 1ST ANNIVERSARY SET)
 - Tiny stock; site sits behind F5 / Shape — **click the real button** in headed Chrome
 - Guest carts: no login. Set Discord webhook before the drop
 - Start early so all windows are parked on the PDP
