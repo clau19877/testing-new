@@ -61,8 +61,8 @@ class Config:
     # Parallel Chrome open, but stagger first PDP navigation to reduce origin 500s.
     open_stagger_seconds: float = 0.4
     # Retries when first PDP visit returns 500 / "page not available".
-    open_pdp_retries: int = 8
-    open_pdp_retry_wait: float = 2.0
+    open_pdp_retries: int = 3
+    open_pdp_retry_wait: float = 1.5
     # While waiting for :00, hard-refresh if UI shows OUT OF STOCK (soft/stale OOS).
     oos_refresh_seconds: float = 12.0
     discord_webhook_url: str = ""
@@ -124,8 +124,8 @@ class Config:
             click_interval_seconds=float(os.getenv("CLICK_INTERVAL_SECONDS") or "5"),
             stop_on_first_cart=_as_bool(os.getenv("STOP_ON_FIRST_CART"), False),
             open_stagger_seconds=float(os.getenv("OPEN_STAGGER_SECONDS") or "0.4"),
-            open_pdp_retries=int(os.getenv("OPEN_PDP_RETRIES") or "8"),
-            open_pdp_retry_wait=float(os.getenv("OPEN_PDP_RETRY_WAIT") or "2"),
+            open_pdp_retries=int(os.getenv("OPEN_PDP_RETRIES") or "3"),
+            open_pdp_retry_wait=float(os.getenv("OPEN_PDP_RETRY_WAIT") or "1.5"),
             oos_refresh_seconds=float(os.getenv("OOS_REFRESH_SECONDS") or "12"),
             discord_webhook_url=(os.getenv("DISCORD_WEBHOOK_URL") or "").strip(),
             task_csv=os.getenv("TASK_CSV") or "task.csv",

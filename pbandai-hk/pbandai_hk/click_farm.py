@@ -289,8 +289,20 @@ class ClickFarm:
                             return
                 else:
                     logger.warning("[farm] %s no button (click #%s)", wb.name, wb.clicks)
-                    if self._shows_out_of_stock(wb.driver) or self._page_looks_bad(wb.driver):
-                        print(f"[{wb.name}] no ATC button (OOS?) — one refresh for next round")
+                    if self._shows_out_of_stock(wb.driver):
+                        print(
+                            f"[{wb.name}] page shows OUT OF STOCK "
+                            "(no enabled PLACE PRE-ORDER) — refresh & wait next :00"
+                        )
+                        self._hard_refresh_pdp(wb)
+                    elif self._page_looks_bad(wb.driver):
+                        print(f"[{wb.name}] no ATC button (bad PDP) — one refresh for next round")
+                        self._hard_refresh_pdp(wb)
+                    else:
+                        print(
+                            f"[{wb.name}] no enabled ATC button "
+                            "(not OOS text / not error page) — soft refresh"
+                        )
                         self._hard_refresh_pdp(wb)
             except Exception as exc:  # noqa: BLE001
                 wb.last_error = str(exc)

@@ -203,14 +203,16 @@ def _wait_for_product_ready(driver: Any, timeout: int = 60) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         title = (driver.title or "").lower()
+        # Error page will not hydrate into PLACE PRE-ORDER — bail so callers can retry.
         if "page not available" in title:
-            time.sleep(1.0)
-            continue
+            return
         try:
             source = driver.page_source or ""
             if (
                 "PLACE PRE-ORDER" in source
                 or "ADD TO CART" in source
+                or "SORRY, OUT OF STOCK" in source
+                or "OUT OF STOCK" in source
                 or "加入購物車" in source
                 or "c-input-quantity" in source
             ):
