@@ -62,7 +62,7 @@ class PBandaiHkBot:
 
         logger.info(
             "prepare start version=%s build=%s area=%s direct=%s search=%s cart=%s "
-            "click_farm=%s instances=%s interval=%s discord=%s",
+            "click_farm=%s instances=%s click_at_second=%s discord=%s stop_on_first=%s",
             __version__,
             BUILD_ID,
             self.config.area_code,
@@ -71,8 +71,9 @@ class PBandaiHkBot:
             self.config.enable_add_to_cart,
             self.config.click_farm,
             self.config.browser_instances,
-            self.config.click_interval_seconds,
+            self.config.click_at_second,
             "yes" if self.config.discord_webhook_url else "no",
+            self.config.stop_on_first_cart,
         )
         print(f"P-Bandai HK bot version={__version__} build={BUILD_ID}")
 
@@ -90,9 +91,11 @@ class PBandaiHkBot:
             ready = self.click_farm.prepare()
             if ready <= 0:
                 raise RuntimeError("click farm: no browsers ready")
+            at = int(self.config.click_at_second)
+            sched = f":{at:02d}/min" if at >= 0 else f"every {self.config.click_interval_seconds}s"
             print(
                 f"Click farm ready={ready}/{self.config.browser_instances} "
-                f"| interval={self.config.click_interval_seconds}s "
+                f"| schedule={sched} (keep going) "
                 f"| discord={'on' if self.config.discord_webhook_url else 'OFF'}"
             )
             return

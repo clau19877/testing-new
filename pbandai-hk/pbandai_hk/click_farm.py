@@ -1,8 +1,9 @@
-"""Guest click farm: N browsers click PLACE PRE-ORDER on an interval.
+"""Guest click farm: N browsers click PLACE PRE-ORDER on a wall-clock schedule.
 
-No login. Each instance parks on the PDP and clicks every CLICK_INTERVAL_SECONDS.
+No login. Each instance parks on the PDP and clicks at second :00 of every minute
+(or CLICK_AT_SECOND). Instances keep running after cart success.
 On cart success, navigates to cart/checkout and posts the payment (or cart) URL
-to Discord webhook.
+to Discord webhook, then returns to the PDP for the next minute mark.
 """
 
 from __future__ import annotations
@@ -105,16 +106,18 @@ class ClickFarm:
         n = max(1, int(self.config.browser_instances))
         proxies = self._load_proxies(n)
         product_url = self._product_url()
+        schedule = self._schedule_label()
         print(
             f"[farm] opening {n} guest browser(s) on {self.product_code} "
-            f"click every {self.config.click_interval_seconds}s"
+            f"({schedule}; keep going after cart)"
         )
         logger.info(
-            "[farm] prepare instances=%s product=%s interval=%s discord=%s",
+            "[farm] prepare instances=%s product=%s schedule=%s discord=%s stop_on_first=%s",
             n,
             self.product_code,
-            self.config.click_interval_seconds,
+            schedule,
             "yes" if self.config.discord_webhook_url else "no",
+            self.config.stop_on_first_cart,
         )
 
         # Launch sequentially to avoid ChromeDriver stampede; click loop is parallel.
@@ -135,13 +138,13 @@ class ClickFarm:
         if not workers:
             raise RuntimeError("click farm: no ready browsers")
 
-        interval = max(0.5, float(self.config.click_interval_seconds))
+        schedule = self._schedule_label()
         print(
-            f"[farm] clicking PLACE PRE-ORDER every {interval}s "
-            f"across {len(workers)} instance(s) — Ctrl+C to stop"
+            f"[farm] clicking PLACE PRE-ORDER {schedule} "
+            f"across {len(workers)} instance(s) — keep going; Ctrl+C to stop"
         )
         with ThreadPoolExecutor(max_workers=len(workers)) as pool:
-            futs = [pool.submit(self._worker_loop, wb, interval) for wb in workers]
+            futs = [pool.submit(self._worker_loop, wb) for wb in workers]
             try:
                 for fut in futs:
                     fut.result()
@@ -169,18 +172,50 @@ class ClickFarm:
         self.browsers = []
         self._stop = threading.Event()
 
-    def _worker_loop(self, wb: FarmBrowser, interval: float) -> None:
+    def _schedule_label(self) -> str:
+        at = int(self.config.click_at_second)
+        if at >= 0:
+            return f"at :{at:02d} every minute"
+        return f"every {self.config.click_interval_seconds}s"
+
+    def _wait_for_next_click(self) -> None:
+        """Block until the next scheduled ATC time (minute :SS or interval)."""
+        at = int(self.config.click_at_second)
+        if at < 0:
+            interval = max(0.5, float(self.config.click_interval_seconds))
+            end = time.time() + interval
+            while time.time() < end and not self._stop.is_set():
+                time.sleep(min(0.2, end - time.time()))
+            return
+
+        # Wall-clock: fire when local second == CLICK_AT_SECOND (default :00).
+        while not self._stop.is_set():
+            now = time.time()
+            # Target = next occurrence of minute + at seconds (Unix aligned).
+            minute_start = now - (now % 60)
+            target = minute_start + at
+            if target <= now + 0.02:
+                target += 60.0
+            while time.time() < target and not self._stop.is_set():
+                remaining = target - time.time()
+                time.sleep(min(0.05, remaining) if remaining > 0 else 0)
+            return
+
+    def _worker_loop(self, wb: FarmBrowser) -> None:
         assert wb.driver is not None
         while not self._stop.is_set():
-            started = time.time()
+            self._wait_for_next_click()
+            if self._stop.is_set():
+                return
             try:
                 self._ensure_hook(wb.driver)
                 before = self._read_last(wb.driver)
                 clicked = _click_add_to_cart(wb.driver, timeout=3)
                 wb.clicks += 1
                 if clicked:
-                    print(f"[{wb.name}] click #{wb.clicks} PLACE PRE-ORDER")
-                    logger.info("[farm] %s click #%s", wb.name, wb.clicks)
+                    stamp = time.strftime("%H:%M:%S")
+                    print(f"[{wb.name}] {stamp} click #{wb.clicks} PLACE PRE-ORDER")
+                    logger.info("[farm] %s click #%s at %s", wb.name, wb.clicks, stamp)
                     ok, note, payment = self._await_success(wb, before_ts=(before or {}).get("t") or 0)
                     if ok:
                         wb.success = True
@@ -193,19 +228,13 @@ class ClickFarm:
                         if self.config.stop_on_first_cart:
                             self._stop.set()
                             return
+                        # Keep going — already reparked on PDP inside _extract_payment_link.
                 else:
                     logger.warning("[farm] %s no button (click #%s)", wb.name, wb.clicks)
             except Exception as exc:  # noqa: BLE001
                 wb.last_error = str(exc)
                 log_exception(logger, f"farm worker error {wb.name}", exc)
                 print(f"[{wb.name}] error: {exc}")
-
-            elapsed = time.time() - started
-            sleep_for = max(0.05, interval - elapsed)
-            # Interruptible sleep
-            end = time.time() + sleep_for
-            while time.time() < end and not self._stop.is_set():
-                time.sleep(min(0.2, end - time.time()))
 
     def _await_success(
         self,

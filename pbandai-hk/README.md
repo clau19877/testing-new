@@ -76,14 +76,14 @@ python web_shopping_bot_hk.py check "https://p-bandai.com/hk/item/A2891018001"
 ENABLE_ADD_TO_CART=1
 CLICK_FARM=1
 BROWSER_INSTANCES=20
-CLICK_INTERVAL_SECONDS=5
-STOP_ON_FIRST_CART=1
+CLICK_AT_SECOND=0
+STOP_ON_FIRST_CART=0
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
 PRODUCT_LINKS=https://p-bandai.com/hk/item/A2891018001
 BACKGROUND_MODE=0
 ```
 
-Each instance clicks PLACE PRE-ORDER every 5s. On cart success the bot opens cart/checkout and posts the payment (or cart) URL to Discord.
+Each instance clicks PLACE PRE-ORDER at **:00 of every minute**. On cart success the bot opens cart/checkout, posts the payment (or cart) URL to Discord, then **keeps going** on the next minute marks.
 
 ### Monitor-only `.env` example
 
@@ -116,8 +116,9 @@ Accepted proxy formats: `host:port:user:pass`, `http://user:pass@host:port`, `so
 | `ENABLE_ADD_TO_CART` | `0` monitor only, `1` cart / click farm |
 | `CLICK_FARM` | `1` = guest N-browser click loop (default) |
 | `BROWSER_INSTANCES` | How many Chromes to open (e.g. `20`) |
-| `CLICK_INTERVAL_SECONDS` | Seconds between PLACE PRE-ORDER clicks |
-| `STOP_ON_FIRST_CART` | `1` = stop all instances after first cart success |
+| `CLICK_AT_SECOND` | Wall-clock second to ATC each minute (`0` = :00). `-1` = use interval |
+| `CLICK_INTERVAL_SECONDS` | Only used when `CLICK_AT_SECOND=-1` |
+| `STOP_ON_FIRST_CART` | `0` = keep all instances going (default); `1` = stop after first cart |
 | `DISCORD_WEBHOOK_URL` | Discord webhook; receives payment/cart link |
 | `BACKGROUND_MODE` | `0` headed (recommended), `1` headless |
 | `PROXY_URL` / `PROXY_CSV` | Optional proxies |
@@ -136,8 +137,8 @@ Accepted proxy formats: `host:port:user:pass`, `http://user:pass@host:port`, `so
 Flow:
 1. Put webhook URL in `.env`
 2. Optional: fill `proxy.csv`
-3. Start menu `[1]` / `loop` — farm opens browsers and clicks every 5s
-4. On success: Discord gets payment/cart link; with `STOP_ON_FIRST_CART=1` other instances stop
+3. Start menu `[1]` / `loop` — farm opens browsers and clicks at **:00** every minute
+4. On success: Discord gets payment/cart link; all instances **keep going**
 
 Launcher menu:
 - `[1]` Start click farm / monitor loop

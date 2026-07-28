@@ -203,7 +203,7 @@ def cmd_sessions(config: Config) -> int:
 def cmd_login(config: Config, name: str, proxy: str, force: bool) -> int:
     print("Login removed — use guest click farm instead.")
     print("Set in .env: ENABLE_ADD_TO_CART=1 CLICK_FARM=1 BROWSER_INSTANCES=20")
-    print("             CLICK_INTERVAL_SECONDS=5 DISCORD_WEBHOOK_URL=<webhook>")
+    print("             CLICK_AT_SECOND=0 DISCORD_WEBHOOK_URL=<webhook>")
     print("Then: python web_shopping_bot_hk.py loop")
     _ = (config, name, proxy, force)
     return 2

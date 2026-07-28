@@ -50,11 +50,14 @@ class Config:
     drop_lead_seconds: int = 30
     # Parallel cart attempts when CART_MODE=all (important for low-stock drops).
     cart_parallel: bool = True
-    # Guest click farm (no login): N browsers click PLACE PRE-ORDER on an interval.
+    # Guest click farm (no login): N browsers click PLACE PRE-ORDER on schedule.
     click_farm: bool = True
     browser_instances: int = 20
+    # Wall-clock second within each minute to ATC (0 = :00). Set -1 to use interval instead.
+    click_at_second: int = 0
     click_interval_seconds: float = 5.0
-    stop_on_first_cart: bool = True
+    # Keep all instances running after a cart success (Discord still notified).
+    stop_on_first_cart: bool = False
     discord_webhook_url: str = ""
     task_csv: str = "task.csv"
     proxy_csv: str = "proxy.csv"
@@ -110,8 +113,9 @@ class Config:
             cart_parallel=_as_bool(os.getenv("CART_PARALLEL"), True),
             click_farm=_as_bool(os.getenv("CLICK_FARM"), True),
             browser_instances=int(os.getenv("BROWSER_INSTANCES") or "20"),
+            click_at_second=int(os.getenv("CLICK_AT_SECOND") or "0"),
             click_interval_seconds=float(os.getenv("CLICK_INTERVAL_SECONDS") or "5"),
-            stop_on_first_cart=_as_bool(os.getenv("STOP_ON_FIRST_CART"), True),
+            stop_on_first_cart=_as_bool(os.getenv("STOP_ON_FIRST_CART"), False),
             discord_webhook_url=(os.getenv("DISCORD_WEBHOOK_URL") or "").strip(),
             task_csv=os.getenv("TASK_CSV") or "task.csv",
             proxy_csv=os.getenv("PROXY_CSV") or "proxy.csv",
@@ -149,6 +153,8 @@ class Config:
             raise ValueError("CART_METHOD must be one of: auto, api, browser, warm")
         if self.browser_instances < 1:
             raise ValueError("BROWSER_INSTANCES must be >= 1")
+        if self.click_at_second < -1 or self.click_at_second > 59:
+            raise ValueError("CLICK_AT_SECOND must be -1 (interval mode) or 0..59")
         if self.click_interval_seconds <= 0:
             raise ValueError("CLICK_INTERVAL_SECONDS must be > 0")
         if self.proxy_assign_mode not in {"random", "unique", "unique_random", "shuffle"}:
