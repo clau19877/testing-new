@@ -122,6 +122,7 @@ Accepted proxy formats: `host:port:user:pass`, `http://user:pass@host:port`, `so
 | `OPEN_STAGGER_SECONDS` | Delay × instance index before first PDP hit (cuts parallel 500s) |
 | `OPEN_PDP_RETRIES` | Retries when first PDP visit is 500 / unavailable |
 | `OPEN_PDP_RETRY_WAIT` | Base wait between PDP retries (grows per attempt) |
+| `OOS_REFRESH_SECONDS` | Hard-refresh while waiting if UI shows OUT OF STOCK |
 | `DISCORD_WEBHOOK_URL` | Discord webhook; receives payment/cart link |
 | `BACKGROUND_MODE` | `0` headed (recommended), `1` headless |
 | `PROXY_URL` / `PROXY_CSV` | Optional proxies |

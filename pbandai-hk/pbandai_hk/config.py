@@ -63,6 +63,8 @@ class Config:
     # Retries when first PDP visit returns 500 / "page not available".
     open_pdp_retries: int = 8
     open_pdp_retry_wait: float = 2.0
+    # While waiting for :00, hard-refresh if UI shows OUT OF STOCK (soft/stale OOS).
+    oos_refresh_seconds: float = 12.0
     discord_webhook_url: str = ""
     task_csv: str = "task.csv"
     proxy_csv: str = "proxy.csv"
@@ -124,6 +126,7 @@ class Config:
             open_stagger_seconds=float(os.getenv("OPEN_STAGGER_SECONDS") or "0.4"),
             open_pdp_retries=int(os.getenv("OPEN_PDP_RETRIES") or "8"),
             open_pdp_retry_wait=float(os.getenv("OPEN_PDP_RETRY_WAIT") or "2"),
+            oos_refresh_seconds=float(os.getenv("OOS_REFRESH_SECONDS") or "12"),
             discord_webhook_url=(os.getenv("DISCORD_WEBHOOK_URL") or "").strip(),
             task_csv=os.getenv("TASK_CSV") or "task.csv",
             proxy_csv=os.getenv("PROXY_CSV") or "proxy.csv",
@@ -171,6 +174,8 @@ class Config:
             raise ValueError("OPEN_PDP_RETRIES must be >= 1")
         if self.open_pdp_retry_wait < 0:
             raise ValueError("OPEN_PDP_RETRY_WAIT must be >= 0")
+        if self.oos_refresh_seconds < 0:
+            raise ValueError("OOS_REFRESH_SECONDS must be >= 0")
         if self.proxy_assign_mode not in {"random", "unique", "unique_random", "shuffle"}:
             raise ValueError(
                 "PROXY_ASSIGN_MODE must be one of: random, unique, unique_random, shuffle"

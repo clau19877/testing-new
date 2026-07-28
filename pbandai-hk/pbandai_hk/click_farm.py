@@ -89,6 +89,7 @@ class FarmBrowser:
     clicks: int = 0
     success: bool = False
     payment_url: str = ""
+    _last_oos_refresh: float = 0.0
 
 
 @dataclass
@@ -201,45 +202,72 @@ class ClickFarm:
             return f"at :{at:02d} every minute"
         return f"every {self.config.click_interval_seconds}s"
 
-    def _wait_for_next_click(self) -> None:
-        """Block until the next scheduled ATC time (minute :SS or interval)."""
+    def _wait_for_next_click(self, wb: Optional[FarmBrowser] = None) -> None:
+        """Block until the next scheduled ATC time; refresh soft OOS while waiting."""
         at = int(self.config.click_at_second)
         if at < 0:
             interval = max(0.5, float(self.config.click_interval_seconds))
             end = time.time() + interval
             while time.time() < end and not self._stop.is_set():
+                if wb is not None:
+                    self._maybe_refresh_oos_while_waiting(wb)
                 time.sleep(min(0.2, end - time.time()))
             return
 
         # Wall-clock: fire when local second == CLICK_AT_SECOND (default :00).
         while not self._stop.is_set():
             now = time.time()
-            # Target = next occurrence of minute + at seconds (Unix aligned).
             minute_start = now - (now % 60)
             target = minute_start + at
             if target <= now + 0.02:
                 target += 60.0
             while time.time() < target and not self._stop.is_set():
+                if wb is not None:
+                    self._maybe_refresh_oos_while_waiting(wb)
                 remaining = target - time.time()
-                time.sleep(min(0.05, remaining) if remaining > 0 else 0)
+                time.sleep(min(0.25, remaining) if remaining > 0 else 0)
             return
+
+    def _maybe_refresh_oos_while_waiting(self, wb: FarmBrowser) -> None:
+        """Soft OOS / stale SPA: hard-refresh PDP on an interval while parked."""
+        interval = float(self.config.oos_refresh_seconds)
+        if interval <= 0 or wb.driver is None:
+            return
+        last = float(getattr(wb, "_last_oos_refresh", 0.0) or 0.0)
+        now = time.time()
+        if now - last < interval:
+            return
+        try:
+            if self._shows_out_of_stock(wb.driver) or self._page_looks_bad(wb.driver):
+                wb._last_oos_refresh = now
+                print(f"[{wb.name}] OUT OF STOCK / bad PDP — hard refresh while waiting")
+                logger.info("[farm] %s OOS refresh while waiting", wb.name)
+                self._hard_refresh_pdp(wb)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[farm] %s OOS wait-refresh failed: %s", wb.name, exc)
 
     def _worker_loop(self, wb: FarmBrowser) -> None:
         assert wb.driver is not None
         while not self._stop.is_set():
-            self._wait_for_next_click()
+            self._wait_for_next_click(wb)
             if self._stop.is_set():
                 return
             try:
-                # Heal first-visit / mid-run 500s before attempting ATC.
-                if self._page_looks_bad(wb.driver) or not wb.ready:
-                    print(f"[{wb.name}] PDP looks bad — healing before click")
-                    if self._recover_pdp(wb):
+                # Heal 500 / soft OOS before attempting ATC.
+                if (
+                    self._page_looks_bad(wb.driver)
+                    or self._shows_out_of_stock(wb.driver)
+                    or not wb.ready
+                ):
+                    print(f"[{wb.name}] PDP OOS/bad — healing before click")
+                    if self._recover_pdp(wb, force_even_if_oos=True):
                         wb.ready = True
                         print(f"[{wb.name}] PDP healed")
                     else:
-                        print(f"[{wb.name}] PDP still down — skip this minute")
-                        continue
+                        # Rapid burst: soft OOS often clears within a few reloads.
+                        if not self._burst_refresh_for_atc(wb):
+                            print(f"[{wb.name}] still OOS/unavailable — skip this minute")
+                            continue
 
                 self._ensure_hook(wb.driver)
                 before = self._read_last(wb.driver)
@@ -261,20 +289,127 @@ class ClickFarm:
                         if self.config.stop_on_first_cart:
                             self._stop.set()
                             return
-                        # Keep going — already reparked on PDP inside _extract_payment_link.
                 else:
                     logger.warning("[farm] %s no button (click #%s)", wb.name, wb.clicks)
-                    # Button missing often means soft 500 / SPA not hydrated.
-                    if self._page_looks_bad(wb.driver):
-                        self._recover_pdp(wb)
+                    if self._shows_out_of_stock(wb.driver) or self._page_looks_bad(wb.driver):
+                        print(f"[{wb.name}] no ATC button (OOS?) — refreshing")
+                        self._burst_refresh_for_atc(wb)
             except Exception as exc:  # noqa: BLE001
                 wb.last_error = str(exc)
                 log_exception(logger, f"farm worker error {wb.name}", exc)
                 print(f"[{wb.name}] error: {exc}")
                 try:
-                    self._recover_pdp(wb)
+                    self._recover_pdp(wb, force_even_if_oos=True)
                 except Exception:  # noqa: BLE001
                     pass
+
+    def _burst_refresh_for_atc(self, wb: FarmBrowser, *, attempts: int = 5) -> bool:
+        """Rapid hard-refresh to clear soft OUT OF STOCK before giving up this minute."""
+        for i in range(1, attempts + 1):
+            if self._stop.is_set():
+                return False
+            print(f"[{wb.name}] OOS burst refresh {i}/{attempts}")
+            if self._hard_refresh_pdp(wb):
+                if not self._shows_out_of_stock(wb.driver) and not self._page_looks_bad(wb.driver):
+                    # Prefer seeing an enabled ATC CTA.
+                    if self._has_atc_button(wb.driver):
+                        wb.ready = True
+                        return True
+                    # UI may say available without button text yet — still treat as healed.
+                    wb.ready = True
+                    return True
+            time.sleep(0.6 * i)
+        return False
+
+    def _hard_refresh_pdp(self, wb: FarmBrowser) -> bool:
+        driver = wb.driver
+        if driver is None:
+            return False
+        product_url = self._product_url()
+        home = f"{self.config.base_url}/{self.config.area_code}/"
+        try:
+            # Bypass HTTP cache where possible.
+            try:
+                driver.execute_cdp_cmd("Network.setCacheDisabled", {"cacheDisabled": True})
+            except Exception:  # noqa: BLE001
+                pass
+            # Bust SPA/CDN soft-cache with a no-op query once, then clean URL.
+            bust = f"{product_url}?_={int(time.time() * 1000)}"
+            driver.get(bust)
+            _wait_for_product_ready(driver, timeout=25)
+            if self._shows_out_of_stock(driver) or self._page_looks_bad(driver):
+                driver.get(home)
+                time.sleep(0.5)
+                driver.get(product_url)
+                _wait_for_product_ready(driver, timeout=25)
+            self._ensure_hook(driver)
+            ok = not self._page_looks_bad(driver)
+            # OOS is not a hard page error — page can still be "ok" HTML with disabled CTA.
+            if ok and self._shows_out_of_stock(driver):
+                return False
+            if ok:
+                wb.ready = True
+                wb.last_error = ""
+            return ok and not self._shows_out_of_stock(driver)
+        except Exception as exc:  # noqa: BLE001
+            log_exception(logger, f"hard refresh failed {wb.name}", exc)
+            return False
+
+    def _shows_out_of_stock(self, driver: Any) -> bool:
+        """True when UI shows SORRY/OUT OF STOCK (disabled ATC) instead of PLACE PRE-ORDER."""
+        try:
+            source = (driver.page_source or "")[:20000]
+        except Exception:  # noqa: BLE001
+            return False
+        low = source.lower()
+        # If a real ATC CTA is present and enabled text exists, not OOS.
+        if self._has_atc_button(driver):
+            return False
+        markers = (
+            "sorry, out of stock",
+            "sorry out of stock",
+            "out of stock",
+            "sold out",
+            "currently unavailable",
+            "暫無存貨",
+            "暂时缺货",
+            "暫時缺貨",
+            "售罄",
+            "缺貨",
+            "売り切れ",
+            "在庫なし",
+        )
+        return any(m in low for m in markers)
+
+    def _has_atc_button(self, driver: Any) -> bool:
+        from selenium.webdriver.common.by import By
+
+        needles = (
+            "PLACE PRE-ORDER",
+            "ADD TO CART",
+            "PLACE ORDER",
+            "加入購物車",
+            "預購",
+            "立即預訂",
+        )
+        try:
+            for btn in driver.find_elements(By.TAG_NAME, "button"):
+                try:
+                    if not btn.is_displayed() or not btn.is_enabled():
+                        continue
+                    label = (btn.text or btn.get_attribute("aria-label") or "").strip()
+                    if not label:
+                        continue
+                    if any(n.lower() in label.lower() for n in needles):
+                        # Explicitly reject OOS labels.
+                        if "out of stock" in label.lower() or "sorry" in label.lower():
+                            continue
+                        return True
+                except Exception:  # noqa: BLE001
+                    continue
+        except Exception:  # noqa: BLE001
+            pass
+        return False
 
     def _await_success(
         self,
@@ -531,25 +666,37 @@ class ClickFarm:
         *,
         home: str,
         name: str,
+        require_atc: bool = False,
     ) -> bool:
         retries = max(1, int(self.config.open_pdp_retries))
         base_wait = max(0.0, float(self.config.open_pdp_retry_wait))
         for attempt in range(1, retries + 1):
             try:
-                driver.get(product_url)
+                # Cache-bust on retries after the first.
+                url = product_url if attempt == 1 else f"{product_url}?_={int(time.time() * 1000)}"
+                driver.get(url)
                 _wait_for_product_ready(driver, timeout=45)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[farm] %s PDP get attempt %s error: %s", name, attempt, exc)
-            if not self._page_looks_bad(driver):
-                if attempt > 1:
-                    print(f"[farm] {name} PDP OK on attempt {attempt}/{retries}")
-                return True
-            reason = self._page_bad_reason(driver)
+
+            bad = self._page_looks_bad(driver)
+            oos = self._shows_out_of_stock(driver) if require_atc else False
+            if not bad and not oos:
+                if require_atc and not self._has_atc_button(driver):
+                    # Page loaded but still no PLACE PRE-ORDER — treat as soft fail.
+                    oos = True
+                else:
+                    if attempt > 1:
+                        print(f"[farm] {name} PDP OK on attempt {attempt}/{retries}")
+                    return True
+
+            reason = self._page_bad_reason(driver) if bad else (
+                "OUT OF STOCK / no ATC button" if oos else "unknown"
+            )
             print(f"[farm] {name} PDP bad attempt {attempt}/{retries}: {reason}")
             logger.warning("[farm] %s PDP bad attempt=%s/%s reason=%s", name, attempt, retries, reason)
             if attempt >= retries:
                 break
-            # Re-warm on home between retries (often clears sticky 500 HTML).
             try:
                 driver.get(home)
                 time.sleep(0.8)
@@ -561,7 +708,7 @@ class ClickFarm:
                 time.sleep(min(0.2, end - time.time()))
         return False
 
-    def _recover_pdp(self, wb: FarmBrowser) -> bool:
+    def _recover_pdp(self, wb: FarmBrowser, *, force_even_if_oos: bool = False) -> bool:
         driver = wb.driver
         if driver is None:
             return False
@@ -572,6 +719,7 @@ class ClickFarm:
             product_url,
             home=home,
             name=wb.name,
+            require_atc=force_even_if_oos,
         )
         if ok:
             self._ensure_hook(driver)
