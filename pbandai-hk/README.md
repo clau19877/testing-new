@@ -119,6 +119,9 @@ Accepted proxy formats: `host:port:user:pass`, `http://user:pass@host:port`, `so
 | `CLICK_AT_SECOND` | Wall-clock second to ATC each minute (`0` = :00). `-1` = use interval |
 | `CLICK_INTERVAL_SECONDS` | Only used when `CLICK_AT_SECOND=-1` |
 | `STOP_ON_FIRST_CART` | `0` = keep all instances going (default); `1` = stop after first cart |
+| `OPEN_STAGGER_SECONDS` | Delay × instance index before first PDP hit (cuts parallel 500s) |
+| `OPEN_PDP_RETRIES` | Retries when first PDP visit is 500 / unavailable |
+| `OPEN_PDP_RETRY_WAIT` | Base wait between PDP retries (grows per attempt) |
 | `DISCORD_WEBHOOK_URL` | Discord webhook; receives payment/cart link |
 | `BACKGROUND_MODE` | `0` headed (recommended), `1` headless |
 | `PROXY_URL` / `PROXY_CSV` | Optional proxies |
