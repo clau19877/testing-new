@@ -253,21 +253,19 @@ class ClickFarm:
             if self._stop.is_set():
                 return
             try:
-                # Heal 500 / soft OOS before attempting ATC.
+                # Soft OOS/500 is already refreshed every OOS_REFRESH_SECONDS while
+                # waiting. At :00 do at most one hard refresh, then click or skip —
+                # no burst (avoids missing :00 and stampeding the origin).
                 if (
                     self._page_looks_bad(wb.driver)
                     or self._shows_out_of_stock(wb.driver)
                     or not wb.ready
                 ):
-                    print(f"[{wb.name}] PDP OOS/bad — healing before click")
-                    if self._recover_pdp(wb, force_even_if_oos=True):
-                        wb.ready = True
-                        print(f"[{wb.name}] PDP healed")
-                    else:
-                        # Rapid burst: soft OOS often clears within a few reloads.
-                        if not self._burst_refresh_for_atc(wb):
-                            print(f"[{wb.name}] still OOS/unavailable — skip this minute")
-                            continue
+                    print(f"[{wb.name}] PDP OOS/bad at click time — one hard refresh")
+                    if not self._hard_refresh_pdp(wb):
+                        print(f"[{wb.name}] still OOS/unavailable — skip this minute")
+                        continue
+                    wb.ready = True
 
                 self._ensure_hook(wb.driver)
                 before = self._read_last(wb.driver)
@@ -292,34 +290,16 @@ class ClickFarm:
                 else:
                     logger.warning("[farm] %s no button (click #%s)", wb.name, wb.clicks)
                     if self._shows_out_of_stock(wb.driver) or self._page_looks_bad(wb.driver):
-                        print(f"[{wb.name}] no ATC button (OOS?) — refreshing")
-                        self._burst_refresh_for_atc(wb)
+                        print(f"[{wb.name}] no ATC button (OOS?) — one refresh for next round")
+                        self._hard_refresh_pdp(wb)
             except Exception as exc:  # noqa: BLE001
                 wb.last_error = str(exc)
                 log_exception(logger, f"farm worker error {wb.name}", exc)
                 print(f"[{wb.name}] error: {exc}")
                 try:
-                    self._recover_pdp(wb, force_even_if_oos=True)
+                    self._hard_refresh_pdp(wb)
                 except Exception:  # noqa: BLE001
                     pass
-
-    def _burst_refresh_for_atc(self, wb: FarmBrowser, *, attempts: int = 5) -> bool:
-        """Rapid hard-refresh to clear soft OUT OF STOCK before giving up this minute."""
-        for i in range(1, attempts + 1):
-            if self._stop.is_set():
-                return False
-            print(f"[{wb.name}] OOS burst refresh {i}/{attempts}")
-            if self._hard_refresh_pdp(wb):
-                if not self._shows_out_of_stock(wb.driver) and not self._page_looks_bad(wb.driver):
-                    # Prefer seeing an enabled ATC CTA.
-                    if self._has_atc_button(wb.driver):
-                        wb.ready = True
-                        return True
-                    # UI may say available without button text yet — still treat as healed.
-                    wb.ready = True
-                    return True
-            time.sleep(0.6 * i)
-        return False
 
     def _hard_refresh_pdp(self, wb: FarmBrowser) -> bool:
         driver = wb.driver
