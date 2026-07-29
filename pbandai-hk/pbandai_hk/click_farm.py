@@ -99,76 +99,56 @@ class ClickFarm:
     browsers: List[FarmBrowser] = field(default_factory=list)
     _stop: threading.Event = field(default_factory=threading.Event)
     _success_lock: threading.Lock = field(default_factory=threading.Lock)
+    _browsers_lock: threading.Lock = field(default_factory=threading.Lock)
     _successes: List[FarmBrowser] = field(default_factory=list)
+    _plan: List[tuple[str, str]] = field(default_factory=list)  # (name, proxy)
 
     def prepare(self) -> int:
-        """Open BROWSER_INSTANCES guest Chromes parked on the product page."""
+        """Plan N independent workers. Does NOT open browsers (no global wait)."""
         self.close()
         n = max(1, int(self.config.browser_instances))
         proxies = self._load_proxies(n)
-        product_url = self._product_url()
         schedule = self._schedule_label()
+        self._plan = [
+            (f"inst{i + 1:02d}", proxies[i] if i < len(proxies) else "")
+            for i in range(n)
+        ]
         print(
-            f"[farm] opening {n} guest browser(s) on {self.product_code} "
-            f"({schedule}; keep going after cart)"
+            f"[farm] planned {n} independent instance(s) on {self.product_code} "
+            f"({schedule}; each opens + clicks on its own thread)"
         )
         logger.info(
-            "[farm] prepare instances=%s product=%s schedule=%s discord=%s stop_on_first=%s",
+            "[farm] prepare planned=%s product=%s schedule=%s discord=%s "
+            "independent=yes stop_on_first=%s",
             n,
             self.product_code,
             schedule,
             "yes" if self.config.discord_webhook_url else "no",
             self.config.stop_on_first_cart,
         )
-
-        # Launch all Chromes in parallel; each staggers its first PDP hit to cut 500s.
         stagger = max(0.0, float(self.config.open_stagger_seconds))
         print(
-            f"[farm] launching {n} Chrome(s) in parallel "
-            f"(PDP stagger={stagger}s, retries={self.config.open_pdp_retries})..."
+            f"[farm] open stagger={stagger}s · PDP retries={self.config.open_pdp_retries} "
+            "· no wait for other instances"
         )
-        slots = [(f"inst{i + 1:02d}", proxies[i] if i < len(proxies) else "") for i in range(n)]
-        opened: List[Optional[FarmBrowser]] = [None] * n
-
-        def _launch(idx: int, name: str, proxy: str) -> None:
-            opened[idx] = self._open_one(name, proxy, product_url, index=idx)
-
-        with ThreadPoolExecutor(max_workers=n) as pool:
-            futs = [
-                pool.submit(_launch, i, name, proxy) for i, (name, proxy) in enumerate(slots)
-            ]
-            for fut in futs:
-                try:
-                    fut.result()
-                except Exception as exc:  # noqa: BLE001
-                    log_exception(logger, "farm parallel launch error", exc)
-
-        self.browsers = [b for b in opened if b is not None]
-
-        ready = sum(1 for b in self.browsers if b.ready)
-        print(f"[farm] ready={ready}/{n}")
-        logger.info("[farm] ready=%s/%s", ready, n)
-        return ready
+        return n
 
     def run(self) -> List[FarmBrowser]:
-        """Click forever (or until stop) — each ready browser on its own thread."""
-        # Include not-yet-ready windows (driver alive) so they can heal into the farm.
-        workers = [b for b in self.browsers if b.driver is not None]
-        if not workers:
-            raise RuntimeError("click farm: no browsers with a live driver")
-        initially_ready = sum(1 for b in workers if b.ready)
-        print(
-            f"[farm] workers={len(workers)} (ready now={initially_ready}; "
-            "others will heal before clicks)"
-        )
+        """Each instance opens Chrome then enters the click loop independently."""
+        if not self._plan:
+            raise RuntimeError("click farm: prepare() was not called")
 
+        n = len(self._plan)
         schedule = self._schedule_label()
         print(
-            f"[farm] clicking PLACE PRE-ORDER {schedule} "
-            f"across {len(workers)} instance(s) — keep going; Ctrl+C to stop"
+            f"[farm] starting {n} independent worker(s) — "
+            f"PLACE PRE-ORDER {schedule}; Ctrl+C to stop"
         )
-        with ThreadPoolExecutor(max_workers=len(workers)) as pool:
-            futs = [pool.submit(self._worker_loop, wb) for wb in workers]
+        with ThreadPoolExecutor(max_workers=n) as pool:
+            futs = [
+                pool.submit(self._instance_lifecycle, idx, name, proxy)
+                for idx, (name, proxy) in enumerate(self._plan)
+            ]
             try:
                 for fut in futs:
                     fut.result()
@@ -182,9 +162,28 @@ class ClickFarm:
                         pass
         return list(self._successes)
 
+    def _instance_lifecycle(self, index: int, name: str, proxy: str) -> None:
+        """Open this instance, then click forever — never waits on other instances."""
+        if self._stop.is_set():
+            return
+        product_url = self._product_url()
+        print(f"[{name}] independent start")
+        wb = self._open_one(name, proxy, product_url, index=index)
+        with self._browsers_lock:
+            self.browsers.append(wb)
+        if wb.driver is None:
+            print(f"[{name}] Chrome failed — instance exit")
+            return
+        print(f"[{name}] open done ready={wb.ready} — entering click loop now")
+        logger.info("[farm] %s open done ready=%s — click loop", name, wb.ready)
+        self._worker_loop(wb)
+
     def close(self) -> None:
         self._stop.set()
-        for wb in self.browsers:
+        with self._browsers_lock:
+            browsers = list(self.browsers)
+            self.browsers = []
+        for wb in browsers:
             if wb.driver is None:
                 continue
             try:
@@ -193,7 +192,7 @@ class ClickFarm:
                 log_exception(logger, f"farm quit failed {wb.name}", exc)
             wb.driver = None
             wb.ready = False
-        self.browsers = []
+        self._plan = []
         self._stop = threading.Event()
 
     def _schedule_label(self) -> str:

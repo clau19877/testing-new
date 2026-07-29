@@ -88,13 +88,13 @@ class PBandaiHkBot:
             from .click_farm import ClickFarm
 
             self.click_farm = ClickFarm(config=self.config, product_code=codes[0])
-            ready = self.click_farm.prepare()
-            if ready <= 0:
-                raise RuntimeError("click farm: no browsers ready")
+            planned = self.click_farm.prepare()
+            if planned <= 0:
+                raise RuntimeError("click farm: no instances planned")
             at = int(self.config.click_at_second)
             sched = f":{at:02d}/min" if at >= 0 else f"every {self.config.click_interval_seconds}s"
             print(
-                f"Click farm ready={ready}/{self.config.browser_instances} "
+                f"Click farm planned={planned} independent instance(s) "
                 f"| schedule={sched} (keep going) "
                 f"| discord={'on' if self.config.discord_webhook_url else 'OFF'}"
             )
