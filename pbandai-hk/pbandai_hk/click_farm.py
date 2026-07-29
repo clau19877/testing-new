@@ -551,6 +551,11 @@ class ClickFarm:
             "pre-order closed",
             "preorder closed",
             "pre-orders closed",
+            # Soft sold-out / quota (button may still look enabled in DOM).
+            "purchase limit has been reached",
+            "the purchase limit has been reached",
+            "we can't perform the requested operation",
+            "cannot perform the requested operation",
             "暫無存貨",
             "暂时缺货",
             "暫時缺貨",
