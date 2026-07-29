@@ -94,6 +94,7 @@ class FarmBrowser:
     _last_oos_log: float = 0.0
     _last_idle_activity: float = 0.0
     _last_idle_settle: float = 0.0
+    _oos_refresh_due: float = 0.0  # per-instance jittered interval
 
 
 @dataclass
@@ -106,6 +107,7 @@ class ClickFarm:
     _browsers_lock: threading.Lock = field(default_factory=threading.Lock)
     _successes: List[FarmBrowser] = field(default_factory=list)
     _plan: List[tuple[str, str]] = field(default_factory=list)  # (name, proxy)
+    _pdp_gate: Optional[threading.Semaphore] = field(default=None, repr=False)
 
     def prepare(self) -> int:
         """Plan N independent workers. Does NOT open browsers (no global wait)."""
@@ -117,18 +119,20 @@ class ClickFarm:
             (f"inst{i + 1:02d}", proxies[i] if i < len(proxies) else "")
             for i in range(n)
         ]
+        self._pdp_gate = threading.Semaphore(max(1, int(self.config.pdp_max_concurrent)))
         print(
             f"[farm] planned {n} independent instance(s) on {self.product_code} "
             f"({schedule}; each opens + clicks on its own thread)"
         )
         logger.info(
             "[farm] prepare planned=%s product=%s schedule=%s discord=%s "
-            "independent=yes stop_on_first=%s",
+            "independent=yes stop_on_first=%s pdp_max_concurrent=%s",
             n,
             self.product_code,
             schedule,
             "yes" if self.config.discord_webhook_url else "no",
             self.config.stop_on_first_cart,
+            self.config.pdp_max_concurrent,
         )
         stagger = max(0.0, float(self.config.open_stagger_seconds))
         idle = float(self.config.idle_activity_seconds)
@@ -142,7 +146,9 @@ class ClickFarm:
         print(
             f"[farm] open stagger={stagger}s (+jitter) · launch+PDP staggered · "
             f"PDP retries={self.config.open_pdp_retries} · "
-            f"idle activity={idle_label} (scroll/blank-click) · no wait for other instances"
+            f"PDP concurrent≤{self.config.pdp_max_concurrent} · "
+            f"OOS refresh~{self.config.oos_refresh_seconds:.0f}s · "
+            f"idle={idle_label} · no wait for other instances"
         )
         return n
 
@@ -207,6 +213,38 @@ class ClickFarm:
             wb.ready = False
         self._plan = []
         self._stop = threading.Event()
+        self._pdp_gate = None
+
+    def _acquire_pdp_slot(self, name: str) -> bool:
+        """Block until a PDP navigation slot is free (limits origin stampede)."""
+        gate = self._pdp_gate
+        if gate is None:
+            return True
+        while not self._stop.is_set():
+            if gate.acquire(blocking=True, timeout=0.25):
+                return True
+        return False
+
+    def _release_pdp_slot(self) -> None:
+        gate = self._pdp_gate
+        if gate is None:
+            return
+        try:
+            gate.release()
+        except ValueError:
+            pass
+
+    def _oos_interval_for(self, wb: FarmBrowser) -> float:
+        """Per-instance jittered refresh interval so heals don't lockstep."""
+        base = float(self.config.oos_refresh_seconds)
+        if base <= 0:
+            return 0.0
+        due = float(getattr(wb, "_oos_refresh_due", 0.0) or 0.0)
+        if due <= 0:
+            # Spread 0.7x..1.6x of base across instances.
+            due = base * random.uniform(0.7, 1.6) + random.uniform(0.0, 4.0)
+            wb._oos_refresh_due = due
+        return due
 
     def _schedule_label(self) -> str:
         at = int(self.config.click_at_second)
@@ -347,8 +385,8 @@ class ClickFarm:
                 time.sleep(random.uniform(0.08, 0.25))
 
     def _maybe_refresh_oos_while_waiting(self, wb: FarmBrowser) -> None:
-        """Soft OOS / stale SPA: hard-refresh PDP on an interval while parked."""
-        interval = float(self.config.oos_refresh_seconds)
+        """Soft OOS / PNA: hard-refresh PDP on a jittered interval while parked."""
+        interval = self._oos_interval_for(wb)
         if interval <= 0 or wb.driver is None:
             return
         last = float(getattr(wb, "_last_oos_refresh", 0.0) or 0.0)
@@ -358,12 +396,15 @@ class ClickFarm:
         try:
             if self._shows_out_of_stock(wb.driver) or self._page_looks_bad(wb.driver):
                 wb._last_oos_refresh = now
+                # Resample interval so the next heal doesn't stay phase-locked.
+                wb._oos_refresh_due = 0.0
                 last_log = float(getattr(wb, "_last_oos_log", 0.0) or 0.0)
                 if now - last_log >= 60.0:
                     wb._last_oos_log = now
                     print(
-                        f"[{wb.name}] still OOS/bad — refreshing every "
-                        f"{interval:.0f}s until ATC"
+                        f"[{wb.name}] still OOS/bad — refreshing ~every "
+                        f"{float(self.config.oos_refresh_seconds):.0f}s "
+                        f"(jittered, max {self.config.pdp_max_concurrent} concurrent)"
                     )
                 logger.info("[farm] %s OOS refresh while waiting", wb.name)
                 self._hard_refresh_pdp(wb)
@@ -372,33 +413,36 @@ class ClickFarm:
 
     def _worker_loop(self, wb: FarmBrowser) -> None:
         assert wb.driver is not None
-        # After open PNA, do a full multi-retry recover once before the click loop.
+        # After open PNA, one gated multi-retry recover (staggered) — not every :00.
         if not wb.ready and not self._stop.is_set():
+            # Extra jitter so recoveries don't align when many open failures finish together.
+            time.sleep(random.uniform(0.5, 4.0))
             print(f"[{wb.name}] recovering PDP after open failure…")
             if self._recover_pdp(wb):
                 print(f"[{wb.name}] PDP recovered")
             else:
-                print(f"[{wb.name}] PDP still bad — will keep healing each minute")
+                print(f"[{wb.name}] PDP still bad — will heal on jittered interval")
         while not self._stop.is_set():
             self._wait_for_next_click(wb)
             if self._stop.is_set():
                 return
             try:
-                # Soft OOS/500 is already refreshed every OOS_REFRESH_SECONDS while
-                # waiting. At :00 do at most one hard refresh, then click or skip —
-                # no burst (avoids missing :00 and stampeding the origin).
+                # Soft OOS/500 is already refreshed on a jittered interval while
+                # waiting. At :00 do at most ONE hard refresh (not multi-retry),
+                # then click or skip — avoids a 20× recover stampede on the minute.
                 if (
                     self._page_looks_bad(wb.driver)
                     or self._shows_out_of_stock(wb.driver)
                     or not wb.ready
                 ):
-                    print(f"[{wb.name}] PDP OOS/bad at click time — recover/refresh")
-                    # Prefer multi-retry recover for PNA; hard refresh for soft OOS.
-                    if self._page_looks_bad(wb.driver) or not wb.ready:
-                        ok = self._recover_pdp(wb) or self._hard_refresh_pdp(wb)
-                    else:
-                        ok = self._hard_refresh_pdp(wb)
-                    if not ok:
+                    last = float(getattr(wb, "_last_oos_refresh", 0.0) or 0.0)
+                    # If we refreshed recently while waiting, don't hit origin again at :00.
+                    if time.time() - last < 8.0 and not self._page_looks_bad(wb.driver):
+                        if self._shows_out_of_stock(wb.driver):
+                            print(f"[{wb.name}] still OOS after recent refresh — skip this minute")
+                            continue
+                    print(f"[{wb.name}] PDP OOS/bad at click time — one hard refresh")
+                    if not self._hard_refresh_pdp(wb):
                         print(f"[{wb.name}] still OOS/unavailable — skip this minute")
                         continue
                     wb.ready = True
@@ -455,6 +499,8 @@ class ClickFarm:
             return False
         product_url = self._product_url()
         home = f"{self.config.base_url}/{self.config.area_code}/"
+        if not self._acquire_pdp_slot(wb.name):
+            return False
         try:
             # Bypass HTTP cache where possible.
             try:
@@ -467,10 +513,11 @@ class ClickFarm:
             _wait_for_product_ready(driver, timeout=25)
             if self._shows_out_of_stock(driver) or self._page_looks_bad(driver):
                 driver.get(home)
-                time.sleep(0.5)
+                time.sleep(random.uniform(0.4, 1.0))
                 driver.get(product_url)
                 _wait_for_product_ready(driver, timeout=25)
             self._ensure_hook(driver)
+            wb._last_oos_refresh = time.time()
             ok = not self._page_looks_bad(driver)
             # OOS is not a hard page error — page can still be "ok" HTML with disabled CTA.
             if ok and self._shows_out_of_stock(driver):
@@ -478,10 +525,12 @@ class ClickFarm:
             if ok:
                 wb.ready = True
                 wb.last_error = ""
-            return ok and not self._shows_out_of_stock(driver)
+            return ok
         except Exception as exc:  # noqa: BLE001
-            log_exception(logger, f"hard refresh failed {wb.name}", exc)
+            logger.warning("[farm] %s hard refresh failed: %s", wb.name, exc)
             return False
+        finally:
+            self._release_pdp_slot()
 
     def _shows_out_of_stock(self, driver: Any) -> bool:
         """True when UI shows SORRY/OUT OF STOCK (disabled ATC) instead of PLACE PRE-ORDER."""
@@ -829,6 +878,10 @@ class ClickFarm:
         retries = max(1, int(self.config.open_pdp_retries))
         base_wait = max(0.0, float(self.config.open_pdp_retry_wait))
         for attempt in range(1, retries + 1):
+            if self._stop.is_set():
+                return False
+            if not self._acquire_pdp_slot(name):
+                return False
             try:
                 # Cache-bust on retries after the first.
                 url = product_url if attempt == 1 else f"{product_url}?_={int(time.time() * 1000)}"
@@ -836,6 +889,8 @@ class ClickFarm:
                 _wait_for_product_ready(driver, timeout=45)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[farm] %s PDP get attempt %s error: %s", name, attempt, exc)
+            finally:
+                self._release_pdp_slot()
 
             bad = self._page_looks_bad(driver)
             oos = self._shows_out_of_stock(driver) if require_atc else False
@@ -855,11 +910,15 @@ class ClickFarm:
             logger.warning("[farm] %s PDP bad attempt=%s/%s reason=%s", name, attempt, retries, reason)
             if attempt >= retries:
                 break
-            try:
-                driver.get(home)
-                time.sleep(random.uniform(0.6, 1.2))
-            except Exception:  # noqa: BLE001
-                pass
+            # Home bounce also gated so we don't stampede between retries.
+            if self._acquire_pdp_slot(name):
+                try:
+                    driver.get(home)
+                    time.sleep(random.uniform(0.6, 1.2))
+                except Exception:  # noqa: BLE001
+                    pass
+                finally:
+                    self._release_pdp_slot()
             # Exponential-ish backoff + jitter so 20 instances don't retry in lockstep.
             wait = (base_wait * attempt) + random.uniform(0.5, 2.0)
             end = time.time() + wait

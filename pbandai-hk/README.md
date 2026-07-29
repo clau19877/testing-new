@@ -122,7 +122,8 @@ Accepted proxy formats: `host:port:user:pass`, `http://user:pass@host:port`, `so
 | `OPEN_STAGGER_SECONDS` | Delay × instance index before Chrome launch + PDP (cuts PNA/WAF); jitter added |
 | `OPEN_PDP_RETRIES` | Retries when first PDP visit is 500 / PAGE NOT AVAILABLE |
 | `OPEN_PDP_RETRY_WAIT` | Base wait between PDP retries (grows + jitter per attempt) |
-| `OOS_REFRESH_SECONDS` | Hard-refresh while waiting if UI shows OUT OF STOCK |
+| `OOS_REFRESH_SECONDS` | Hard-refresh while waiting if UI shows OOS/PNA (jittered per instance) |
+| `PDP_MAX_CONCURRENT` | Max simultaneous PDP/home navigations (default 3; cuts heal stampede) |
 | `IDLE_ACTIVITY_SECONDS` | Scroll/blank-click while waiting (keep session alive) |
 | `DISCORD_WEBHOOK_URL` | Discord webhook; receives payment/cart link |
 | `BACKGROUND_MODE` | `0` headed (recommended), `1` headless |

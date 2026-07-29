@@ -63,8 +63,10 @@ class Config:
     # Retries when first PDP visit returns 500 / "page not available".
     open_pdp_retries: int = 5
     open_pdp_retry_wait: float = 3.0
-    # While waiting for :00, hard-refresh if UI shows OUT OF STOCK (soft/stale OOS).
-    oos_refresh_seconds: float = 12.0
+    # While waiting for :00, hard-refresh if UI shows OUT OF STOCK / PNA (soft/stale).
+    oos_refresh_seconds: float = 18.0
+    # Cap how many instances may navigate PDP/home at once (cuts heal stampede).
+    pdp_max_concurrent: int = 3
     # Human-like idle (scroll / blank click) while waiting; 0 disables.
     idle_activity_seconds: float = 8.0
     discord_webhook_url: str = ""
@@ -128,7 +130,8 @@ class Config:
             open_stagger_seconds=float(os.getenv("OPEN_STAGGER_SECONDS") or "1.5"),
             open_pdp_retries=int(os.getenv("OPEN_PDP_RETRIES") or "5"),
             open_pdp_retry_wait=float(os.getenv("OPEN_PDP_RETRY_WAIT") or "3"),
-            oos_refresh_seconds=float(os.getenv("OOS_REFRESH_SECONDS") or "12"),
+            oos_refresh_seconds=float(os.getenv("OOS_REFRESH_SECONDS") or "18"),
+            pdp_max_concurrent=int(os.getenv("PDP_MAX_CONCURRENT") or "3"),
             idle_activity_seconds=float(os.getenv("IDLE_ACTIVITY_SECONDS") or "8"),
             discord_webhook_url=(os.getenv("DISCORD_WEBHOOK_URL") or "").strip(),
             task_csv=os.getenv("TASK_CSV") or "task.csv",
@@ -179,6 +182,8 @@ class Config:
             raise ValueError("OPEN_PDP_RETRY_WAIT must be >= 0")
         if self.oos_refresh_seconds < 0:
             raise ValueError("OOS_REFRESH_SECONDS must be >= 0")
+        if self.pdp_max_concurrent < 1:
+            raise ValueError("PDP_MAX_CONCURRENT must be >= 1")
         if self.idle_activity_seconds < 0:
             raise ValueError("IDLE_ACTIVITY_SECONDS must be >= 0")
         if self.proxy_assign_mode not in {"random", "unique", "unique_random", "shuffle"}:
