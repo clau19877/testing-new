@@ -133,9 +133,16 @@ class ClickFarm:
         stagger = max(0.0, float(self.config.open_stagger_seconds))
         idle = float(self.config.idle_activity_seconds)
         idle_label = f"every ~{idle:.0f}s" if idle > 0 else "off"
+        proxy_count = len({p for _, p in self._plan if p})
+        if proxy_count and proxy_count < n:
+            print(
+                f"[farm] WARNING: only {proxy_count} unique proxy(ies) for {n} instances "
+                "(shared egress increases PAGE NOT AVAILABLE / WAF)"
+            )
         print(
-            f"[farm] open stagger={stagger}s · PDP retries={self.config.open_pdp_retries} "
-            f"· idle activity={idle_label} (scroll/blank-click) · no wait for other instances"
+            f"[farm] open stagger={stagger}s (+jitter) · launch+PDP staggered · "
+            f"PDP retries={self.config.open_pdp_retries} · "
+            f"idle activity={idle_label} (scroll/blank-click) · no wait for other instances"
         )
         return n
 
@@ -365,6 +372,13 @@ class ClickFarm:
 
     def _worker_loop(self, wb: FarmBrowser) -> None:
         assert wb.driver is not None
+        # After open PNA, do a full multi-retry recover once before the click loop.
+        if not wb.ready and not self._stop.is_set():
+            print(f"[{wb.name}] recovering PDP after open failure…")
+            if self._recover_pdp(wb):
+                print(f"[{wb.name}] PDP recovered")
+            else:
+                print(f"[{wb.name}] PDP still bad — will keep healing each minute")
         while not self._stop.is_set():
             self._wait_for_next_click(wb)
             if self._stop.is_set():
@@ -378,8 +392,13 @@ class ClickFarm:
                     or self._shows_out_of_stock(wb.driver)
                     or not wb.ready
                 ):
-                    print(f"[{wb.name}] PDP OOS/bad at click time — one hard refresh")
-                    if not self._hard_refresh_pdp(wb):
+                    print(f"[{wb.name}] PDP OOS/bad at click time — recover/refresh")
+                    # Prefer multi-retry recover for PNA; hard refresh for soft OOS.
+                    if self._page_looks_bad(wb.driver) or not wb.ready:
+                        ok = self._recover_pdp(wb) or self._hard_refresh_pdp(wb)
+                    else:
+                        ok = self._hard_refresh_pdp(wb)
+                    if not ok:
                         print(f"[{wb.name}] still OOS/unavailable — skip this minute")
                         continue
                     wb.ready = True
@@ -700,6 +719,14 @@ class ClickFarm:
             log_exception(logger, f"discord webhook failed {wb.name}", exc)
             print(f"[{wb.name}] Discord webhook error: {exc}")
 
+    def _open_stagger_delay(self, index: int) -> float:
+        """Seconds to wait before Chrome launch / PDP for this instance (jittered)."""
+        base = max(0.0, float(self.config.open_stagger_seconds))
+        if base <= 0:
+            return 0.0
+        # Spread launches: index * base + random jitter so retries don't re-lockstep.
+        return base * max(0, index) + random.uniform(0.0, max(0.2, base * 0.6))
+
     def _open_one(
         self,
         name: str,
@@ -712,7 +739,29 @@ class ClickFarm:
         driver = None
         try:
             print(f"[farm] start {name} proxy={redact_proxy(proxy) or '-'}")
-            driver = _create_webdriver(self.config, proxy=proxy or "")
+            # Stagger Chrome launch itself (not only PDP nav) — all 20 Chromes
+            # starting at T0 was a major PAGE NOT AVAILABLE driver.
+            launch_wait = self._open_stagger_delay(index)
+            if launch_wait > 0:
+                print(f"[farm] {name} wait {launch_wait:.1f}s before Chrome launch")
+                end = time.time() + launch_wait
+                while time.time() < end and not self._stop.is_set():
+                    time.sleep(max(0.0, min(0.25, end - time.time())))
+                if self._stop.is_set():
+                    return wb
+
+            # Headless hits PNA/WAF far more often — force headed for the farm.
+            prev_bg = bool(self.config.background_mode)
+            if prev_bg:
+                logger.warning(
+                    "[farm] %s BACKGROUND_MODE ignored for click farm (headed required)",
+                    name,
+                )
+                self.config.background_mode = False
+            try:
+                driver = _create_webdriver(self.config, proxy=proxy or "")
+            finally:
+                self.config.background_mode = prev_bg
             try:
                 driver.execute_cdp_cmd(
                     "Page.addScriptToEvaluateOnNewDocument",
@@ -727,17 +776,14 @@ class ClickFarm:
             except Exception:  # noqa: BLE001
                 pass
 
-            # Stagger first PDP navigation across parallel launches (Chrome opens
-            # together; origin hits are spread to reduce first-visit 500s).
-            stagger = max(0.0, float(self.config.open_stagger_seconds)) * max(0, index)
-            if stagger > 0:
-                print(f"[farm] {name} wait {stagger:.1f}s before PDP (stagger)")
-                time.sleep(stagger)
+            # Small extra jitter before home/PDP so origin hits stay spread.
+            extra = random.uniform(0.15, 0.9)
+            time.sleep(extra)
 
             home = f"{self.config.base_url}/{self.config.area_code}/"
             try:
                 driver.get(home)
-                time.sleep(1.0)
+                time.sleep(random.uniform(0.8, 1.6))
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[farm] %s home load soft-fail: %s", name, exc)
 
@@ -811,10 +857,11 @@ class ClickFarm:
                 break
             try:
                 driver.get(home)
-                time.sleep(0.8)
+                time.sleep(random.uniform(0.6, 1.2))
             except Exception:  # noqa: BLE001
                 pass
-            wait = base_wait * attempt
+            # Exponential-ish backoff + jitter so 20 instances don't retry in lockstep.
+            wait = (base_wait * attempt) + random.uniform(0.5, 2.0)
             end = time.time() + wait
             while time.time() < end and not self._stop.is_set():
                 time.sleep(max(0.0, min(0.2, end - time.time())))

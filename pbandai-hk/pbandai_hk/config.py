@@ -58,11 +58,11 @@ class Config:
     click_interval_seconds: float = 5.0
     # Keep all instances running after a cart success (Discord still notified).
     stop_on_first_cart: bool = False
-    # Parallel Chrome open, but stagger first PDP navigation to reduce origin 500s.
-    open_stagger_seconds: float = 0.4
+    # Stagger Chrome launch + PDP (seconds * instance index + jitter) to cut PNA/WAF.
+    open_stagger_seconds: float = 1.5
     # Retries when first PDP visit returns 500 / "page not available".
-    open_pdp_retries: int = 3
-    open_pdp_retry_wait: float = 1.5
+    open_pdp_retries: int = 5
+    open_pdp_retry_wait: float = 3.0
     # While waiting for :00, hard-refresh if UI shows OUT OF STOCK (soft/stale OOS).
     oos_refresh_seconds: float = 12.0
     # Human-like idle (scroll / blank click) while waiting; 0 disables.
@@ -125,9 +125,9 @@ class Config:
             click_at_second=int(os.getenv("CLICK_AT_SECOND") or "0"),
             click_interval_seconds=float(os.getenv("CLICK_INTERVAL_SECONDS") or "5"),
             stop_on_first_cart=_as_bool(os.getenv("STOP_ON_FIRST_CART"), False),
-            open_stagger_seconds=float(os.getenv("OPEN_STAGGER_SECONDS") or "0.4"),
-            open_pdp_retries=int(os.getenv("OPEN_PDP_RETRIES") or "3"),
-            open_pdp_retry_wait=float(os.getenv("OPEN_PDP_RETRY_WAIT") or "1.5"),
+            open_stagger_seconds=float(os.getenv("OPEN_STAGGER_SECONDS") or "1.5"),
+            open_pdp_retries=int(os.getenv("OPEN_PDP_RETRIES") or "5"),
+            open_pdp_retry_wait=float(os.getenv("OPEN_PDP_RETRY_WAIT") or "3"),
             oos_refresh_seconds=float(os.getenv("OOS_REFRESH_SECONDS") or "12"),
             idle_activity_seconds=float(os.getenv("IDLE_ACTIVITY_SECONDS") or "8"),
             discord_webhook_url=(os.getenv("DISCORD_WEBHOOK_URL") or "").strip(),

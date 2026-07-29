@@ -119,9 +119,9 @@ Accepted proxy formats: `host:port:user:pass`, `http://user:pass@host:port`, `so
 | `CLICK_AT_SECOND` | Wall-clock second to ATC each minute (`0` = :00). `-1` = use interval |
 | `CLICK_INTERVAL_SECONDS` | Only used when `CLICK_AT_SECOND=-1` |
 | `STOP_ON_FIRST_CART` | `0` = keep all instances going (default); `1` = stop after first cart |
-| `OPEN_STAGGER_SECONDS` | Delay × instance index before first PDP hit (cuts parallel 500s) |
-| `OPEN_PDP_RETRIES` | Retries when first PDP visit is 500 / unavailable |
-| `OPEN_PDP_RETRY_WAIT` | Base wait between PDP retries (grows per attempt) |
+| `OPEN_STAGGER_SECONDS` | Delay × instance index before Chrome launch + PDP (cuts PNA/WAF); jitter added |
+| `OPEN_PDP_RETRIES` | Retries when first PDP visit is 500 / PAGE NOT AVAILABLE |
+| `OPEN_PDP_RETRY_WAIT` | Base wait between PDP retries (grows + jitter per attempt) |
 | `OOS_REFRESH_SECONDS` | Hard-refresh while waiting if UI shows OUT OF STOCK |
 | `IDLE_ACTIVITY_SECONDS` | Scroll/blank-click while waiting (keep session alive) |
 | `DISCORD_WEBHOOK_URL` | Discord webhook; receives payment/cart link |
