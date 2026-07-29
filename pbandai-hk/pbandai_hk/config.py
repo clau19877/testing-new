@@ -65,6 +65,8 @@ class Config:
     open_pdp_retry_wait: float = 1.5
     # While waiting for :00, hard-refresh if UI shows OUT OF STOCK (soft/stale OOS).
     oos_refresh_seconds: float = 12.0
+    # Human-like idle (scroll / blank click) while waiting; 0 disables.
+    idle_activity_seconds: float = 8.0
     discord_webhook_url: str = ""
     task_csv: str = "task.csv"
     proxy_csv: str = "proxy.csv"
@@ -127,6 +129,7 @@ class Config:
             open_pdp_retries=int(os.getenv("OPEN_PDP_RETRIES") or "3"),
             open_pdp_retry_wait=float(os.getenv("OPEN_PDP_RETRY_WAIT") or "1.5"),
             oos_refresh_seconds=float(os.getenv("OOS_REFRESH_SECONDS") or "12"),
+            idle_activity_seconds=float(os.getenv("IDLE_ACTIVITY_SECONDS") or "8"),
             discord_webhook_url=(os.getenv("DISCORD_WEBHOOK_URL") or "").strip(),
             task_csv=os.getenv("TASK_CSV") or "task.csv",
             proxy_csv=os.getenv("PROXY_CSV") or "proxy.csv",
@@ -176,6 +179,8 @@ class Config:
             raise ValueError("OPEN_PDP_RETRY_WAIT must be >= 0")
         if self.oos_refresh_seconds < 0:
             raise ValueError("OOS_REFRESH_SECONDS must be >= 0")
+        if self.idle_activity_seconds < 0:
+            raise ValueError("IDLE_ACTIVITY_SECONDS must be >= 0")
         if self.proxy_assign_mode not in {"random", "unique", "unique_random", "shuffle"}:
             raise ValueError(
                 "PROXY_ASSIGN_MODE must be one of: random, unique, unique_random, shuffle"

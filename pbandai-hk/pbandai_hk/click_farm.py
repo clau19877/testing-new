@@ -9,6 +9,7 @@ to Discord webhook, then returns to the PDP for the next minute mark.
 from __future__ import annotations
 
 import json
+import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -91,6 +92,7 @@ class FarmBrowser:
     payment_url: str = ""
     _last_oos_refresh: float = 0.0
     _last_oos_log: float = 0.0
+    _last_idle_activity: float = 0.0
 
 
 @dataclass
