@@ -90,6 +90,7 @@ class FarmBrowser:
     success: bool = False
     payment_url: str = ""
     _last_oos_refresh: float = 0.0
+    _last_oos_log: float = 0.0
 
 
 @dataclass
@@ -210,7 +211,7 @@ class ClickFarm:
             while time.time() < end and not self._stop.is_set():
                 if wb is not None:
                     self._maybe_refresh_oos_while_waiting(wb)
-                time.sleep(min(0.2, end - time.time()))
+                time.sleep(max(0.0, min(0.2, end - time.time())))
             return
 
         # Wall-clock: fire when local second == CLICK_AT_SECOND (default :00).
@@ -224,7 +225,7 @@ class ClickFarm:
                 if wb is not None:
                     self._maybe_refresh_oos_while_waiting(wb)
                 remaining = target - time.time()
-                time.sleep(min(0.25, remaining) if remaining > 0 else 0)
+                time.sleep(max(0.0, min(0.25, remaining)))
             return
 
     def _maybe_refresh_oos_while_waiting(self, wb: FarmBrowser) -> None:
@@ -239,7 +240,13 @@ class ClickFarm:
         try:
             if self._shows_out_of_stock(wb.driver) or self._page_looks_bad(wb.driver):
                 wb._last_oos_refresh = now
-                print(f"[{wb.name}] OUT OF STOCK / bad PDP — hard refresh while waiting")
+                last_log = float(getattr(wb, "_last_oos_log", 0.0) or 0.0)
+                if now - last_log >= 60.0:
+                    wb._last_oos_log = now
+                    print(
+                        f"[{wb.name}] still OOS/bad — refreshing every "
+                        f"{interval:.0f}s until ATC"
+                    )
                 logger.info("[farm] %s OOS refresh while waiting", wb.name)
                 self._hard_refresh_pdp(wb)
         except Exception as exc:  # noqa: BLE001
