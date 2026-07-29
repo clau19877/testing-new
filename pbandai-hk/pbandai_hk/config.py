@@ -69,6 +69,10 @@ class Config:
     pdp_max_concurrent: int = 3
     # Human-like idle (scroll / blank click) while waiting; 0 disables.
     idle_activity_seconds: float = 8.0
+    # Per-instance Chrome profile dir + UA/viewport/locale (cuts identical fingerprints).
+    unique_browser_profiles: bool = True
+    # Seconds to linger on /{area}/ home (scroll) before first PDP open.
+    home_warmup_seconds: float = 3.0
     discord_webhook_url: str = ""
     task_csv: str = "task.csv"
     proxy_csv: str = "proxy.csv"
@@ -133,6 +137,8 @@ class Config:
             oos_refresh_seconds=float(os.getenv("OOS_REFRESH_SECONDS") or "18"),
             pdp_max_concurrent=int(os.getenv("PDP_MAX_CONCURRENT") or "3"),
             idle_activity_seconds=float(os.getenv("IDLE_ACTIVITY_SECONDS") or "8"),
+            unique_browser_profiles=_as_bool(os.getenv("UNIQUE_BROWSER_PROFILES"), True),
+            home_warmup_seconds=float(os.getenv("HOME_WARMUP_SECONDS") or "3"),
             discord_webhook_url=(os.getenv("DISCORD_WEBHOOK_URL") or "").strip(),
             task_csv=os.getenv("TASK_CSV") or "task.csv",
             proxy_csv=os.getenv("PROXY_CSV") or "proxy.csv",
@@ -186,6 +192,8 @@ class Config:
             raise ValueError("PDP_MAX_CONCURRENT must be >= 1")
         if self.idle_activity_seconds < 0:
             raise ValueError("IDLE_ACTIVITY_SECONDS must be >= 0")
+        if self.home_warmup_seconds < 0:
+            raise ValueError("HOME_WARMUP_SECONDS must be >= 0")
         if self.proxy_assign_mode not in {"random", "unique", "unique_random", "shuffle"}:
             raise ValueError(
                 "PROXY_ASSIGN_MODE must be one of: random, unique, unique_random, shuffle"

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import random
 import tempfile
 import time
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
 from .logging_utils import get_logger, log_exception
 from .proxy_util import parse_proxy, redact_proxy
@@ -16,6 +19,167 @@ if TYPE_CHECKING:
     from .config import Config
 
 logger = get_logger("session_login")
+
+# Realistic Chrome UAs — per-instance pick (stable by seed, not identical).
+_UA_POOL: Sequence[str] = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+)
+
+_VIEWPORTS: Sequence[Tuple[int, int]] = (
+    (1920, 1080),
+    (1536, 864),
+    (1440, 900),
+    (1366, 768),
+    (1600, 900),
+    (1680, 1050),
+    (1280, 800),
+    (2560, 1440),
+    (1512, 982),
+    (1728, 1117),
+)
+
+_LANG_ORDERS: Sequence[str] = (
+    "en-US,en;q=0.9",
+    "en-US,en;q=0.8",
+    "en-GB,en;q=0.9",
+    "en-US,en-GB;q=0.9,en;q=0.8",
+    "en,en-US;q=0.9",
+)
+
+_TIMEZONES: Sequence[str] = (
+    "America/New_York",
+    "America/Chicago",
+    "America/Denver",
+    "America/Los_Angeles",
+    "America/Phoenix",
+)
+
+
+@dataclass(frozen=True)
+class BrowserIdentity:
+    """Per-instance browser uniqueness (UA / viewport / profile / locale)."""
+
+    name: str
+    index: int
+    user_agent: str
+    width: int
+    height: int
+    accept_language: str
+    timezone_id: str
+    profile_dir: str = ""
+
+    @property
+    def languages_js(self) -> str:
+        # First tag before comma, stripped of q=.
+        primary = self.accept_language.split(",", 1)[0].split(";", 1)[0].strip() or "en-US"
+        base = primary.split("-", 1)[0] if "-" in primary else primary
+        langs = [primary]
+        if base and base not in langs:
+            langs.append(base)
+        if "en" not in langs:
+            langs.append("en")
+        return json.dumps(langs)
+
+
+def build_browser_identity(
+    *,
+    index: int,
+    name: str,
+    config: "Config",
+    enable_profile: bool = True,
+) -> BrowserIdentity:
+    """Stable-but-unique identity per instance index (reproducible across restarts)."""
+    seed_src = f"{name}|{index}|{getattr(config, 'area_code', '')}"
+    seed = int(hashlib.sha256(seed_src.encode("utf-8")).hexdigest()[:12], 16)
+    rng = random.Random(seed)
+    ua = _UA_POOL[seed % len(_UA_POOL)]
+    # Slight jitter so two instances with same UA pool slot still differ.
+    w, h = _VIEWPORTS[seed % len(_VIEWPORTS)]
+    w = max(1200, w + rng.randint(-24, 24))
+    h = max(700, h + rng.randint(-18, 18))
+    lang = _LANG_ORDERS[seed % len(_LANG_ORDERS)]
+    # Prefer config language if set to something non-english exotic; else pool.
+    cfg_lang = (getattr(config, "accept_language", "") or "").strip().lower()
+    if cfg_lang and cfg_lang not in {"en", "en-us", "en-gb"}:
+        lang = f"{cfg_lang},{cfg_lang.split('-')[0]};q=0.9,en;q=0.8"
+    tz = _TIMEZONES[seed % len(_TIMEZONES)]
+    profile_dir = ""
+    if enable_profile and bool(getattr(config, "unique_browser_profiles", True)):
+        root = Path.cwd() / "chrome_profiles" / _safe_profile_name(name)
+        root.mkdir(parents=True, exist_ok=True)
+        profile_dir = str(root.resolve())
+    return BrowserIdentity(
+        name=name,
+        index=index,
+        user_agent=ua,
+        width=w,
+        height=h,
+        accept_language=lang,
+        timezone_id=tz,
+        profile_dir=profile_dir,
+    )
+
+
+def _safe_profile_name(name: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in (name or "inst"))
+    return cleaned[:48] or "inst"
+
+
+def apply_browser_identity(driver: Any, identity: BrowserIdentity) -> None:
+    """Apply UA / viewport / locale after Chromium starts."""
+    try:
+        driver.set_window_size(identity.width, identity.height)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        driver.execute_cdp_cmd(
+            "Network.setUserAgentOverride",
+            {
+                "userAgent": identity.user_agent,
+                "acceptLanguage": identity.accept_language.split(",")[0].split(";")[0],
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        driver.execute_cdp_cmd(
+            "Emulation.setTimezoneOverride",
+            {"timezoneId": identity.timezone_id},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        driver.execute_cdp_cmd(
+            "Emulation.setLocaleOverride",
+            {"locale": identity.accept_language.split(",")[0].split(";")[0] or "en-US"},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        langs = identity.languages_js
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+                "source": (
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+                    f"Object.defineProperty(navigator, 'languages', {{get: () => {langs}}});"
+                    "Object.defineProperty(navigator, 'language', {get: () => "
+                    f"{json.dumps(identity.accept_language.split(',')[0].split(';')[0] or 'en-US')}"
+                    "});"
+                )
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def login_and_transfer_cookies(
@@ -326,7 +490,11 @@ def _apply_driver_cookies(client: "PBandaiHkClient", cookies: List[Dict[str, Any
         )
 
 
-def _create_webdriver(config: "Config", proxy: str = "") -> Any:
+def _create_webdriver(
+    config: "Config",
+    proxy: str = "",
+    identity: Optional[BrowserIdentity] = None,
+) -> Any:
     browser = (getattr(config, "browser", None) or os.getenv("BROWSER") or "auto").lower()
     errors: list[str] = []
 
@@ -338,10 +506,24 @@ def _create_webdriver(config: "Config", proxy: str = "") -> Any:
     for name in order:
         try:
             if name == "chrome":
-                driver = _create_chrome(config, proxy=proxy)
+                driver = _create_chrome(config, proxy=proxy, identity=identity)
             else:
-                driver = _create_edge(config, proxy=proxy)
-            logger.info("started browser=%s proxy=%s", name, redact_proxy(proxy) or "-")
+                driver = _create_edge(config, proxy=proxy, identity=identity)
+            if identity is not None:
+                apply_browser_identity(driver, identity)
+                logger.info(
+                    "started browser=%s proxy=%s identity=%s ua=%s size=%sx%s tz=%s profile=%s",
+                    name,
+                    redact_proxy(proxy) or "-",
+                    identity.name,
+                    identity.user_agent[:48],
+                    identity.width,
+                    identity.height,
+                    identity.timezone_id,
+                    identity.profile_dir or "-",
+                )
+            else:
+                logger.info("started browser=%s proxy=%s", name, redact_proxy(proxy) or "-")
             print(f"Using browser: {name}")
             return driver
         except Exception as exc:  # noqa: BLE001
@@ -358,26 +540,55 @@ def _create_webdriver(config: "Config", proxy: str = "") -> Any:
     )
 
 
-def _common_options(options: Any, config: "Config", proxy: str = "") -> Any:
+def _common_options(
+    options: Any,
+    config: "Config",
+    proxy: str = "",
+    identity: Optional[BrowserIdentity] = None,
+) -> Any:
     if config.background_mode:
         options.add_argument("--headless=new")
-    options.add_argument("--start-maximized")
+    # Prefer explicit window size over maximized so instances differ.
+    if identity is not None:
+        options.add_argument(f"--window-size={identity.width},{identity.height}")
+    else:
+        options.add_argument("--start-maximized")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--log-level=3")
     options.add_argument("--disable-notifications")
     options.add_argument("--disable-background-networking")
-    options.add_argument(
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+    ua = (
+        identity.user_agent
+        if identity is not None
+        else (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+        )
     )
+    options.add_argument(f"--user-agent={ua}")
+    lang = (
+        identity.accept_language
+        if identity is not None
+        else (getattr(config, "accept_language", "") or "en-US")
+    )
+    options.add_argument(f"--lang={lang.split(',')[0].split(';')[0]}")
+    if identity is not None and identity.profile_dir:
+        options.add_argument(f"--user-data-dir={identity.profile_dir}")
+        options.add_argument("--profile-directory=Default")
     try:
         options.add_experimental_option(
             "excludeSwitches",
             ["enable-automation", "enable-logging"],
         )
         options.add_experimental_option("useAutomationExtension", False)
+        prefs = {
+            "intl.accept_languages": lang,
+            "credentials_enable_service": False,
+            "profile.password_manager_enabled": False,
+        }
+        options.add_experimental_option("prefs", prefs)
     except Exception:  # noqa: BLE001
         pass
     options.add_argument("--disable-blink-features=AutomationControlled")
@@ -530,12 +741,16 @@ chrome.webRequest.onAuthRequired.addListener(
     return str(temp_dir)
 
 
-def _create_chrome(config: "Config", proxy: str = "") -> Any:
+def _create_chrome(
+    config: "Config",
+    proxy: str = "",
+    identity: Optional[BrowserIdentity] = None,
+) -> Any:
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.chrome.service import Service
 
-    options = _common_options(Options(), config, proxy=proxy)
+    options = _common_options(Options(), config, proxy=proxy, identity=identity)
     try:
         return webdriver.Chrome(options=options)
     except Exception as first:  # noqa: BLE001
@@ -549,12 +764,16 @@ def _create_chrome(config: "Config", proxy: str = "") -> Any:
     return webdriver.Chrome(service=Service(executable_path=driver_path), options=options)
 
 
-def _create_edge(config: "Config", proxy: str = "") -> Any:
+def _create_edge(
+    config: "Config",
+    proxy: str = "",
+    identity: Optional[BrowserIdentity] = None,
+) -> Any:
     from selenium import webdriver
     from selenium.webdriver.edge.options import Options
     from selenium.webdriver.edge.service import Service
 
-    options = _common_options(Options(), config, proxy=proxy)
+    options = _common_options(Options(), config, proxy=proxy, identity=identity)
     try:
         return webdriver.Edge(options=options)
     except Exception as first:  # noqa: BLE001

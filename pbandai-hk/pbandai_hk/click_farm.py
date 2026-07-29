@@ -21,7 +21,7 @@ from urllib import request as urlrequest
 from .browser_cart import _click_add_to_cart, _wait_for_product_ready
 from .logging_utils import get_logger, log_exception
 from .proxy_util import redact_proxy
-from .session_login import _create_webdriver
+from .session_login import _create_webdriver, build_browser_identity
 
 if TYPE_CHECKING:
     from .config import Config
@@ -143,12 +143,15 @@ class ClickFarm:
                 f"[farm] WARNING: only {proxy_count} unique proxy(ies) for {n} instances "
                 "(shared egress increases PAGE NOT AVAILABLE / WAF)"
             )
+        uniq = "on" if bool(getattr(self.config, "unique_browser_profiles", True)) else "off"
+        warm = max(0.0, float(getattr(self.config, "home_warmup_seconds", 0.0) or 0.0))
         print(
             f"[farm] open stagger={stagger}s (+jitter) · launch+PDP staggered · "
             f"PDP retries={self.config.open_pdp_retries} · "
             f"PDP concurrent≤{self.config.pdp_max_concurrent} · "
             f"OOS refresh~{self.config.oos_refresh_seconds:.0f}s · "
-            f"idle={idle_label} · no wait for other instances"
+            f"idle={idle_label} · unique profiles={uniq} · home warm~{warm:.0f}s · "
+            f"no wait for other instances"
         )
         return n
 
@@ -838,6 +841,44 @@ class ClickFarm:
             log_exception(logger, f"discord webhook failed {wb.name}", exc)
             print(f"[{wb.name}] Discord webhook error: {exc}")
 
+    def _warm_home(self, driver: Any, *, home: str, name: str) -> None:
+        """Browse /{area}/ briefly so the first PDP hit is not a cold direct open."""
+        warm = max(0.0, float(getattr(self.config, "home_warmup_seconds", 0.0) or 0.0))
+        if warm <= 0:
+            return
+        acquired = self._acquire_pdp_slot(name)
+        try:
+            print(f"[farm] {name} home warm-up ~{warm:.1f}s")
+            logger.info("[farm] %s home warm-up seconds=%.1f", name, warm)
+            driver.get(home)
+            # Linger + light scroll so cookies/session look less bot-cold.
+            end = time.time() + warm + random.uniform(0.2, 1.2)
+            scrolled = False
+            while time.time() < end and not self._stop.is_set():
+                if not scrolled and time.time() + 0.6 < end:
+                    try:
+                        driver.execute_script(
+                            "window.scrollBy({top: arguments[0], left: 0, behavior: 'smooth'});",
+                            random.randint(120, 420),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    scrolled = True
+                time.sleep(0.25)
+            if scrolled:
+                try:
+                    driver.execute_script(
+                        "window.scrollBy({top: arguments[0], left: 0, behavior: 'smooth'});",
+                        -random.randint(40, 180),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[farm] %s home warm soft-fail: %s", name, exc)
+        finally:
+            if acquired:
+                self._release_pdp_slot()
+
     def _open_stagger_delay(self, index: int) -> float:
         """Seconds to wait before Chrome launch / PDP for this instance (jittered)."""
         base = max(0.0, float(self.config.open_stagger_seconds))
@@ -878,19 +919,28 @@ class ClickFarm:
                 )
                 self.config.background_mode = False
             try:
-                driver = _create_webdriver(self.config, proxy=proxy or "")
+                identity = build_browser_identity(
+                    index=index,
+                    name=name,
+                    config=self.config,
+                    enable_profile=True,
+                )
+                print(
+                    f"[farm] {name} identity size={identity.width}x{identity.height} "
+                    f"tz={identity.timezone_id} lang={identity.accept_language.split(',')[0]} "
+                    f"profile={'yes' if identity.profile_dir else 'no'}"
+                )
+                driver = _create_webdriver(
+                    self.config,
+                    proxy=proxy or "",
+                    identity=identity,
+                )
             finally:
                 self.config.background_mode = prev_bg
             try:
                 driver.execute_cdp_cmd(
                     "Page.addScriptToEvaluateOnNewDocument",
-                    {
-                        "source": (
-                            "Object.defineProperty(navigator, 'webdriver', "
-                            "{get: () => undefined});"
-                            + _HOOK_JS
-                        )
-                    },
+                    {"source": _HOOK_JS},
                 )
             except Exception:  # noqa: BLE001
                 pass
@@ -900,11 +950,7 @@ class ClickFarm:
             time.sleep(extra)
 
             home = f"{self.config.base_url}/{self.config.area_code}/"
-            try:
-                driver.get(home)
-                time.sleep(random.uniform(0.8, 1.6))
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[farm] %s home load soft-fail: %s", name, exc)
+            self._warm_home(driver, home=home, name=name)
 
             ok = self._load_pdp_with_retries(driver, product_url, home=home, name=name)
             self._ensure_hook(driver)
