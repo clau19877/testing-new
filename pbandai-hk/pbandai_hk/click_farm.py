@@ -93,6 +93,7 @@ class FarmBrowser:
     _last_oos_refresh: float = 0.0
     _last_oos_log: float = 0.0
     _last_idle_activity: float = 0.0
+    _last_idle_settle: float = 0.0
 
 
 @dataclass
@@ -130,9 +131,11 @@ class ClickFarm:
             self.config.stop_on_first_cart,
         )
         stagger = max(0.0, float(self.config.open_stagger_seconds))
+        idle = float(self.config.idle_activity_seconds)
+        idle_label = f"every ~{idle:.0f}s" if idle > 0 else "off"
         print(
             f"[farm] open stagger={stagger}s · PDP retries={self.config.open_pdp_retries} "
-            "· no wait for other instances"
+            f"· idle activity={idle_label} (scroll/blank-click) · no wait for other instances"
         )
         return n
 
@@ -205,7 +208,7 @@ class ClickFarm:
         return f"every {self.config.click_interval_seconds}s"
 
     def _wait_for_next_click(self, wb: Optional[FarmBrowser] = None) -> None:
-        """Block until the next scheduled ATC time; refresh soft OOS while waiting."""
+        """Block until the next scheduled ATC time; idle + OOS refresh while waiting."""
         at = int(self.config.click_at_second)
         if at < 0:
             interval = max(0.5, float(self.config.click_interval_seconds))
@@ -213,6 +216,7 @@ class ClickFarm:
             while time.time() < end and not self._stop.is_set():
                 if wb is not None:
                     self._maybe_refresh_oos_while_waiting(wb)
+                    self._maybe_human_idle(wb, seconds_until_click=end - time.time())
                 time.sleep(max(0.0, min(0.2, end - time.time())))
             return
 
@@ -225,10 +229,115 @@ class ClickFarm:
                 target += 60.0
             while time.time() < target and not self._stop.is_set():
                 if wb is not None:
+                    remaining = target - time.time()
                     self._maybe_refresh_oos_while_waiting(wb)
+                    self._maybe_human_idle(wb, seconds_until_click=remaining)
                 remaining = target - time.time()
                 time.sleep(max(0.0, min(0.25, remaining)))
             return
+
+    def _maybe_human_idle(self, wb: FarmBrowser, *, seconds_until_click: float) -> None:
+        """Scroll / blank-click to keep the browser session looking active."""
+        interval = float(self.config.idle_activity_seconds)
+        if interval <= 0 or wb.driver is None:
+            return
+        # Settle near top in the last few seconds so ATC stays on-screen.
+        if 2.0 <= seconds_until_click < 4.5:
+            last_settle = float(getattr(wb, "_last_idle_settle", 0.0) or 0.0)
+            if time.time() - last_settle > 30.0:
+                wb._last_idle_settle = time.time()
+                try:
+                    wb.driver.execute_script(
+                        "window.scrollTo({top: 0, left: 0, behavior: 'smooth'});"
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+        # Don't fidget in the last ~2s before ATC.
+        if seconds_until_click < 2.0:
+            return
+        now = time.time()
+        last = float(getattr(wb, "_last_idle_activity", 0.0) or 0.0)
+        # Jitter so 20 instances don't all scroll in lockstep.
+        due = interval + random.uniform(-1.5, 2.5)
+        if now - last < max(3.0, due):
+            return
+        wb._last_idle_activity = now
+        try:
+            self._do_human_idle(wb.driver)
+            logger.info("[farm] %s idle activity (scroll + blank-click)", wb.name)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[farm] %s idle activity soft-fail: %s", wb.name, exc)
+
+    def _do_human_idle(self, driver: Any) -> None:
+        """Human-like wait activity: page scroll + blank-space click (keeps session warm)."""
+        from selenium.webdriver.common.action_chains import ActionChains
+        from selenium.webdriver.common.by import By
+
+        # Always scroll + blank-click (user request); optional mouse wiggle.
+        actions = ["scroll", "blank_click"]
+        if random.random() < 0.55:
+            actions.append("mouse_wiggle")
+        random.shuffle(actions)
+        for action in actions:
+            if action == "scroll":
+                delta = random.choice([-420, -280, -160, 160, 280, 420, 560])
+                driver.execute_script(
+                    "window.scrollBy({top: arguments[0], left: 0, behavior: 'smooth'});",
+                    delta,
+                )
+                time.sleep(random.uniform(0.15, 0.45))
+                # Often scroll back partway so ATC stays reachable.
+                if random.random() < 0.55:
+                    driver.execute_script(
+                        "window.scrollBy({top: arguments[0], left: 0, behavior: 'smooth'});",
+                        -int(delta * 0.6),
+                    )
+                    time.sleep(random.uniform(0.1, 0.3))
+            elif action == "blank_click":
+                # Click a safe blank area (body / main), never cart buttons.
+                target = None
+                for sel in ("main", "#app", "body"):
+                    try:
+                        els = driver.find_elements(By.CSS_SELECTOR, sel)
+                        if els and els[0].is_displayed():
+                            target = els[0]
+                            break
+                    except Exception:  # noqa: BLE001
+                        continue
+                if target is None:
+                    continue
+                try:
+                    size = target.size or {}
+                    width = max(40, int(size.get("width") or 400))
+                    height = max(40, int(size.get("height") or 300))
+                    # Prefer upper/side margins away from the ATC column.
+                    ox = random.randint(12, max(13, min(120, width // 4)))
+                    oy = random.randint(40, max(41, min(220, height // 3)))
+                    ActionChains(driver).move_to_element_with_offset(
+                        target, ox, oy
+                    ).click().perform()
+                except Exception:  # noqa: BLE001
+                    # Fallback: JS click blank coords (no navigation).
+                    driver.execute_script(
+                        "var e=document.elementFromPoint(24, 120);"
+                        "if(e){e.dispatchEvent(new MouseEvent('click',"
+                        "{bubbles:true,cancelable:true,view:window}));}"
+                    )
+                time.sleep(random.uniform(0.1, 0.35))
+            elif action == "mouse_wiggle":
+                try:
+                    body = driver.find_element(By.TAG_NAME, "body")
+                    chain = ActionChains(driver).move_to_element_with_offset(body, 40, 80)
+                    for _ in range(random.randint(2, 4)):
+                        chain = chain.move_by_offset(
+                            random.randint(-30, 30),
+                            random.randint(-20, 20),
+                        )
+                    chain.perform()
+                except Exception:  # noqa: BLE001
+                    pass
+                time.sleep(random.uniform(0.08, 0.25))
 
     def _maybe_refresh_oos_while_waiting(self, wb: FarmBrowser) -> None:
         """Soft OOS / stale SPA: hard-refresh PDP on an interval while parked."""
