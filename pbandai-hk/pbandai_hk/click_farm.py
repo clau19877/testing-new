@@ -362,6 +362,9 @@ class ClickFarm:
             "out of stock",
             "sold out",
             "currently unavailable",
+            "pre-order closed",
+            "preorder closed",
+            "pre-orders closed",
             "暫無存貨",
             "暂时缺货",
             "暫時缺貨",
@@ -696,7 +699,7 @@ class ClickFarm:
             wait = base_wait * attempt
             end = time.time() + wait
             while time.time() < end and not self._stop.is_set():
-                time.sleep(min(0.2, end - time.time()))
+                time.sleep(max(0.0, min(0.2, end - time.time())))
         return False
 
     def _recover_pdp(self, wb: FarmBrowser, *, force_even_if_oos: bool = False) -> bool:
