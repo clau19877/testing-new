@@ -533,16 +533,15 @@ class ClickFarm:
             self._release_pdp_slot()
 
     def _shows_out_of_stock(self, driver: Any) -> bool:
-        """True when UI shows SORRY/OUT OF STOCK (disabled ATC) instead of PLACE PRE-ORDER."""
-        try:
-            source = (driver.page_source or "")[:20000]
-        except Exception:  # noqa: BLE001
-            return False
-        low = source.lower()
-        # If a real ATC CTA is present and enabled text exists, not OOS.
-        if self._has_atc_button(driver):
-            return False
-        markers = (
+        """True when UI shows SORRY/OUT OF STOCK or soft purchase-limit block."""
+        # Soft quota / soft-error: PLACE PRE-ORDER can still look enabled in DOM.
+        soft_markers = (
+            "purchase limit has been reached",
+            "the purchase limit has been reached",
+            "we can't perform the requested operation",
+            "cannot perform the requested operation",
+        )
+        hard_markers = (
             "sorry, out of stock",
             "sorry out of stock",
             "out of stock",
@@ -551,11 +550,7 @@ class ClickFarm:
             "pre-order closed",
             "preorder closed",
             "pre-orders closed",
-            # Soft sold-out / quota (button may still look enabled in DOM).
-            "purchase limit has been reached",
-            "the purchase limit has been reached",
-            "we can't perform the requested operation",
-            "cannot perform the requested operation",
+            "msg.sorryoutofstock",
             "暫無存貨",
             "暂时缺货",
             "暫時缺貨",
@@ -564,7 +559,77 @@ class ClickFarm:
             "売り切れ",
             "在庫なし",
         )
-        return any(m in low for m in markers)
+        # Prefer live DOM (sidebar can sit past a huge KV image block in page_source).
+        if self._dom_shows_unavailable(driver):
+            return True
+        try:
+            # Do NOT truncate — KV thumbs alone often exceed 20KB before the CTA.
+            low = (driver.page_source or "").lower()
+        except Exception:  # noqa: BLE001
+            return False
+        if any(m in low for m in soft_markers):
+            return True
+        # Hard OOS only when there is no enabled PLACE PRE-ORDER CTA.
+        if self._has_atc_button(driver):
+            return False
+        return any(m in low for m in hard_markers)
+
+    def _dom_shows_unavailable(self, driver: Any) -> bool:
+        """Detect OOS / soft-block from sidebar DOM (not truncated HTML dump)."""
+        from selenium.webdriver.common.by import By
+
+        try:
+            # True OOS CTA: class is-noActive + SORRY OUT OF STOCK / data-bs-text-key.
+            for btn in driver.find_elements(
+                By.CSS_SELECTOR,
+                "button.p-button, button.is-noActive, button[data-bs-text-key]",
+            ):
+                try:
+                    if not btn.is_displayed():
+                        continue
+                    cls = (btn.get_attribute("class") or "").lower()
+                    key = (btn.get_attribute("data-bs-text-key") or "").lower()
+                    label = (btn.text or "").strip().lower()
+                    if "msg.sorryoutofstock" in key or "sorryoutofstock" in key:
+                        return True
+                    if "is-noactive" in cls and (
+                        "out of stock" in label or "sorry" in label
+                    ):
+                        return True
+                    if "sorry, out of stock" in label or label == "sorry out of stock":
+                        return True
+                except Exception:  # noqa: BLE001
+                    continue
+            # Flag row on PDP sidebar.
+            for flag in driver.find_elements(By.CSS_SELECTOR, ".p-flag__item, .o-items__sidebar-flag li"):
+                try:
+                    if not flag.is_displayed():
+                        continue
+                    text = (flag.text or "").strip().lower()
+                    if text in ("out of stock", "sold out") or text.startswith("out of stock"):
+                        return True
+                except Exception:  # noqa: BLE001
+                    continue
+            # Soft purchase-limit copy near quantity / form.
+            for el in driver.find_elements(
+                By.CSS_SELECTOR,
+                ".o-items__sidebar p, .o-items__sidebar span, .o-items__sidebar .p-lead, form p",
+            ):
+                try:
+                    t = (el.text or "").strip().lower()
+                    if not t:
+                        continue
+                    if "purchase limit has been reached" in t:
+                        return True
+                    if "can't perform the requested operation" in t:
+                        return True
+                    if "cannot perform the requested operation" in t:
+                        return True
+                except Exception:  # noqa: BLE001
+                    continue
+        except Exception:  # noqa: BLE001
+            return False
+        return False
 
     def _has_atc_button(self, driver: Any) -> bool:
         from selenium.webdriver.common.by import By

@@ -554,7 +554,18 @@ def _click_add_to_cart(driver: Any, timeout: int = 45) -> bool:
                     if not btn.is_displayed() or not btn.is_enabled():
                         continue
                     label = (btn.text or btn.get_attribute("aria-label") or "").strip()
-                    if any(n.lower() in label.lower() for n in text_needles):
+                    low = label.lower()
+                    cls = (btn.get_attribute("class") or "").lower()
+                    key = (btn.get_attribute("data-bs-text-key") or "").lower()
+                    # Never click the true OOS / inactive CTA.
+                    if (
+                        "out of stock" in low
+                        or "sorry" in low
+                        or "is-noactive" in cls
+                        or "sorryoutofstock" in key
+                    ):
+                        continue
+                    if any(n.lower() in low for n in text_needles):
                         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
                         time.sleep(0.3)
                         try:
@@ -577,10 +588,18 @@ def _click_add_to_cart(driver: Any, timeout: int = 45) -> bool:
                 )
                 els = driver.find_elements(By.XPATH, xpath)
                 for el in els:
-                    if el.is_displayed() and el.is_enabled():
+                    try:
+                        if not (el.is_displayed() and el.is_enabled()):
+                            continue
+                        label = (el.text or "").strip().lower()
+                        cls = (el.get_attribute("class") or "").lower()
+                        if "out of stock" in label or "sorry" in label or "is-noactive" in cls:
+                            continue
                         driver.execute_script("arguments[0].click();", el)
                         logger.info("clicked add-to-cart xpath needle=%s", needle)
                         return True
+                    except Exception:  # noqa: BLE001
+                        continue
             except Exception:  # noqa: BLE001
                 continue
         time.sleep(0.5)
