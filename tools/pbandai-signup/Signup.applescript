@@ -458,6 +458,21 @@ end humanType
 (* ===== Safari helpers ===== *)
 
 on ensureSafariFront()
+	-- On a cold start (Safari not already running), the very first Apple
+	-- Event can race ahead of the actual app launch and fail with
+	-- "application isn't running". Retry a few times before giving up.
+	repeat 3 times
+		try
+			tell application "Safari"
+				activate
+				if (count of windows) is 0 then make new document
+			end tell
+			delay 0.6
+			return
+		on error
+			delay 1.5
+		end try
+	end repeat
 	tell application "Safari"
 		activate
 		if (count of windows) is 0 then make new document
