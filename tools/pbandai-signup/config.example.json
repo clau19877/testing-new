@@ -1,0 +1,61 @@
+{
+  "icloud": {
+    "email": "yourname@icloud.com",
+    "app_specific_password": "xxxx-xxxx-xxxx-xxxx",
+    "imap_host": "imap.mail.me.com",
+    "imap_port": 993,
+    "mailbox": "INBOX"
+  },
+  "pbandai": {
+    "base_url": "https://p-bandai.com/us",
+    "register_url": "https://p-bandai.com/us/register",
+    "signup_email": "yourname@icloud.com",
+    "password": "ChangeMe!234",
+    "profile": {
+      "first_name": "Alex",
+      "last_name": "Example",
+      "month": "01",
+      "day": "15",
+      "year": "1990",
+      "phone": "5551234567",
+      "address1": "123 Main St",
+      "address2": "",
+      "city": "Los Angeles",
+      "state": "CA",
+      "zip": "90001",
+      "country": "United States"
+    }
+  },
+  "humanize": {
+    "enabled": true,
+    "warmup_browse": true,
+    "min_action_delay_ms": 450,
+    "max_action_delay_ms": 1600,
+    "min_key_delay_ms": 55,
+    "max_key_delay_ms": 180,
+    "think_pause_chance": 0.18,
+    "think_pause_min_ms": 800,
+    "think_pause_max_ms": 2600,
+    "typo_chance": 0.04,
+    "scroll_chance": 0.35,
+    "mouse_wiggle": true
+  },
+  "code_poll": {
+    "timeout_sec": 540,
+    "interval_sec": 8,
+    "subject_hints": [
+      "PREMIUM BANDAI",
+      "Premium Bandai",
+      "authentication",
+      "Authentication",
+      "verification",
+      "Verification"
+    ],
+    "from_hints": [
+      "p-bandai",
+      "bandai",
+      "noreply"
+    ],
+    "code_regex": "\\b(\\d{4,8})\\b"
+  }
+}

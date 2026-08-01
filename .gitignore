@@ -16,3 +16,6 @@ node_modules
 # Foundry files
 /out
 /cache_forge
+# Premium Bandai signup helper secrets
+tools/pbandai-signup/config.json
+tools/pbandai-signup/*.log
