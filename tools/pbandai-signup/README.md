@@ -22,9 +22,11 @@ cp config.example.json config.json
    - Premium Bandai signup email (usually same iCloud address)
    - password + profile fields
 
-4. Permissions:
+4. Permissions / Safari:
    - System Settings → Privacy & Security → **Accessibility** for Terminal / Script Editor
    - Automation: allow controlling **Safari** and **System Events**
+   - Safari → Develop → enable **Allow JavaScript from Apple Events**
+     (enable Develop menu via Safari → Settings → Advanced)
 
 5. Run:
 
