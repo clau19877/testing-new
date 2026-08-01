@@ -66,6 +66,59 @@ class CsvQueueTests(unittest.TestCase):
         _, failed_rows = csv_queue.read_rows(self.failed)
         self.assertEqual(failed_rows[0]["reason"], "timeout waiting for code")
 
+    def test_next_resolves_random_fields_and_persists_them(self) -> None:
+        self.write_task(
+            [
+                {
+                    "email": "r@icloud.com",
+                    "password": "random",
+                    "first_name": "random",
+                    "last_name": "random",
+                    "gender": "random",
+                    "month": "random",
+                    "day": "random",
+                    "year": "random",
+                }
+            ]
+        )
+        rc = csv_queue.main(["--dir", str(self.base), "next"])
+        self.assertEqual(rc, 0)
+
+        _, task_rows = csv_queue.read_rows(self.task)
+        row = task_rows[0]
+        self.assertNotEqual(row["password"].lower(), "random")
+        self.assertNotEqual(row["first_name"].lower(), "random")
+        self.assertNotEqual(row["gender"].lower(), "random")
+        self.assertIn(row["gender"], ["Male", "Female", "NotApplicable", "NotSelected"])
+        self.assertTrue(1 <= int(row["month"]) <= 12)
+        self.assertTrue(row["day"].isdigit())
+        self.assertTrue(row["year"].isdigit())
+
+        # A second success/failed round-trip should record the resolved
+        # values, not the literal word "random".
+        rc = csv_queue.main(["--dir", str(self.base), "success", "--email", "r@icloud.com"])
+        self.assertEqual(rc, 0)
+        _, success_rows = csv_queue.read_rows(self.success)
+        self.assertNotEqual(success_rows[0]["first_name"].lower(), "random")
+
+    def test_next_email_random_without_template_errors(self) -> None:
+        self.write_task([{"email": "random", "password": "random"}])
+        rc = csv_queue.main(["--dir", str(self.base), "next"])
+        self.assertEqual(rc, 2)
+
+    def test_next_email_random_with_template_resolves(self) -> None:
+        (self.base / "config.json").write_text(
+            '{"random_data": {"email_template": "tester+{token}@example.com"}}',
+            encoding="utf-8",
+        )
+        self.write_task([{"email": "random", "password": "random"}])
+        rc = csv_queue.main(["--dir", str(self.base), "next"])
+        self.assertEqual(rc, 0)
+        _, task_rows = csv_queue.read_rows(self.task)
+        email = task_rows[0]["email"]
+        self.assertTrue(email.startswith("tester+"))
+        self.assertTrue(email.endswith("@example.com"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -42,6 +42,30 @@ The real ENTER INFORMATION screen enforces:
 
 Pick passwords that satisfy these — something like `Pass1234` would be rejected (`234` is a sequential run).
 
+### Random data
+
+Put the word `random` (case-insensitive) in any `task.csv` cell and it's replaced with a generated value from a curated pool before the row is processed — the resolved value is written back into `task.csv` immediately, so `success.csv`/`failed.csv` record what was actually submitted, not the literal word "random".
+
+| Field | Behavior |
+|---|---|
+| `first_name`, `last_name` | Picked from a name pool |
+| `gender` | Random of `Male`/`Female`/`NotApplicable`/`NotSelected` |
+| `month`, `day`, `year` | Generated together as a valid, 18+ date of birth (if only some of the three are `random`, the fixed ones are kept and `day` still respects the resulting month) |
+| `city`, `state`, `zip` | If 2+ of these are `random` in the same row, one consistent US city/state/zip triple is used; if only one is `random`, it's resolved independently |
+| `address1` | Random street address |
+| `password` | Generated to satisfy the site's real password rules (see above), retried internally until compliant |
+| `country` | Weighted random between `United States`/`Canada` (matches the "Area" dropdown's only two options) |
+| `phone` | Cleared to empty (relies on GrizzlySMS renting a real number; a fake number can't receive the SMS code) |
+| `email` | **Requires `random_data.email_template` in `config.json`** (e.g. `"youralias+{token}@yourdomain.com"`) — errors clearly if `random` is used without one configured. Plain `name@icloud.com` does **not** support `+` aliasing; this only works with a provider/domain that does (custom iCloud+ domain, Fastmail, Gmail, etc.) |
+
+Example row:
+
+```csv
+account2@icloud.com,random,random,random,random,random,random,random,,random,,random,random,random,random
+```
+
+Note: Premium Bandai's own terms limit membership to one account per person — this feature is for varying test/profile data across accounts you're entitled to create, not for evading that policy.
+
 ### What the ENTER INFORMATION screen actually asks for
 
 Inspecting the live form: First/Last Name, an "Area" country dropdown (Canada/US), an "International Dialing Code" dropdown + Phone Number, Date of Birth, Gender (radio, required), Password, and a required Terms of Use checkbox. There is **no** street address / city / zip field at this step — `address1`/`address2`/`city`/`state`/`zip` columns are kept for forward-compatibility and are harmless no-ops if the site doesn't render them.

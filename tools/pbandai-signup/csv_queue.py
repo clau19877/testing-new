@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import random_data
 import signup_log
 
 
@@ -95,6 +96,76 @@ def normalize_task_row(row: dict[str, str]) -> dict[str, str]:
     return out
 
 
+def load_config_if_present(base_dir: Path) -> dict:
+    cfg_path = Path(base_dir) / "config.json"
+    if not cfg_path.exists():
+        return {}
+    try:
+        return json.loads(cfg_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _is_random(value: str) -> bool:
+    return (value or "").strip().lower() == "random"
+
+
+def resolve_random_row(row: dict[str, str], cfg: Optional[dict] = None) -> dict[str, str]:
+    """Replace any "random" cell with a generated value from random_data's pools."""
+    resolved = dict(row)
+    cfg = cfg or {}
+
+    # Date of birth: resolve month/day/year together so "day" respects
+    # whichever month ends up being used (fixed or freshly randomized).
+    if _is_random(resolved.get("month")) or _is_random(resolved.get("day")) or _is_random(resolved.get("year")):
+        month = random_data.random_month() if _is_random(resolved.get("month")) else resolved.get("month")
+        year = random_data.random_year() if _is_random(resolved.get("year")) else resolved.get("year")
+        day = random_data.random_day(month) if _is_random(resolved.get("day")) else resolved.get("day")
+        resolved["month"], resolved["day"], resolved["year"] = month, day, year
+
+    # City/state/zip: pick one consistent tuple if 2+ of them are "random".
+    csz_keys = ["city", "state", "zip"]
+    csz_random = [k for k in csz_keys if _is_random(resolved.get(k))]
+    if len(csz_random) >= 2:
+        city, state, zip_code = random_data.random_city_state_zip()
+        values = {"city": city, "state": state, "zip": zip_code}
+        for k in csz_random:
+            resolved[k] = values[k]
+    for k in csz_keys:
+        if _is_random(resolved.get(k)):
+            city, state, zip_code = random_data.random_city_state_zip()
+            resolved[k] = {"city": city, "state": state, "zip": zip_code}[k]
+
+    simple_generators = {
+        "first_name": random_data.random_first_name,
+        "last_name": random_data.random_last_name,
+        "gender": random_data.random_gender,
+        "password": random_data.random_password,
+        "country": random_data.random_country,
+        "address1": random_data.random_street_address,
+        "address2": lambda: "",
+    }
+    for field, generator in simple_generators.items():
+        if _is_random(resolved.get(field)):
+            resolved[field] = generator()
+
+    if _is_random(resolved.get("phone")):
+        # A fake number can't receive a real SMS. Clear it so GrizzlySMS (if
+        # enabled) rents a real number, matching the documented "leave phone
+        # empty" convention.
+        resolved["phone"] = ""
+
+    if _is_random(resolved.get("email")):
+        template = (cfg.get("random_data") or {}).get("email_template", "")
+        if not template:
+            raise ValueError(
+                "email is 'random' but random_data.email_template is not set in config.json"
+            )
+        resolved["email"] = template.replace("{token}", random_data.random_token())
+
+    return resolved
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     ensure_csv(args.task, TASK_FIELDS)
     ensure_csv(args.success, SUCCESS_FIELDS)
@@ -111,22 +182,38 @@ def cmd_count(args: argparse.Namespace) -> int:
 
 def cmd_next(args: argparse.Namespace) -> int:
     ensure_csv(args.task, TASK_FIELDS)
-    _, rows = read_rows(args.task)
+    fieldnames, rows = read_rows(args.task)
     if not rows:
         print("{}")
         return 0
     row = normalize_task_row(rows[0])
-    if not row["email"] or not row["password"]:
+
+    cfg = load_config_if_present(args.dir)
+    try:
+        resolved = resolve_random_row(row, cfg)
+    except ValueError as exc:
+        print(json.dumps({"error": str(exc), "email": row.get("email", "")}, ensure_ascii=False))
+        return 2
+
+    if not resolved.get("email") or not resolved.get("password"):
         print(
             json.dumps(
                 {
                     "error": "first task.csv row is missing email or password",
-                    "email": row.get("email", ""),
-                }
+                    "email": resolved.get("email", ""),
+                },
+                ensure_ascii=False,
             )
         )
         return 2
-    print(json.dumps(row, ensure_ascii=False))
+
+    if resolved != row:
+        # Persist resolved values so success.csv/failed.csv record what was
+        # actually submitted instead of the literal word "random".
+        rest = [normalize_task_row(r) for r in rows[1:]]
+        write_rows(args.task, TASK_FIELDS, [resolved] + rest)
+
+    print(json.dumps(resolved, ensure_ascii=False))
     return 0
 
 

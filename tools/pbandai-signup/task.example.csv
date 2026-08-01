@@ -1,4 +1,4 @@
 email,password,first_name,last_name,gender,month,day,year,phone,address1,address2,city,state,zip,country
 account1@icloud.com,Bnd4iFn7Kp,Alex,Example,NotSelected,1,15,1990,,123 Main St,,Los Angeles,CA,90001,United States
-account2@icloud.com,Xq9wLm2Vhz,Sam,Example,NotSelected,3,22,1992,,123 Main St,,Los Angeles,CA,90001,United States
+account2@icloud.com,random,random,random,random,random,random,random,,random,,random,random,random,random
 account3@icloud.com,Rt5cWk8Ndp,Jordan,Example,NotSelected,7,8,1995,,123 Main St,,Los Angeles,CA,90001,United States

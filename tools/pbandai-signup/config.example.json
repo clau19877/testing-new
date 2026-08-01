@@ -43,6 +43,9 @@
     "cooldown_min_sec": 8,
     "cooldown_max_sec": 20
   },
+  "random_data": {
+    "email_template": ""
+  },
   "logging": {
     "enabled": true,
     "dir": "logs"
