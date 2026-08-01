@@ -19,3 +19,6 @@ node_modules
 # Premium Bandai signup helper secrets
 tools/pbandai-signup/config.json
 tools/pbandai-signup/*.log
+tools/pbandai-signup/__pycache__/
+**/__pycache__/
+*.pyc
