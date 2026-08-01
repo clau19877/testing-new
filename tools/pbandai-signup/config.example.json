@@ -1,0 +1,72 @@
+{
+  "icloud": {
+    "email": "yourname@icloud.com",
+    "app_specific_password": "xxxx-xxxx-xxxx-xxxx",
+    "imap_host": "imap.mail.me.com",
+    "imap_port": 993,
+    "mailbox": "INBOX"
+  },
+  "pbandai": {
+    "base_url": "https://p-bandai.com/us",
+    "register_url": "https://p-bandai.com/us/register"
+  },
+  "grizzly": {
+    "enabled": true,
+    "api_key": "YOUR_GRIZZLYSMS_API_KEY",
+    "base_url": "https://api.grizzlysms.com",
+    "service": "bvq",
+    "country": 12,
+    "country_dial": "1",
+    "max_price": null,
+    "phone_format": "national",
+    "timeout_sec": 180,
+    "interval_sec": 5,
+    "sms_screen_wait_tries": 25,
+    "sms_screen_wait_interval_ms": 500,
+    "phone_dropdown_iso": ""
+  },
+  "humanize": {
+    "enabled": true,
+    "warmup_browse": true,
+    "min_action_delay_ms": 450,
+    "max_action_delay_ms": 1600,
+    "min_key_delay_ms": 55,
+    "max_key_delay_ms": 180,
+    "think_pause_chance": 0.18,
+    "think_pause_min_ms": 800,
+    "think_pause_max_ms": 2600,
+    "typo_chance": 0.04,
+    "scroll_chance": 0.35,
+    "mouse_wiggle": true
+  },
+  "queue": {
+    "ask_confirm_success": true,
+    "cooldown_min_sec": 8,
+    "cooldown_max_sec": 20
+  },
+  "random_data": {
+    "email_template": ""
+  },
+  "logging": {
+    "enabled": true,
+    "dir": "logs"
+  },
+  "code_poll": {
+    "timeout_sec": 540,
+    "interval_sec": 8,
+    "subject_hints": [
+      "PREMIUM BANDAI",
+      "Premium Bandai",
+      "authentication",
+      "Authentication",
+      "verification",
+      "Verification"
+    ],
+    "from_hints": [
+      "p-bandai",
+      "bandai",
+      "noreply"
+    ],
+    "code_regex": "\\b(\\d{4,8})\\b"
+  }
+}
