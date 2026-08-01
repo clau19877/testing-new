@@ -189,7 +189,23 @@ python3 fetch_icloud_code.py --once --to-email 'you@icloud.com'
 | File | Contents |
 |---|---|
 | `logs/errors.jsonl` | Structured ERROR records |
-| `logs/signup.log` | Human-readable INFO/ERROR trail |
+| `logs/signup.log` | Human-readable INFO/WARNING/ERROR trail |
+| `logs/trace.log` | **Everything, in and out** — every shell command run (redacted, never the real password/API key), every Safari JS call's result, every button/field match attempt with what it was looking for, every IMAP scan (per-message subject/from/relevance/code-extraction), every GrizzlySMS API request/response, and a `STEP_OK` marker after each stage of the signup flow completes |
+
+`trace.log` is designed so a failure can be fully diagnosed from the log alone — you can see exactly which button/label/selector matched or didn't, what every intermediate value was, and where the flow actually stopped, without needing to reproduce the run. Secrets (account password, iCloud app-specific password, GrizzlySMS API key) are never written to any log file — callers pass a pre-redacted description instead of the raw command, and password-like fields are masked as `[REDACTED, N chars]`.
+
+Example `trace.log` excerpt:
+
+```
+... | DEBUG | STEP_OK | age_gate
+... | DEBUG | FOCUS_ATTEMPT | selectors=[...]
+... | DEBUG | JS_RESULT | ok:input[type='email']
+... | DEBUG | STEP_OK | email_entry email=you@icloud.com
+... | DEBUG | SHELL_OUT | fetch_icloud_code since_epoch=1785... to_email=you@icloud.com
+... | DEBUG | mailbox_scan | msg 1600: subject='[PREMIUM BANDAI] ...' relevant=True
+... | DEBUG | mailbox_scan | msg 1600: code_extracted='047723'
+... | DEBUG | STEP_OK | fetch_icloud_code code=047723
+```
 
 ## Shape / anti-bot notes
 

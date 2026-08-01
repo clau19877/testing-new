@@ -59,6 +59,13 @@ def grizzly_cfg(cfg: dict) -> dict:
 def api_request(api_key: str, base_url: str, params: dict[str, Any]) -> Any:
     query = {"api_key": api_key, **{k: v for k, v in params.items() if v is not None and v != ""}}
     url = f"{base_url.rstrip('/')}/stubs/handler_api.php?{urllib.parse.urlencode(query)}"
+    safe_params = {k: v for k, v in params.items() if v is not None and v != ""}
+    signup_log.log_debug(
+        f"OUT GrizzlySMS action={params.get('action')} params={safe_params}",
+        source="grizzly_sms",
+        step="api_request",
+        activation_id=str(params.get("id") or ""),
+    )
     req = urllib.request.Request(url, headers={"User-Agent": "pbandai-signup/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=45) as resp:
@@ -69,6 +76,12 @@ def api_request(api_key: str, base_url: str, params: dict[str, Any]) -> Any:
     except urllib.error.URLError as exc:
         die(f"GrizzlySMS network error: {exc}", step="api_network")
 
+    signup_log.log_debug(
+        f"IN GrizzlySMS action={params.get('action')} response={signup_log.truncate(body, 1000)}",
+        source="grizzly_sms",
+        step="api_request",
+        activation_id=str(params.get("id") or ""),
+    )
     if body.startswith("{") or body.startswith("["):
         try:
             return json.loads(body)
@@ -181,8 +194,16 @@ def wait_for_code(
         pass
 
     started = time.time()
+    attempt = 0
     while time.time() - started < timeout_sec:
+        attempt += 1
         st = get_status(api_key, base_url, activation_id)
+        signup_log.log_debug(
+            f"wait attempt {attempt} (elapsed {round(time.time() - started, 1)}s/{timeout_sec}s): status={st}",
+            source="grizzly_sms",
+            step="wait_sms_attempt",
+            activation_id=activation_id,
+        )
         if st["status"] == "OK" and st.get("code"):
             try:
                 set_status(api_key, base_url, activation_id, 6)
@@ -291,6 +312,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    signup_log.log_debug(
+        f"invoked: cmd={args.cmd} args={ {k: v for k, v in vars(args).items() if k not in ('config', 'func')} }",
+        source="grizzly_sms",
+        step="main_start",
+        activation_id=str(getattr(args, "id", "") or ""),
+    )
     return args.func(args)
 
 

@@ -186,20 +186,43 @@ def cmd_count(args: argparse.Namespace) -> int:
     return 0
 
 
+def _masked(row: dict[str, str]) -> dict[str, str]:
+    masked = dict(row)
+    if masked.get("password"):
+        masked["password"] = f"[REDACTED, {len(masked['password'])} chars]"
+    return masked
+
+
 def cmd_next(args: argparse.Namespace) -> int:
     ensure_csv(args.task, TASK_FIELDS)
     fieldnames, rows = read_rows(args.task)
+    signup_log.log_debug(f"next: {len(rows)} row(s) in task.csv", source="csv_queue", step="next")
     if not rows:
         print("{}")
         return 0
     row = normalize_task_row(rows[0])
+    signup_log.log_debug(
+        f"next: raw first row = {_masked(row)}",
+        source="csv_queue",
+        step="next",
+        email=row.get("email", ""),
+    )
 
     cfg = load_config_if_present(args.dir)
     try:
         resolved = resolve_random_row(row, cfg)
     except ValueError as exc:
+        signup_log.log_error(str(exc), source="csv_queue", step="next_resolve", email=row.get("email", ""))
         print(json.dumps({"error": str(exc), "email": row.get("email", "")}, ensure_ascii=False))
         return 2
+
+    if resolved != row:
+        signup_log.log_debug(
+            f"next: resolved 'random' fields -> {_masked(resolved)}",
+            source="csv_queue",
+            step="next_resolve",
+            email=resolved.get("email", ""),
+        )
 
     if not resolved.get("email") or not resolved.get("password"):
         print(
@@ -243,8 +266,22 @@ def remove_email(task_path: Path, email: str) -> Optional[dict[str, str]]:
 def cmd_success(args: argparse.Namespace) -> int:
     ensure_csv(args.task, TASK_FIELDS)
     ensure_csv(args.success, SUCCESS_FIELDS)
+    signup_log.log_debug(
+        f"success: email={args.email} note={args.note!r} phone={args.phone!r} activation_id={args.activation_id!r}",
+        source="csv_queue",
+        step="success",
+        email=args.email,
+        phone=args.phone,
+        activation_id=args.activation_id,
+    )
     removed = remove_email(args.task, args.email)
     if removed is None:
+        signup_log.log_error(
+            f"success called but email not found in task.csv: {args.email}",
+            source="csv_queue",
+            step="success",
+            email=args.email,
+        )
         print(f"email not found in task.csv: {args.email}", file=sys.stderr)
         return 1
     payload = dict(removed)
@@ -264,6 +301,14 @@ def cmd_success(args: argparse.Namespace) -> int:
 def cmd_failed(args: argparse.Namespace) -> int:
     ensure_csv(args.task, TASK_FIELDS)
     ensure_csv(args.failed, FAILED_FIELDS)
+    signup_log.log_debug(
+        f"failed: email={args.email} reason={args.reason!r} phone={args.phone!r} activation_id={args.activation_id!r}",
+        source="csv_queue",
+        step="failed",
+        email=args.email,
+        phone=args.phone,
+        activation_id=args.activation_id,
+    )
     removed = remove_email(args.task, args.email)
     if removed is None:
         # Still record failure even if already removed.

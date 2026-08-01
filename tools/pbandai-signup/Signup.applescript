@@ -9,6 +9,7 @@
 property toolDir : ""
 property configPath : ""
 property taskPath : ""
+property traceLogPath : ""
 property humanizeOn : true
 property currentEmail : ""
 property currentPassword : ""
@@ -40,12 +41,15 @@ on run
 	set toolDir to do shell script "cd \"$(dirname " & quoted form of (POSIX path of (path to me)) & ")\" && pwd"
 	set configPath to toolDir & "/config.json"
 	set taskPath to toolDir & "/task.csv"
+	set traceLogPath to toolDir & "/logs/trace.log"
+	do shell script "mkdir -p " & quoted form of (toolDir & "/logs")
 	if (do shell script "test -f " & quoted form of configPath & " && echo yes || echo no") is "no" then
 		error "Missing config.json. Copy config.example.json to config.json and fill it in."
 	end if
 	if (do shell script "test -f " & quoted form of taskPath & " && echo yes || echo no") is "no" then
 		error "Missing task.csv. Copy task.example.csv to task.csv and add email,password rows."
 	end if
+	my logTrace("RUN_START", "toolDir=" & toolDir)
 	set humanizeOn to my cfgBool("humanize.enabled", true)
 	set cfgWarmupBrowse to my cfgBool("humanize.warmup_browse", true)
 	set cfgGrizzlyEnabled to my cfgBool("grizzly.enabled", true)
@@ -65,7 +69,7 @@ on run
 	set cfgSmsWaitTries to my cfgInt("grizzly.sms_screen_wait_tries", 25)
 	set cfgSmsWaitIntervalMs to my cfgInt("grizzly.sms_screen_wait_interval_ms", 500)
 	
-	do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " init"
+	my runShell("/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " init", "csv_queue init")
 	my logInfo("Queue run started", "queue_start")
 	
 	set processed to 0
@@ -73,11 +77,11 @@ on run
 	set failedCount to 0
 	
 	repeat
-		set taskCount to (do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " count") as integer
+		set taskCount to (my runShell("/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " count", "csv_queue count")) as integer
 		if taskCount <= 0 then exit repeat
 		
 		try
-			set currentTaskJSON to do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " next"
+			set currentTaskJSON to my runShell("/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " next", "csv_queue next")
 			if currentTaskJSON is "{}" then exit repeat
 			if currentTaskJSON contains "\"error\"" then error "task.csv next failed: " & currentTaskJSON
 			
@@ -108,7 +112,7 @@ on run
 		
 		set processed to processed + 1
 		-- Cool-down between accounts (Shape-sensitive).
-		set leftCount to (do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " count") as integer
+		set leftCount to (my runShell("/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " count", "csv_queue count")) as integer
 		if leftCount > 0 then
 			my humanPause("cooldown between tasks")
 			delay (my randBetween(cfgCooldownMinSec, cfgCooldownMaxSec))
@@ -117,7 +121,7 @@ on run
 	
 	my logInfo("Queue finished processed=" & processed & " success=" & succeeded & " failed=" & failedCount, "queue_end")
 	display notification "Done. success=" & succeeded & " failed=" & failedCount with title "Premium Bandai Signup"
-	display dialog "Queue finished." & return & return & "Processed: " & processed & return & "Success: " & succeeded & " → success.csv" & return & "Failed: " & failedCount & " → failed.csv" & return & "Errors: logs/errors.jsonl" & return & "Remaining in task.csv: " & (do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " count") buttons {"OK"} default button 1
+	display dialog "Queue finished." & return & return & "Processed: " & processed & return & "Success: " & succeeded & " → success.csv" & return & "Failed: " & failedCount & " → failed.csv" & return & "Errors: logs/errors.jsonl" & return & "Full trace: logs/trace.log" & return & "Remaining in task.csv: " & (my runShell("/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " count", "csv_queue count")) buttons {"OK"} default button 1
 end run
 
 on processOneTask()
@@ -126,6 +130,7 @@ on processOneTask()
 	on error errMsg
 		my failStep("safari_ready", errMsg)
 	end try
+	my logTrace("STEP_OK", "safari_ready")
 	
 	if cfgWarmupBrowse then
 		try
@@ -133,6 +138,7 @@ on processOneTask()
 		on error errMsg
 			my failStep("warmup_browse", errMsg)
 		end try
+		my logTrace("STEP_OK", "warmup_browse")
 	end if
 	
 	try
@@ -140,6 +146,7 @@ on processOneTask()
 	on error errMsg
 		my failStep("open_register", errMsg)
 	end try
+	my logTrace("STEP_OK", "open_register")
 	my humanPause("reading age gate")
 	
 	try
@@ -147,6 +154,7 @@ on processOneTask()
 	on error errMsg
 		my failStep("age_gate", errMsg)
 	end try
+	my logTrace("STEP_OK", "age_gate")
 	my humanPause("looking at signup options")
 	
 	try
@@ -155,6 +163,7 @@ on processOneTask()
 	on error errMsg
 		my failStep("email_entry", errMsg)
 	end try
+	my logTrace("STEP_OK", "email_entry email=" & currentEmail)
 	my humanPause("checking email")
 	
 	set submitEpoch to do shell script "date +%s"
@@ -164,6 +173,7 @@ on processOneTask()
 	on error errMsg
 		my failStep("email_submit", errMsg)
 	end try
+	my logTrace("STEP_OK", "email_submit since_epoch=" & submitEpoch)
 	my humanPause("waiting for inbox")
 	
 	set authCode to ""
@@ -172,6 +182,7 @@ on processOneTask()
 	on error errMsg
 		my failStep("fetch_icloud_code", errMsg)
 	end try
+	my logTrace("STEP_OK", "fetch_icloud_code code=" & authCode)
 	my humanPause("reading code email")
 	
 	try
@@ -182,12 +193,14 @@ on processOneTask()
 	on error errMsg
 		my failStep("email_code_submit", errMsg)
 	end try
+	my logTrace("STEP_OK", "email_code_submit")
 	
 	try
 		my waitForEnterInformation()
 	on error errMsg
 		my failStep("wait_enter_information", errMsg)
 	end try
+	my logTrace("STEP_OK", "wait_enter_information")
 	
 	if cfgGrizzlyEnabled then
 		try
@@ -195,6 +208,7 @@ on processOneTask()
 		on error errMsg
 			my failStep("grizzly_rent", errMsg)
 		end try
+		my logTrace("STEP_OK", "grizzly_rent phone=" & currentPhone & " activation_id=" & currentActivationId & " phone_iso=" & currentPhoneCountryIso)
 	else
 		set currentPhone to my taskStr("phone")
 	end if
@@ -204,6 +218,7 @@ on processOneTask()
 	on error errMsg
 		my failStep("fill_profile", errMsg)
 	end try
+	my logTrace("STEP_OK", "fill_profile")
 	
 	-- Optional auto-continue through confirmation if buttons exist.
 	try
@@ -212,10 +227,12 @@ on processOneTask()
 	on error contErr
 		my logInfo("Continue/confirm button not clicked: " & contErr, "profile_continue_optional")
 	end try
+	my logTrace("STEP_OK", "profile_continue")
 	
 	-- Phone/SMS verification step (GrizzlySMS)
 	if cfgGrizzlyEnabled and (currentActivationId is not "") then
 		if my waitForSmsScreen(cfgSmsWaitTries) then
+			my logTrace("SMS_SCREEN", "detected")
 			my humanPause("waiting for SMS")
 			set smsCode to ""
 			try
@@ -223,6 +240,7 @@ on processOneTask()
 			on error errMsg
 				my failStep("grizzly_wait_sms", errMsg)
 			end try
+			my logTrace("STEP_OK", "grizzly_wait_sms code=" & smsCode)
 			try
 				my focusBySelectors({"input[name*='code' i]", "input[id*='code' i]", "input[autocomplete='one-time-code']", "input[type='tel']", "input[type='text']"})
 				my humanType(smsCode)
@@ -231,8 +249,10 @@ on processOneTask()
 			on error errMsg
 				my failStep("sms_code_submit", errMsg)
 			end try
+			my logTrace("STEP_OK", "sms_code_submit")
 			my humanPause("after SMS verify")
 		else
+			my logTrace("SMS_SCREEN", "not detected")
 			my logInfo("No SMS screen detected after profile continue", "sms_screen_missing")
 		end if
 	end if
@@ -272,6 +292,41 @@ on logInfo(messageText, stepName)
 	end try
 end logInfo
 
+-- ===== Full in/out trace log (logs/trace.log) =====
+-- Native AppleScript file I/O (no subprocess) so this stays cheap even
+-- though it's called very frequently (every JS call, every shell command,
+-- every button/field match attempt). Never pass raw secret values here —
+-- callers are responsible for redacting before calling logTrace.
+on logTrace(tag, messageText)
+	try
+		set safeMsg to my replaceText(messageText, linefeed, " ")
+		set theLine to ((current date) as string) & " | " & tag & " | " & safeMsg
+		set fileRef to open for access (POSIX file traceLogPath) with write permission
+		write (theLine & linefeed) to fileRef starting at eof
+		close access fileRef
+	on error
+		try
+			close access (POSIX file traceLogPath)
+		end try
+	end try
+end logTrace
+
+-- Wraps "do shell script" with full in/out tracing. safeDescription must be
+-- pre-redacted by the caller (never pass raw secret values in cmd's
+-- description) since the actual command text is never logged, only this
+-- description and the shell result.
+on runShell(cmd, safeDescription)
+	my logTrace("SHELL_OUT", safeDescription)
+	try
+		set shellResult to do shell script cmd
+	on error errMsg
+		my logTrace("SHELL_ERR", safeDescription & " -> " & errMsg)
+		error errMsg
+	end try
+	my logTrace("SHELL_IN", safeDescription & " -> " & shellResult)
+	return shellResult
+end runShell
+
 on pageLooksSuccessful()
 	try
 		set r to my safariJS("(function(){ const t=(document.body&&document.body.innerText)||''; return /COMPLETE|registration (is )?complete|successfully|welcome/i.test(t) ? 'yes':'no'; })()")
@@ -282,19 +337,22 @@ on pageLooksSuccessful()
 end pageLooksSuccessful
 
 on markSuccess(emailAddr, noteText)
-	do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " success --email " & quoted form of emailAddr & " --note " & quoted form of noteText & " --phone " & quoted form of currentPhone & " --activation-id " & quoted form of currentActivationId
+	set cmd to "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " success --email " & quoted form of emailAddr & " --note " & quoted form of noteText & " --phone " & quoted form of currentPhone & " --activation-id " & quoted form of currentActivationId
+	my runShell(cmd, "csv_queue success email=" & emailAddr & " phone=" & currentPhone & " activation_id=" & currentActivationId)
 end markSuccess
 
 on markFailed(emailAddr, passText, reasonText)
 	set safeReason to my replaceText(reasonText, return, " ")
 	set safeReason to my replaceText(safeReason, linefeed, " ")
 	try
-		do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " failed --email " & quoted form of emailAddr & " --password " & quoted form of passText & " --reason " & quoted form of safeReason & " --phone " & quoted form of currentPhone & " --activation-id " & quoted form of currentActivationId
+		set cmd to "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " failed --email " & quoted form of emailAddr & " --password " & quoted form of passText & " --reason " & quoted form of safeReason & " --phone " & quoted form of currentPhone & " --activation-id " & quoted form of currentActivationId
+		my runShell(cmd, "csv_queue failed email=" & emailAddr & " reason=" & safeReason & " phone=" & currentPhone & " activation_id=" & currentActivationId & " password=[REDACTED]")
 	end try
 end markFailed
 
 on rentGrizzlyNumber()
-	set raw to do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/grizzly_sms.py") & " --config " & quoted form of configPath & " rent"
+	set cmd to "/usr/bin/python3 " & quoted form of (toolDir & "/grizzly_sms.py") & " --config " & quoted form of configPath & " rent"
+	set raw to my runShell(cmd, "grizzly_sms rent")
 	set currentActivationId to my jsonField(raw, "activation_id")
 	set fullPhone to my jsonField(raw, "phone")
 	set formPhone to my jsonField(raw, "phone_form")
@@ -308,18 +366,20 @@ end rentGrizzlyNumber
 
 on waitGrizzlySmsCode()
 	if currentActivationId is "" then error "No GrizzlySMS activation id"
+	set cmd to "/usr/bin/python3 " & quoted form of (toolDir & "/grizzly_sms.py") & " --config " & quoted form of configPath & " wait --id " & quoted form of currentActivationId
 	-- Same rationale as fetchICloudCode: this can run up to
 	-- grizzly.timeout_sec, well past AppleScript's default 2-minute
 	-- Apple Event timeout.
 	with timeout of 600 seconds
-		return do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/grizzly_sms.py") & " --config " & quoted form of configPath & " wait --id " & quoted form of currentActivationId
+		return my runShell(cmd, "grizzly_sms wait activation_id=" & currentActivationId)
 	end timeout
 end waitGrizzlySmsCode
 
 on cancelGrizzlyIfNeeded()
 	if currentActivationId is "" then return
 	try
-		do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/grizzly_sms.py") & " --config " & quoted form of configPath & " cancel --id " & quoted form of currentActivationId
+		set cmd to "/usr/bin/python3 " & quoted form of (toolDir & "/grizzly_sms.py") & " --config " & quoted form of configPath & " cancel --id " & quoted form of currentActivationId
+		my runShell(cmd, "grizzly_sms cancel activation_id=" & currentActivationId)
 	end try
 end cancelGrizzlyIfNeeded
 
@@ -336,18 +396,21 @@ end waitForSmsScreen
 
 on jsonField(jsonText, keyName)
 	set py to "import json,sys; d=json.loads(sys.argv[1]); print((d.get(sys.argv[2],'') or ''))"
-	return do shell script "/usr/bin/python3 -c " & quoted form of py & " " & quoted form of jsonText & " " & quoted form of keyName
+	set cmd to "/usr/bin/python3 -c " & quoted form of py & " " & quoted form of jsonText & " " & quoted form of keyName
+	return my runShell(cmd, "jsonField key=" & keyName)
 end jsonField
 
 
 (* ===== Config ===== *)
 
 on cfgStr(dottedKey)
-	return do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/json_get.py") & " " & quoted form of configPath & " " & quoted form of dottedKey
+	set cmd to "/usr/bin/python3 " & quoted form of (toolDir & "/json_get.py") & " " & quoted form of configPath & " " & quoted form of dottedKey
+	return my runShell(cmd, "cfgStr key=" & dottedKey)
 end cfgStr
 
 on cfgStrDefault(dottedKey, fallback)
-	return do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/json_get.py") & " " & quoted form of configPath & " " & quoted form of dottedKey & " --default " & quoted form of fallback
+	set cmd to "/usr/bin/python3 " & quoted form of (toolDir & "/json_get.py") & " " & quoted form of configPath & " " & quoted form of dottedKey & " --default " & quoted form of fallback
+	return my runShell(cmd, "cfgStrDefault key=" & dottedKey & " fallback=" & fallback)
 end cfgStrDefault
 
 on cfgBool(dottedKey, fallback)
@@ -375,7 +438,18 @@ end cfgNum
 
 on taskStr(keyName)
 	set py to "import json,sys; d=json.loads(sys.argv[1]); print((d.get(sys.argv[2],'') or '').strip())"
-	return do shell script "/usr/bin/python3 -c " & quoted form of py & " " & quoted form of currentTaskJSON & " " & quoted form of keyName
+	set cmd to "/usr/bin/python3 -c " & quoted form of py & " " & quoted form of currentTaskJSON & " " & quoted form of keyName
+	if keyName is "password" then
+		try
+			set v to do shell script cmd
+		on error errMsg
+			my logTrace("SHELL_ERR", "taskStr key=password -> " & errMsg)
+			error errMsg
+		end try
+		my logTrace("SHELL_IN", "taskStr key=password -> [REDACTED, " & (length of v) & " chars]")
+		return v
+	end if
+	return my runShell(cmd, "taskStr key=" & keyName)
 end taskStr
 
 (* ===== Humanization ===== *)
@@ -493,17 +567,29 @@ end ensureSafariDocument
 on safariJS(jsText)
 	my ensureSafariDocument()
 	tell application "Safari"
-		return do JavaScript jsText in document 1
+		try
+			set jsResult to do JavaScript jsText in document 1
+		on error errMsg
+			my logTrace("JS_ERROR", errMsg)
+			error errMsg
+		end try
 	end tell
+	my logTrace("JS_RESULT", "" & jsResult)
+	return jsResult
 end safariJS
 
 on openURL(u)
 	my ensureSafariDocument()
+	my logTrace("NAV_TO", u)
 	tell application "Safari"
 		activate
 		set URL of document 1 to u
 	end tell
 	my waitForPageReady()
+	try
+		set finalUrl to my safariJS("location.href")
+		my logTrace("NAV_RESULT", finalUrl)
+	end try
 end openURL
 
 on waitForPageReady()
@@ -554,8 +640,10 @@ on openRegisterPage()
 end openRegisterPage
 
 on clickAgeOver18()
+	my logTrace("AGE_GATE_ATTEMPT", "looking for 'OVER THE AGE OF 18' button")
 	set js to "(function(){ const nodes=[...document.querySelectorAll('button,a,input[type=button],input[type=submit],div[role=button]')]; const hit=nodes.find(n=>/OVER THE AGE OF 18|Over 18|I am 18/i.test((n.innerText||n.value||'').trim())); if(!hit) return 'missing'; hit.scrollIntoView({block:'center'}); hit.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true})); hit.dispatchEvent(new MouseEvent('mousedown',{bubbles:true})); hit.dispatchEvent(new PointerEvent('pointerup',{bubbles:true})); hit.dispatchEvent(new MouseEvent('mouseup',{bubbles:true})); hit.click(); return 'ok'; })()"
 	set r to my safariJS(js)
+	my logTrace("AGE_GATE_RESULT", r)
 	if r is "ok" then
 		delay (my randBetween(500, 1200) / 1000)
 		my waitForPageReady()
@@ -570,8 +658,10 @@ on focusBySelectors(selectorList)
 		if i < (count of selectorList) then set arr to arr & ","
 	end repeat
 	set arr to arr & "]"
+	my logTrace("FOCUS_ATTEMPT", "selectors=" & arr)
 	set js to "(function(){ const sels=" & arr & "; for (const s of sels){ const el=document.querySelector(s); if(el && el.offsetParent!==null){ el.scrollIntoView({block:'center'}); el.focus(); el.dispatchEvent(new MouseEvent('click',{bubbles:true})); return 'ok:'+s; } } return 'missing'; })()"
 	set r to my safariJS(js)
+	my logTrace("FOCUS_RESULT", r)
 	if r starts with "missing" then error "Could not focus expected input field. Page layout may have changed."
 	delay 0.25
 end focusBySelectors
@@ -584,9 +674,11 @@ on clickButtonNamed(nameList)
 		if i < (count of nameList) then set arr to arr & ","
 	end repeat
 	set arr to arr & "]"
+	my logTrace("CLICK_BUTTON_ATTEMPT", "candidates=" & arr)
 	set js to "(function(){ const names=" & arr & "; const nodes=[...document.querySelectorAll('button,a,input[type=submit],input[type=button],div[role=button]')]; for (const name of names){ const hit=nodes.find(n=>{ const t=((n.innerText||n.value||'').trim()); return t.toUpperCase()===name.toUpperCase() || t.toUpperCase().includes(name.toUpperCase()); }); if(hit){ hit.scrollIntoView({block:'center'}); hit.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true})); hit.dispatchEvent(new MouseEvent('mousedown',{bubbles:true})); hit.dispatchEvent(new PointerEvent('pointerup',{bubbles:true})); hit.dispatchEvent(new MouseEvent('mouseup',{bubbles:true})); hit.click(); return 'ok:'+name; } } return 'missing'; })()"
 	my humanPause("moving to button")
 	set r to my safariJS(js)
+	my logTrace("CLICK_BUTTON_RESULT", r)
 	if r starts with "missing" then error "Could not find expected button on page."
 	delay (my randBetween(700, 1500) / 1000)
 	my waitForPageReady()
@@ -655,11 +747,21 @@ end fillProfileIfPresent
 
 on tryFillLabelled(labelText, valueText)
 	if valueText is "" then return
+	set isSensitive to (my toLowerAS(labelText)) contains "password"
+	if isSensitive then
+		set logValue to "[REDACTED, " & (length of valueText) & " chars]"
+	else
+		set logValue to valueText
+	end if
+	my logTrace("FILL_ATTEMPT", "label=" & labelText & " value=" & logValue)
 	set safeLabel to my escapeJS(labelText)
 	set safeValue to my escapeJS(valueText)
 	set js to "(function(){ const label='" & safeLabel & "'; const value='" & safeValue & "'; const re=new RegExp(label,'i'); const free=el=>!(el.dataset&&el.dataset.pbandaiFilled==='1'); const labs=[...document.querySelectorAll('label,span,p,div,th,td')]; let input=null; for (const lab of labs){ if(!re.test((lab.textContent||'').trim())) continue; if(lab.control && free(lab.control)){ input=lab.control; break; } const near=lab.parentElement && lab.parentElement.querySelector('input,select,textarea'); if(near && free(near)){ input=near; break; } } if(!input){ input=[...document.querySelectorAll('input,select,textarea')].find(el=>free(el) && (re.test(el.name||'')||re.test(el.id||'')||re.test(el.placeholder||'')||re.test(el.getAttribute('aria-label')||''))); } if(!input) return 'missing'; input.scrollIntoView({block:'center'}); if(input.tagName==='SELECT'){ const opts=[...input.options]; let m=opts.find(o=>(o.value||'').toLowerCase()===value.toLowerCase()||(o.textContent||'').trim().toLowerCase()===value.toLowerCase()); if(!m) m=opts.find(o=>(o.textContent||'').toLowerCase().includes(value.toLowerCase())||(o.value||'').toLowerCase().includes(value.toLowerCase())); if(!m) return 'missing'; input.value=m.value; input.dispatchEvent(new Event('input',{bubbles:true})); input.dispatchEvent(new Event('change',{bubbles:true})); input.dataset.pbandaiFilled='1'; return 'select-ok'; } input.dataset.pbandaiFilled='1'; input.focus(); input.click(); return 'ok'; })()"
 	try
 		set r to my safariJS(js)
+		-- Note: safariJS already logs the raw JS return value ('ok'/'missing'/
+		-- 'select-ok') via JS_RESULT; that's safe since it never echoes back
+		-- the actual value, only whether a match was found.
 		if r is "select-ok" then
 			my humanPause("selected " & labelText)
 		else if r is "ok" then
@@ -671,6 +773,7 @@ end tryFillLabelled
 
 on selectRadioByValue(groupName, valueText)
 	if valueText is "" then return
+	my logTrace("SELECT_RADIO_ATTEMPT", "group=" & groupName & " value=" & valueText)
 	set safeGroup to my escapeJS(groupName)
 	set safeValue to my escapeJS(valueText)
 	set js to "(function(){ const group='" & safeGroup & "'; const value='" & safeValue & "'; const radios=[...document.getElementsByName(group)].filter(el=>el.type==='radio'); const hit=radios.find(r=>(r.value||'').toLowerCase()===value.toLowerCase()); if(!hit) return 'missing'; hit.scrollIntoView({block:'center'}); hit.click(); hit.checked=true; hit.dispatchEvent(new Event('change',{bubbles:true})); hit.dispatchEvent(new Event('input',{bubbles:true})); return 'ok'; })()"
@@ -681,6 +784,7 @@ on selectRadioByValue(groupName, valueText)
 end selectRadioByValue
 
 on checkRequiredAgreement()
+	my logTrace("CHECK_AGREEMENT_ATTEMPT", "looking for required Terms of Use checkbox")
 	try
 		set js to "(function(){ const el=document.querySelector('input.inputCheckRequired[type=checkbox]') || document.querySelector('input[name=checkRequired]'); if(!el) return 'missing'; if(!el.checked){ el.scrollIntoView({block:'center'}); el.click(); el.checked=true; el.dispatchEvent(new Event('change',{bubbles:true})); } return 'ok'; })()"
 		set r to my safariJS(js)
@@ -720,7 +824,7 @@ on fetchICloudCode(sinceEpoch, toEmail)
 	-- abort it prematurely with a generic "operation cancelled" error.
 	try
 		with timeout of 900 seconds
-			return do shell script cmd
+			return my runShell(cmd, "fetch_icloud_code since_epoch=" & sinceEpoch & " to_email=" & toEmail)
 		end timeout
 	on error errMsg
 		error "iCloud IMAP code fetch failed: " & errMsg

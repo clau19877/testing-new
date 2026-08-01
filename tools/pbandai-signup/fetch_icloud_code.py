@@ -34,7 +34,17 @@ def load_config(path: Path) -> dict:
             step="load_config",
         )
     with path.open(encoding="utf-8") as fh:
-        return json.load(fh)
+        cfg = json.load(fh)
+    icloud = cfg.get("icloud", {})
+    signup_log.log_debug(
+        f"config loaded from {path}: email={icloud.get('email', '(unset)')} "
+        f"host={icloud.get('imap_host', 'imap.mail.me.com')}:{icloud.get('imap_port', 993)} "
+        f"mailbox={icloud.get('mailbox', 'INBOX')}",
+        source="fetch_icloud_code",
+        step="load_config",
+        email=icloud.get("email", ""),
+    )
+    return cfg
 
 
 def decode_mime(value: Optional[str]) -> str:
@@ -170,10 +180,22 @@ def connect_imap(cfg: dict) -> imaplib.IMAP4_SSL:
     icloud = cfg["icloud"]
     host = icloud.get("imap_host", "imap.mail.me.com")
     port = int(icloud.get("imap_port", 993))
+    signup_log.log_debug(
+        f"OUT connecting to {host}:{port} as {icloud.get('email', '')}",
+        source="fetch_icloud_code",
+        step="imap_connect",
+        email=icloud.get("email", ""),
+    )
     try:
         client = imaplib.IMAP4_SSL(host, port, timeout=20)
         client.login(icloud["email"], icloud["app_specific_password"])
         client.select(icloud.get("mailbox", "INBOX"))
+        signup_log.log_debug(
+            "IN login+select OK",
+            source="fetch_icloud_code",
+            step="imap_connect",
+            email=icloud.get("email", ""),
+        )
         return client
     except (imaplib.IMAP4.error, OSError, socket.timeout) as exc:
         explained = explain_imap_failure(exc, cfg)
@@ -228,11 +250,24 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
 
 
 def iter_recent_ids(client: imaplib.IMAP4_SSL, limit: int = 25) -> list[bytes]:
+    signup_log.log_debug("OUT SEARCH ALL", source="fetch_icloud_code", step="imap_search")
     typ, data = client.search(None, "ALL")
     if typ != "OK" or not data or not data[0]:
+        signup_log.log_debug(
+            f"IN SEARCH typ={typ} data={data!r}",
+            source="fetch_icloud_code",
+            step="imap_search",
+        )
         return []
     ids = data[0].split()
-    return ids[-limit:]
+    recent = ids[-limit:]
+    signup_log.log_debug(
+        f"IN SEARCH -> {len(ids)} total messages; scanning last {len(recent)} "
+        f"(ids {recent[0].decode() if recent else '-'}..{recent[-1].decode() if recent else '-'})",
+        source="fetch_icloud_code",
+        step="imap_search",
+    )
+    return recent
 
 
 def extract_rfc822_bytes(data: list) -> Optional[bytes]:
@@ -268,7 +303,16 @@ def find_code_in_mailbox(
     from_hints = poll.get("from_hints", [])
     pattern = poll.get("code_regex", r"\b(\d{4,8})\b")
 
-    for msg_id in reversed(iter_recent_ids(client)):
+    ids = list(reversed(iter_recent_ids(client)))
+    signup_log.log_debug(
+        f"scanning {len(ids)} messages (newest first); subject_hints={subject_hints} "
+        f"from_hints={from_hints} to_email={to_email or '(any)'} not_before_epoch={not_before_epoch}",
+        source="fetch_icloud_code",
+        step="mailbox_scan",
+        email=to_email,
+    )
+    for msg_id in ids:
+        mid = msg_id.decode(errors="replace")
         try:
             # Some IMAP servers (confirmed on real iCloud accounts) return an
             # empty response for the legacy "(RFC822)" fetch item while the
@@ -276,26 +320,54 @@ def find_code_in_mailbox(
             # full message without marking it \Seen.
             typ, data = client.fetch(msg_id, "(BODY.PEEK[])")
             if typ != "OK" or not data:
+                signup_log.log_debug(f"msg {mid}: FETCH failed typ={typ}", source="fetch_icloud_code", step="mailbox_scan")
                 continue
             raw = extract_rfc822_bytes(data)
             if raw is None:
+                signup_log.log_debug(
+                    f"msg {mid}: could not extract bytes from FETCH response "
+                    f"(shapes: {[type(d).__name__ for d in data]})",
+                    source="fetch_icloud_code",
+                    step="mailbox_scan",
+                )
                 continue
             msg = email.message_from_bytes(raw)
             subject = decode_mime(msg.get("Subject"))
             sender = decode_mime(msg.get("From"))
             date_hdr = msg.get("Date")
+            date_ok = True
             if date_hdr:
                 try:
                     if parsedate_to_datetime(date_hdr).timestamp() < not_before_epoch - 30:
-                        continue
+                        date_ok = False
                 except (TypeError, ValueError, IndexError, OverflowError):
                     pass
-            if not looks_relevant(subject, sender, subject_hints, from_hints):
+            relevant = looks_relevant(subject, sender, subject_hints, from_hints)
+            signup_log.log_debug(
+                f"msg {mid}: len={len(raw)} date={date_hdr!r} date_ok={date_ok} "
+                f"subject={subject!r} from={sender!r} relevant={relevant}",
+                source="fetch_icloud_code",
+                step="mailbox_scan",
+            )
+            if not date_ok:
+                continue
+            if not relevant:
                 continue
             body = strip_html(message_body(msg))
-            if not mentions_recipient(msg, body, to_email):
+            recipient_ok = mentions_recipient(msg, body, to_email)
+            if not recipient_ok:
+                signup_log.log_debug(
+                    f"msg {mid}: relevant but recipient mismatch (wanted {to_email!r})",
+                    source="fetch_icloud_code",
+                    step="mailbox_scan",
+                )
                 continue
             code = extract_code(f"{subject}\n{body}", pattern)
+            signup_log.log_debug(
+                f"msg {mid}: code_extracted={code!r}",
+                source="fetch_icloud_code",
+                step="mailbox_scan",
+            )
             if code:
                 return code
         except (imaplib.IMAP4.error, OSError, socket.timeout):
@@ -308,6 +380,7 @@ def find_code_in_mailbox(
                 email=to_email,
             )
             continue
+    signup_log.log_debug("scan complete: no matching code found", source="fetch_icloud_code", step="mailbox_scan", email=to_email)
     return None
 
 
@@ -322,13 +395,28 @@ def poll_for_code(
     started = time.time()
     cutoff = not_before_epoch if not_before_epoch is not None else started - 60
 
+    attempt = 0
     last_err = None
     while time.time() - started < timeout:
+        attempt += 1
+        elapsed = round(time.time() - started, 1)
+        signup_log.log_debug(
+            f"poll attempt {attempt} (elapsed {elapsed}s / timeout {timeout}s)",
+            source="fetch_icloud_code",
+            step="imap_poll_attempt",
+            email=to_email,
+        )
         client = None
         try:
             client = connect_imap(cfg)
             code = find_code_in_mailbox(client, cfg, cutoff, to_email=to_email)
             if code:
+                signup_log.log_debug(
+                    f"poll attempt {attempt}: found code {code}",
+                    source="fetch_icloud_code",
+                    step="imap_poll_attempt",
+                    email=to_email,
+                )
                 return code
         except (imaplib.IMAP4.error, OSError, socket.timeout) as exc:
             # connect_imap already dies() on permanent (credential/config)
@@ -379,6 +467,13 @@ def main() -> None:
         help="Test the iCloud IMAP connection/login only and explain any failure.",
     )
     args = parser.parse_args()
+    signup_log.log_debug(
+        f"invoked with --config={args.config} --since-epoch={args.since_epoch} "
+        f"--to-email={args.to_email!r} --once={args.once} --diagnose={args.diagnose}",
+        source="fetch_icloud_code",
+        step="main_start",
+        email=args.to_email,
+    )
 
     if args.diagnose:
         raise SystemExit(cmd_diagnose(args))

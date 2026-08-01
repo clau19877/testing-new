@@ -3,7 +3,11 @@
 
 Writes:
   - logs/errors.jsonl  (errors only, one JSON object per line)
-  - logs/signup.log    (human-readable INFO/ERROR trail)
+  - logs/signup.log    (human-readable INFO/WARNING/ERROR trail)
+  - logs/trace.log     (everything, including DEBUG-level in/out detail:
+                         every shell command, every Safari JS call and its
+                         result, every button/field match attempt, every
+                         IMAP/GrizzlySMS API call and response)
 """
 
 from __future__ import annotations
@@ -21,6 +25,16 @@ TOOL_DIR = Path(__file__).resolve().parent
 DEFAULT_LOG_DIR = TOOL_DIR / "logs"
 ERROR_JSONL = "errors.jsonl"
 SIGNUP_LOG = "signup.log"
+TRACE_LOG = "trace.log"
+
+# Command-line flags whose values must never be written to any log file.
+SENSITIVE_FLAGS = (
+    "--password",
+    "--app-specific-password",
+    "--app_specific_password",
+    "--api-key",
+    "--api_key",
+)
 
 
 def utc_now() -> str:
@@ -37,6 +51,34 @@ def _append_text(path: Path, line: str) -> None:
         fh.write(line)
         if not line.endswith("\n"):
             fh.write("\n")
+
+
+def redact(text: str) -> str:
+    """Best-effort redaction of secret values from a shell command / message
+    before it's written to any log file."""
+    if not text:
+        return text
+    tokens = text.split(" ")
+    out = []
+    redact_next = False
+    for tok in tokens:
+        if redact_next:
+            out.append("[REDACTED]")
+            redact_next = False
+            continue
+        out.append(tok)
+        if tok in SENSITIVE_FLAGS:
+            redact_next = True
+    return " ".join(out)
+
+
+def truncate(text: str, limit: int = 2000) -> str:
+    if text is None:
+        return ""
+    text = str(text)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"... [truncated, {len(text)} chars total]"
 
 
 def log_record(
@@ -80,7 +122,13 @@ def log_record(
     if source:
         bits.append(f"source={source}")
     bits.append(message)
-    _append_text(base / SIGNUP_LOG, " | ".join(bits))
+    line = " | ".join(bits)
+
+    # trace.log gets everything (including DEBUG in/out detail).
+    _append_text(base / TRACE_LOG, line)
+    # signup.log stays focused on notable events (no DEBUG noise).
+    if record["level"] != "DEBUG":
+        _append_text(base / SIGNUP_LOG, line)
 
     if record["level"] in {"ERROR", "CRITICAL"}:
         _append_text(base / ERROR_JSONL, json.dumps(record, ensure_ascii=False))
@@ -94,6 +142,26 @@ def log_error(message: str, **kwargs: Any) -> dict[str, Any]:
 
 def log_info(message: str, **kwargs: Any) -> dict[str, Any]:
     return log_record("INFO", message, **kwargs)
+
+
+def log_debug(message: str, **kwargs: Any) -> dict[str, Any]:
+    return log_record("DEBUG", message, **kwargs)
+
+
+def log_io(
+    direction: str,
+    message: str,
+    *,
+    redact_message: bool = False,
+    truncate_at: int = 2000,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Convenience for logging an OUT (request/command/JS sent) or IN
+    (response/result received) event at DEBUG level, safely redacted and
+    truncated."""
+    safe = redact(message) if redact_message else message
+    safe = truncate(safe, truncate_at)
+    return log_debug(f"{direction} {safe}", **kwargs)
 
 
 def cmd_write(args: argparse.Namespace) -> int:
