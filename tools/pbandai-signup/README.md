@@ -81,6 +81,8 @@ python3 signup_log.py tail-errors -n 20
 - `failed.csv`'s `reason` column is now prefixed with the failing step, e.g. `[step:grizzly_rent] ...`, for faster triage.
 - State/Country fields are auto-detected as `<select>` dropdowns when present and matched by option text/value, not just typed as raw keystrokes.
 - If the site takes longer than usual to show the SMS/OTP screen, raise `grizzly.sms_screen_wait_tries` / `grizzly.sms_screen_wait_interval_ms` in `config.json`.
+- `p-bandai.com` is a Vue/Vite single-page app: the initial HTML is an empty shell (`#app`), all screens render client-side. After every navigation the script now waits for `#app` to actually mount content, not just for `document.readyState`.
+- A OneTrust cookie-consent banner is auto-dismissed if present (common Accept/Reject button IDs). Global-e (shipping/currency) popups are not auto-handled — if you see one blocking the flow, dismiss it manually and let us know the button text/selector so it can be added.
 
 ## Error logging
 

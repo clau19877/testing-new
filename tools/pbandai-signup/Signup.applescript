@@ -478,8 +478,31 @@ on waitForPageReady()
 		end try
 		delay 0.35
 	end repeat
+	my waitForAppMounted()
+	my dismissCookieBanner()
 	my humanPause("page settle")
 end waitForPageReady
+
+on waitForAppMounted()
+	-- p-bandai.com is a Vue/Vite SPA (#app starts empty); readyState alone
+	-- doesn't mean the framework has rendered anything yet.
+	repeat 30 times
+		try
+			set r to my safariJS("(function(){ const app=document.getElementById('app'); return (app && app.children && app.children.length>0) ? 'yes':'no'; })()")
+			if r is "yes" then return
+		end try
+		delay 0.3
+	end repeat
+end waitForAppMounted
+
+on dismissCookieBanner()
+	-- OneTrust cookie consent banner can overlay the page and block clicks.
+	try
+		set js to "(function(){ const sels=['#onetrust-accept-btn-handler','#onetrust-reject-all-handler','.onetrust-close-btn-handler']; for (const s of sels){ const el=document.querySelector(s); if(el && el.offsetParent!==null){ el.click(); return 'ok:'+s; } } return 'none'; })()"
+		set r to my safariJS(js)
+		if r starts with "ok" then delay (my randBetween(300, 700) / 1000)
+	end try
+end dismissCookieBanner
 
 on humanWarmup()
 	my openURL(my cfgStr("pbandai.base_url"))
