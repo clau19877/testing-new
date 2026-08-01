@@ -156,7 +156,7 @@ on processOneTask()
 			my failStep("grizzly_rent", errMsg)
 		end try
 	else
-		set currentPhone to my taskOrCfg("phone", "pbandai.profile.phone")
+		set currentPhone to my taskStr("phone")
 	end if
 	
 	try
