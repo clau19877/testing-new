@@ -15,6 +15,7 @@ property currentPassword : ""
 property currentTaskJSON : ""
 property currentPhone : ""
 property currentActivationId : ""
+property currentPhoneCountryIso : ""
 
 -- cached config values (loaded once per run to avoid repeated subprocess calls)
 property cfgWarmupBrowse : true
@@ -84,6 +85,7 @@ on run
 			set currentPassword to my taskStr("password")
 			set currentPhone to ""
 			set currentActivationId to ""
+			set currentPhoneCountryIso to ""
 			if (currentEmail is "") or (currentPassword is "") then error "task.csv row missing email/password"
 			my logInfo("Starting task", "task_start")
 			
@@ -298,6 +300,8 @@ on rentGrizzlyNumber()
 	set formPhone to my jsonField(raw, "phone_form")
 	if formPhone is "" then set formPhone to fullPhone
 	set currentPhone to formPhone
+	set currentPhoneCountryIso to my jsonField(raw, "phone_country_iso")
+	if currentPhoneCountryIso is "" then set currentPhoneCountryIso to "US"
 	if (currentActivationId is "") or (currentPhone is "") then error "GrizzlySMS rent returned empty phone/activation id: " & raw
 	my humanPause("got virtual number")
 end rentGrizzlyNumber
@@ -584,15 +588,20 @@ on fillProfileIfPresent()
 	if passText is "" then error "task.csv row missing password"
 	set phoneText to currentPhone
 	if phoneText is "" then set phoneText to my taskStr("phone")
-	set isoCode to my countryToISO2(my taskStr("country"))
+	-- "Area" (home country) only offers Canada/US on the real form, so it's
+	-- driven by task.csv "country" regardless of where the phone number is from.
+	set areaIsoCode to my countryToISO2(my taskStr("country"))
+	-- "International Dialing Code" has many more options and should match the
+	-- rented phone number's actual origin (e.g. GrizzlySMS UK numbers use "IM").
+	set phoneIsoCode to my taskStr("phone_country_iso")
+	if phoneIsoCode is "" then set phoneIsoCode to currentPhoneCountryIso
+	if phoneIsoCode is "" then set phoneIsoCode to areaIsoCode
 	set genderVal to my taskStr("gender")
 	if genderVal is "" then set genderVal to "NotSelected"
 	my tryFillLabelled("First Name", my taskStr("first_name"))
 	my tryFillLabelled("Last Name", my taskStr("last_name"))
-	-- "Area" (home country) and "International Dialing Code" are <select> dropdowns
-	-- on the real ENTER INFORMATION screen; both accept the same 2-letter ISO code.
-	my tryFillLabelled("Area", isoCode)
-	my tryFillLabelled("International Dialing Code", isoCode)
+	my tryFillLabelled("Area", areaIsoCode)
+	my tryFillLabelled("International Dialing Code", phoneIsoCode)
 	my tryFillLabelled("Phone", phoneText)
 	my tryFillLabelled("Mobile", phoneText)
 	my tryFillLabelled("Telephone", phoneText)

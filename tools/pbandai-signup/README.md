@@ -22,10 +22,10 @@ cp task.example.csv task.csv
 2. `task.csv` = **all account data**, one row per account (email + password required):
 
 ```csv
-email,password,first_name,last_name,gender,month,day,year,phone,address1,address2,city,state,zip,country
-account1@icloud.com,Bnd4iFn7Kp,Alex,Example,NotSelected,1,15,1990,,123 Main St,,Los Angeles,CA,90001,United States
-account2@icloud.com,Xq9wLm2Vhz,Sam,Example,NotSelected,3,22,1992,,123 Main St,,Los Angeles,CA,90001,United States
-account3@icloud.com,Rt5cWk8Ndp,Jordan,Example,NotSelected,7,8,1995,,123 Main St,,Los Angeles,CA,90001,United States
+email,password,first_name,last_name,gender,month,day,year,phone,phone_country_iso,address1,address2,city,state,zip,country
+account1@icloud.com,Bnd4iFn7Kp,Alex,Example,NotSelected,1,15,1990,,,123 Main St,,Los Angeles,CA,90001,United States
+account2@icloud.com,Xq9wLm2Vhz,Sam,Example,NotSelected,3,22,1992,,,123 Main St,,Los Angeles,CA,90001,United States
+account3@icloud.com,Rt5cWk8Ndp,Jordan,Example,NotSelected,7,8,1995,,,123 Main St,,Los Angeles,CA,90001,United States
 ```
 
 Leave `phone` empty when GrizzlySMS is enabled (a number is rented per row).
@@ -72,9 +72,30 @@ Note: Premium Bandai's own terms limit membership to one account per person — 
 
 ### What the ENTER INFORMATION screen actually asks for
 
-Inspecting the live form: First/Last Name, an "Area" country dropdown (Canada/US), an "International Dialing Code" dropdown + Phone Number, Date of Birth, Gender (radio, required), Password, and a required Terms of Use checkbox. There is **no** street address / city / zip field at this step — `address1`/`address2`/`city`/`state`/`zip` columns are kept for forward-compatibility and are harmless no-ops if the site doesn't render them.
+Inspecting the live form: First/Last Name, an "Area" country dropdown (Canada/US **only**), an "International Dialing Code" dropdown (many countries) + Phone Number, Date of Birth, Gender (radio, required), Password, and a required Terms of Use checkbox. There is **no** street address / city / zip field at this step — `address1`/`address2`/`city`/`state`/`zip` columns are kept for forward-compatibility and are harmless no-ops if the site doesn't render them.
 
-`country` in `task.csv` drives both the "Area" and "International Dialing Code" dropdowns (mapped to a 2-letter ISO code, default `US`). The required Terms of Use checkbox is checked automatically.
+- **Area** is driven by `task.csv` `country` (mapped to `US`/`CA` — the only two options that exist).
+- **International Dialing Code** is driven independently:
+  1. `task.csv` `phone_country_iso` if set (explicit override)
+  2. otherwise, auto-detected from the rented GrizzlySMS number's country (see below)
+  3. otherwise, falls back to the same value as Area
+
+This matters because a GrizzlySMS phone number's *country* doesn't have to match the site's *home region* — e.g. you can register as a US-area member (`Area` = US) while using a UK-sourced number for SMS verification (`International Dialing Code` = UK).
+
+#### GrizzlySMS country → dialing code mapping
+
+`grizzly_sms.py` maps its own numeric country id to the ISO code the dropdown needs (these ids are GrizzlySMS-specific and unrelated to phone dial codes):
+
+| GrizzlySMS `country` | Dialing code dropdown value |
+|---|---|
+| `12` (USA) | `US` |
+| `16` (UK) | `IM` — **Isle of Man [+44]**, confirmed as the working option for UK numbers, not `GB` |
+
+To use UK numbers, set in `config.json`:
+```json
+"grizzly": { "country": 16 }
+```
+Override the mapping entirely with `grizzly.phone_dropdown_iso` in `config.json`, or per-row with `task.csv`'s `phone_country_iso` column, if GrizzlySMS adds new countries not yet in the built-in table. The required Terms of Use checkbox is checked automatically.
 
 3. Safari permissions:
    - Accessibility for Terminal / Script Editor

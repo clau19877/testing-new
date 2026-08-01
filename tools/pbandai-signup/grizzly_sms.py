@@ -23,6 +23,17 @@ DEFAULT_SERVICE = "bvq"
 # sms-activate compatible country id for USA (override in config if needed)
 DEFAULT_COUNTRY = 12
 
+# GrizzlySMS numeric country id -> ISO alpha-2 value to select in Premium
+# Bandai's "International Dialing Code" dropdown. Note: these are GrizzlySMS's
+# own arbitrary country ids, unrelated to phone dial codes (e.g. UK is 16,
+# not 44). UK (16) intentionally maps to "IM" (Isle of Man [+44]) rather than
+# "GB" (United Kingdom [+44]) — confirmed as the value that works on the real
+# form for +44 numbers.
+GRIZZLY_COUNTRY_TO_PHONE_ISO: dict[int, str] = {
+    12: "US",
+    16: "IM",
+}
+
 
 def die(message: str, *, step: str = "grizzly", activation_id: str = "", phone: str = "") -> None:
     signup_log.log_error(
@@ -80,6 +91,18 @@ def format_phone(phone: str, mode: str = "national", country_dial: str = "1") ->
     if digits.startswith(country_dial) and len(digits) in (11, 12):
         return digits[len(country_dial) :]
     return digits
+
+
+def phone_dropdown_iso(grizzly_country: Any, grizzly_cfg_dict: Optional[dict] = None) -> str:
+    """ISO alpha-2 value to select in the "International Dialing Code" dropdown."""
+    override = (grizzly_cfg_dict or {}).get("phone_dropdown_iso")
+    if override:
+        return override
+    try:
+        country_id = int(grizzly_country)
+    except (TypeError, ValueError):
+        country_id = None
+    return GRIZZLY_COUNTRY_TO_PHONE_ISO.get(country_id, "US")
 
 
 def get_balance(api_key: str, base_url: str) -> str:
@@ -191,16 +214,18 @@ def cmd_balance(args: argparse.Namespace) -> int:
 def cmd_rent(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     g = grizzly_cfg(cfg)
+    country_used = args.country if args.country is not None else g.get("country", DEFAULT_COUNTRY)
     result = rent_number(
         g["api_key"],
         g.get("base_url", DEFAULT_BASE),
         args.service or g.get("service", DEFAULT_SERVICE),
-        args.country if args.country is not None else g.get("country", DEFAULT_COUNTRY),
+        country_used,
         args.max_price if args.max_price is not None else g.get("max_price"),
     )
     mode = g.get("phone_format", "national")
     dial = str(g.get("country_dial", "1"))
     result["phone_form"] = format_phone(result["phone"], mode=mode, country_dial=dial)
+    result["phone_country_iso"] = phone_dropdown_iso(country_used, g)
     print(json.dumps(result, ensure_ascii=False))
     return 0
 

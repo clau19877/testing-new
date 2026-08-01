@@ -25,6 +25,7 @@ TASK_FIELDS = [
     "day",
     "year",
     "phone",
+    "phone_country_iso",
     "address1",
     "address2",
     "city",
@@ -154,6 +155,11 @@ def resolve_random_row(row: dict[str, str], cfg: Optional[dict] = None) -> dict[
         # enabled) rents a real number, matching the documented "leave phone
         # empty" convention.
         resolved["phone"] = ""
+
+    if _is_random(resolved.get("phone_country_iso")):
+        # No sensible "random" value here — clear it so the auto-detected
+        # value (from GrizzlySMS's rented number, or the Area code) is used.
+        resolved["phone_country_iso"] = ""
 
     if _is_random(resolved.get("email")):
         template = (cfg.get("random_data") or {}).get("email_template", "")

@@ -22,7 +22,8 @@
     "timeout_sec": 180,
     "interval_sec": 5,
     "sms_screen_wait_tries": 25,
-    "sms_screen_wait_interval_ms": 500
+    "sms_screen_wait_interval_ms": 500,
+    "phone_dropdown_iso": ""
   },
   "humanize": {
     "enabled": true,
