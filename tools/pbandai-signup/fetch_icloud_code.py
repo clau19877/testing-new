@@ -8,6 +8,7 @@ import email
 import imaplib
 import json
 import re
+import socket
 import sys
 import time
 from email.header import decode_header
@@ -119,12 +120,111 @@ def extract_code(text: str, pattern: str) -> Optional[str]:
     return matches[0]
 
 
+PLACEHOLDER_EMAILS = {"", "yourname@icloud.com"}
+PLACEHOLDER_PASSWORDS = {"", "xxxx-xxxx-xxxx-xxxx"}
+
+
+def explain_imap_failure(exc: BaseException, cfg: dict) -> str:
+    """Turn a raw connection/login exception into an actionable message."""
+    icloud = cfg.get("icloud", {})
+    host = icloud.get("imap_host", "imap.mail.me.com")
+    port = icloud.get("imap_port", 993)
+    email_val = (icloud.get("email") or "").strip()
+    pw_val = (icloud.get("app_specific_password") or "").strip()
+
+    if email_val.lower() in PLACEHOLDER_EMAILS or pw_val in PLACEHOLDER_PASSWORDS:
+        return (
+            "config.json still has placeholder iCloud credentials. "
+            "Edit icloud.email and icloud.app_specific_password in config.json first."
+        )
+
+    if isinstance(exc, (socket.gaierror, ConnectionRefusedError)):
+        return (
+            f"Could not reach {host}:{port} — check your internet connection, "
+            "and that no firewall/VPN/proxy is blocking IMAP (port 993)."
+        )
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return (
+            f"Connection to {host}:{port} timed out — likely a firewall/VPN/proxy "
+            "blocking outbound port 993."
+        )
+    if isinstance(exc, imaplib.IMAP4.error):
+        detail = str(exc)
+        if "AUTHENTICATIONFAILED" in detail.upper() or "invalid credentials" in detail.lower():
+            return (
+                "iCloud rejected the login. Most common causes:\n"
+                "  1. Using your normal Apple ID password instead of an APP-SPECIFIC password\n"
+                "     (create one at https://appleid.apple.com -> Sign-In and Security -> App-Specific Passwords)\n"
+                "  2. Two-Factor Authentication is not enabled on the Apple ID (required for app-specific passwords)\n"
+                "  3. A typo or stray space in icloud.email / icloud.app_specific_password in config.json\n"
+                f"  Raw error: {detail}"
+            )
+        return f"IMAP error: {detail}"
+    return f"{type(exc).__name__}: {exc}"
+
+
 def connect_imap(cfg: dict) -> imaplib.IMAP4_SSL:
+    """Connect for the retry loop (poll_for_code): dies immediately on
+    permanent (credential/config) failures, but re-raises transient
+    (network) ones so the caller can retry."""
     icloud = cfg["icloud"]
-    client = imaplib.IMAP4_SSL(icloud.get("imap_host", "imap.mail.me.com"), int(icloud.get("imap_port", 993)))
-    client.login(icloud["email"], icloud["app_specific_password"])
-    client.select(icloud.get("mailbox", "INBOX"))
-    return client
+    host = icloud.get("imap_host", "imap.mail.me.com")
+    port = int(icloud.get("imap_port", 993))
+    try:
+        client = imaplib.IMAP4_SSL(host, port, timeout=20)
+        client.login(icloud["email"], icloud["app_specific_password"])
+        client.select(icloud.get("mailbox", "INBOX"))
+        return client
+    except (imaplib.IMAP4.error, OSError, socket.timeout) as exc:
+        explained = explain_imap_failure(exc, cfg)
+        # Bad credentials / placeholder config won't fix themselves on retry —
+        # fail fast with a clear message instead of retrying for minutes.
+        permanent = isinstance(exc, imaplib.IMAP4.error) or explained.startswith("config.json still has")
+        if permanent:
+            die(explained, step="imap_connect", to_email=icloud.get("email", ""))
+        signup_log.log_error(
+            explained,
+            source="fetch_icloud_code",
+            step="imap_connect",
+            email=icloud.get("email", ""),
+        )
+        raise
+
+
+def connect_imap_once(cfg: dict) -> imaplib.IMAP4_SSL:
+    """Connect for single-shot usage (--once, --diagnose): any failure gets
+    a clear message and exits immediately — retrying doesn't make sense
+    for a one-off check."""
+    icloud = cfg["icloud"]
+    host = icloud.get("imap_host", "imap.mail.me.com")
+    port = int(icloud.get("imap_port", 993))
+    try:
+        client = imaplib.IMAP4_SSL(host, port, timeout=20)
+        client.login(icloud["email"], icloud["app_specific_password"])
+        client.select(icloud.get("mailbox", "INBOX"))
+        return client
+    except (imaplib.IMAP4.error, OSError, socket.timeout) as exc:
+        die(explain_imap_failure(exc, cfg), step="imap_connect", to_email=icloud.get("email", ""))
+
+
+def cmd_diagnose(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    icloud = cfg.get("icloud", {})
+    print(f"Host: {icloud.get('imap_host', 'imap.mail.me.com')}:{icloud.get('imap_port', 993)}")
+    print(f"Email: {icloud.get('email', '(not set)')}")
+    print(f"Mailbox: {icloud.get('mailbox', 'INBOX')}")
+    try:
+        client = connect_imap_once(cfg)
+    except SystemExit as exc:
+        print(f"\nFAILED: {exc}", file=sys.stderr)
+        return 1
+    try:
+        typ, data = client.search(None, "ALL")
+        count = len(data[0].split()) if typ == "OK" and data and data[0] else 0
+        print(f"\nOK — logged in successfully. {count} message(s) in mailbox.")
+    finally:
+        client.logout()
+    return 0
 
 
 def iter_recent_ids(client: imaplib.IMAP4_SSL, limit: int = 25) -> list[bytes]:
@@ -190,7 +290,10 @@ def poll_for_code(
             code = find_code_in_mailbox(client, cfg, cutoff, to_email=to_email)
             if code:
                 return code
-        except imaplib.IMAP4.error as exc:
+        except (imaplib.IMAP4.error, OSError, socket.timeout) as exc:
+            # connect_imap already dies() on permanent (credential/config)
+            # failures, so anything reaching here is a transient network
+            # issue worth retrying.
             last_err = exc
             signup_log.log_error(
                 f"IMAP error while polling: {exc}",
@@ -230,11 +333,20 @@ def main() -> None:
         action="store_true",
         help="Single mailbox scan (no polling loop).",
     )
+    parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="Test the iCloud IMAP connection/login only and explain any failure.",
+    )
     args = parser.parse_args()
+
+    if args.diagnose:
+        raise SystemExit(cmd_diagnose(args))
+
     cfg = load_config(args.config)
 
     if args.once:
-        client = connect_imap(cfg)
+        client = connect_imap_once(cfg)
         try:
             code = find_code_in_mailbox(
                 client,

@@ -20,23 +20,17 @@ fi
 
 python3 csv_queue.py --dir . init
 
-# Quick IMAP credential sanity check (no mail polling).
+# Quick iCloud IMAP sanity check (no mail polling) with a clear explanation on failure.
+if ! python3 fetch_icloud_code.py --config config.json --diagnose; then
+  echo "" >&2
+  echo "iCloud IMAP check failed. Fix the issue above, then re-run." >&2
+  exit 1
+fi
+
 python3 - <<'PY'
-import json, imaplib, sys
+import json, sys
 from pathlib import Path
 cfg = json.loads(Path("config.json").read_text())
-ic = cfg["icloud"]
-try:
-    c = imaplib.IMAP4_SSL(ic.get("imap_host", "imap.mail.me.com"), int(ic.get("imap_port", 993)))
-    c.login(ic["email"], ic["app_specific_password"])
-    c.select(ic.get("mailbox", "INBOX"))
-    c.logout()
-    print("iCloud IMAP: OK")
-except Exception as e:
-    print(f"iCloud IMAP login failed: {e}", file=sys.stderr)
-    print("Create an app-specific password at https://appleid.apple.com", file=sys.stderr)
-    sys.exit(1)
-
 g = cfg.get("grizzly") or {}
 if g.get("enabled", True):
     if not g.get("api_key") or g.get("api_key") == "YOUR_GRIZZLYSMS_API_KEY":

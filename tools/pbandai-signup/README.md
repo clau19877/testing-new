@@ -118,6 +118,33 @@ python3 grizzly_sms.py balance
 python3 signup_log.py tail-errors -n 20
 ```
 
+## IMAP troubleshooting
+
+If setup fails with an iCloud IMAP error, run the diagnostic directly for a clear explanation instead of a raw error:
+
+```bash
+python3 fetch_icloud_code.py --diagnose
+```
+
+It distinguishes the common causes:
+
+| Symptom | Likely cause |
+|---|---|
+| "config.json still has placeholder iCloud credentials" | You haven't edited `icloud.email`/`icloud.app_specific_password` yet |
+| "iCloud rejected the login" | Using your normal Apple ID password instead of an **app-specific password**, 2FA not enabled on the Apple ID, or a typo/stray space in `config.json` |
+| "Could not reach ...:993" | No internet, or a firewall/VPN/proxy blocking outbound port 993 |
+| "Connection to ...:993 timed out" | Same as above — something is blocking port 993 |
+
+App-specific passwords are created at [appleid.apple.com](https://appleid.apple.com) → **Sign-In and Security → App-Specific Passwords** (requires Two-Factor Authentication enabled on the Apple ID).
+
+Once `--diagnose` reports OK, test a single mailbox scan for a specific email:
+
+```bash
+python3 fetch_icloud_code.py --once --to-email 'you@icloud.com'
+```
+
+`./run.command` also runs this diagnostic automatically before launching Safari, so a bad iCloud config is caught before any account is attempted.
+
 ## Notes on reliability
 
 - `failed.csv`'s `reason` column is now prefixed with the failing step, e.g. `[step:grizzly_rent] ...`, for faster triage.
