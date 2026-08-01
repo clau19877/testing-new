@@ -260,7 +260,7 @@ on rentGrizzlyNumber()
 	set formPhone to my jsonField(raw, "phone_form")
 	if formPhone is "" then set formPhone to fullPhone
 	set currentPhone to formPhone
-	if currentActivationId is "" or currentPhone is "" then error "GrizzlySMS rent returned empty phone/activation id: " & raw
+	if (currentActivationId is "") or (currentPhone is "") then error "GrizzlySMS rent returned empty phone/activation id: " & raw
 	my humanPause("got virtual number")
 end rentGrizzlyNumber
 
@@ -444,8 +444,8 @@ end openURL
 on waitForPageReady()
 	repeat 40 times
 		try
-			set st to my safariJS("document.readyState")
-			if st is "complete" or st is "interactive" then exit repeat
+			set pageState to my safariJS("document.readyState")
+			if (pageState is "complete") or (pageState is "interactive") then exit repeat
 		end try
 		delay 0.35
 	end repeat

@@ -47,8 +47,8 @@ The script processes **every row** in `task.csv` until the queue is empty.
 
 | File | Put this here |
 |---|---|
-| `task.csv` | All signup emails + passwords (+ optional per-account profile) |
-| `config.json` | iCloud IMAP, Grizzly API, shared defaults, humanize/queue settings |
+| `task.csv` | All account fields: email, password, name, DOB, address, etc. |
+| `config.json` | iCloud IMAP, Grizzly API, site URLs, humanize/queue settings |
 | `success.csv` | Auto-created: successful accounts (row removed from `task.csv`) |
 | `failed.csv` | Auto-created: failures + reason (row removed from `task.csv`) |
 | `logs/errors.jsonl` | Structured errors for debugging |
