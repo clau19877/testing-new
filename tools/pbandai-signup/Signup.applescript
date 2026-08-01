@@ -37,7 +37,7 @@ on run
 	
 	repeat
 		set taskCount to (do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " count") as integer
-		if taskCount ≤ 0 then exit repeat
+		if taskCount <= 0 then exit repeat
 		
 		try
 			set currentTaskJSON to do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " next"
@@ -48,7 +48,7 @@ on run
 			set currentPassword to my taskStr("password")
 			set currentPhone to ""
 			set currentActivationId to ""
-			if currentEmail is "" or currentPassword is "" then error "task.csv row missing email/password"
+			if (currentEmail is "") or (currentPassword is "") then error "task.csv row missing email/password"
 			my logInfo("Starting task", "task_start")
 			
 			my processOneTask()
@@ -341,12 +341,12 @@ end taskOrCfg
 (* ===== Humanization ===== *)
 
 on randBetween(lo, hi)
-	if hi ≤ lo then return lo
+	if hi <= lo then return lo
 	return lo + (random number from 0 to (hi - lo))
 end randBetween
 
 on sleepMs(ms)
-	if ms ≤ 0 then return
+	if ms <= 0 then return
 	delay (ms / 1000)
 end sleepMs
 
