@@ -7,16 +7,65 @@
 
 property toolDir : ""
 property configPath : ""
+property taskPath : ""
 property humanizeOn : true
+property currentEmail : ""
+property currentPassword : ""
+property currentTaskJSON : ""
 
 on run
 	set toolDir to do shell script "cd \"$(dirname " & quoted form of (POSIX path of (path to me)) & ")\" && pwd"
 	set configPath to toolDir & "/config.json"
+	set taskPath to toolDir & "/task.csv"
 	if (do shell script "test -f " & quoted form of configPath & " && echo yes || echo no") is "no" then
 		error "Missing config.json. Copy config.example.json to config.json and fill it in."
 	end if
+	if (do shell script "test -f " & quoted form of taskPath & " && echo yes || echo no") is "no" then
+		error "Missing task.csv. Copy task.example.csv to task.csv and add email,password rows."
+	end if
 	set humanizeOn to my cfgBool("humanize.enabled", true)
 	
+	do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " init"
+	
+	set processed to 0
+	set succeeded to 0
+	set failedCount to 0
+	
+	repeat
+		set taskCount to (do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " count") as integer
+		if taskCount ≤ 0 then exit repeat
+		
+		set currentTaskJSON to do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " next"
+		if currentTaskJSON is "{}" then exit repeat
+		if currentTaskJSON contains "\"error\"" then error "task.csv next failed: " & currentTaskJSON
+		
+		set currentEmail to my taskStr("email")
+		set currentPassword to my taskStr("password")
+		if currentEmail is "" or currentPassword is "" then error "task.csv row missing email/password"
+		
+		try
+			my processOneTask()
+			my markSuccess(currentEmail, "created")
+			set succeeded to succeeded + 1
+		on error errMsg
+			my markFailed(currentEmail, currentPassword, errMsg)
+			set failedCount to failedCount + 1
+		end try
+		
+		set processed to processed + 1
+		-- Cool-down between accounts (Shape-sensitive).
+		set leftCount to (do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " count") as integer
+		if leftCount > 0 then
+			my humanPause("cooldown between tasks")
+			delay (my randBetween(my cfgInt("queue.cooldown_min_sec", 8), my cfgInt("queue.cooldown_max_sec", 20)))
+		end if
+	end repeat
+	
+	display notification "Done. success=" & succeeded & " failed=" & failedCount with title "Premium Bandai Signup"
+	display dialog "Queue finished." & return & return & "Processed: " & processed & return & "Success: " & succeeded & " → success.csv" & return & "Failed: " & failedCount & " → failed.csv" & return & "Remaining in task.csv: " & (do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " count") buttons {"OK"} default button 1
+end run
+
+on processOneTask()
 	my ensureSafariFront()
 	if my cfgBool("humanize.warmup_browse", true) then
 		my humanWarmup()
@@ -27,9 +76,8 @@ on run
 	my clickAgeOver18()
 	my humanPause("looking at signup options")
 	
-	set signupEmail to my cfgStr("pbandai.signup_email")
 	my focusBySelectors({"input[type='email']", "input[name*='mail' i]", "input[id*='mail' i]"})
-	my humanType(signupEmail)
+	my humanType(currentEmail)
 	my humanPause("checking email")
 	
 	set submitEpoch to (do shell script "date +%s") as real
@@ -37,7 +85,7 @@ on run
 	my waitForAuthCodeScreen()
 	my humanPause("waiting for inbox")
 	
-	set authCode to my fetchICloudCode(submitEpoch)
+	set authCode to my fetchICloudCode(submitEpoch, currentEmail)
 	my humanPause("reading code email")
 	my focusBySelectors({"input[name*='code' i]", "input[id*='code' i]", "input[autocomplete='one-time-code']", "input[type='tel']", "input[type='text']"})
 	my humanType(authCode)
@@ -47,9 +95,42 @@ on run
 	my waitForEnterInformation()
 	my fillProfileIfPresent()
 	
-	display notification "Email verified. Review profile, then confirm." with title "Premium Bandai Signup"
-	display dialog "iCloud IMAP code accepted." & return & return & "Profile fields were filled when recognized." & return & "Please visually review and click Continue/Confirm yourself — finishing the last submit manually is safer against Shape." buttons {"OK"} default button 1
-end run
+	-- Optional auto-continue through confirmation if buttons exist.
+	try
+		my clickButtonNamed({"CONTINUE", "Continue", "CONFIRM", "Confirm", "REGISTER", "Register", "SUBMIT", "Submit"})
+		my humanPause("waiting for completion")
+	end try
+	
+	if my cfgBool("queue.ask_confirm_success", true) then
+		set answer to button returned of (display dialog "Account for:" & return & currentEmail & return & return & "Mark this row as SUCCESS and remove it from task.csv?" buttons {"Mark Failed", "Mark Success"} default button "Mark Success")
+		if answer is "Mark Failed" then error "Marked failed by user"
+	else
+		if not my pageLooksSuccessful() then
+			error "Could not confirm success page automatically"
+		end if
+	end if
+end processOneTask
+
+on pageLooksSuccessful()
+	try
+		set r to my safariJS("(function(){ const t=(document.body&&document.body.innerText)||''; return /COMPLETE|registration (is )?complete|successfully|welcome/i.test(t) ? 'yes':'no'; })()")
+		return r is "yes"
+	on error
+		return false
+	end try
+end pageLooksSuccessful
+
+on markSuccess(emailAddr, noteText)
+	do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " success --email " & quoted form of emailAddr & " --note " & quoted form of noteText
+end markSuccess
+
+on markFailed(emailAddr, passText, reasonText)
+	set safeReason to my replaceText(reasonText, return, " ")
+	set safeReason to my replaceText(safeReason, linefeed, " ")
+	try
+		do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " failed --email " & quoted form of emailAddr & " --password " & quoted form of passText & " --reason " & quoted form of safeReason
+	end try
+end markFailed
 
 
 (* ===== Config ===== *)
@@ -84,6 +165,17 @@ on cfgNum(dottedKey, fallback)
 		return fallback
 	end try
 end cfgNum
+
+on taskStr(keyName)
+	set py to "import json,sys; d=json.loads(sys.argv[1]); print((d.get(sys.argv[2],'') or '').strip())"
+	return do shell script "/usr/bin/python3 -c " & quoted form of py & " " & quoted form of currentTaskJSON & " " & quoted form of keyName
+end taskStr
+
+on taskOrCfg(taskKey, cfgKey)
+	set v to my taskStr(taskKey)
+	if v is "" then set v to my cfgStrDefault(cfgKey, "")
+	return v
+end taskOrCfg
 
 
 (* ===== Humanization ===== *)
@@ -274,19 +366,22 @@ on waitForEnterInformation()
 end waitForEnterInformation
 
 on fillProfileIfPresent()
-	my tryFillLabelled("First Name", my cfgStr("pbandai.profile.first_name"))
-	my tryFillLabelled("Last Name", my cfgStr("pbandai.profile.last_name"))
-	my tryFillLabelled("Password", my cfgStr("pbandai.password"))
-	my tryFillLabelled("Confirm Password", my cfgStr("pbandai.password"))
-	my tryFillLabelled("Phone", my cfgStr("pbandai.profile.phone"))
-	my tryFillLabelled("Mobile", my cfgStr("pbandai.profile.phone"))
-	my tryFillLabelled("Zip", my cfgStr("pbandai.profile.zip"))
-	my tryFillLabelled("Postal", my cfgStr("pbandai.profile.zip"))
-	my tryFillLabelled("Address", my cfgStr("pbandai.profile.address1"))
-	my tryFillLabelled("City", my cfgStr("pbandai.profile.city"))
-	my tryFillLabelled("Month", my cfgStr("pbandai.profile.month"))
-	my tryFillLabelled("Day", my cfgStr("pbandai.profile.day"))
-	my tryFillLabelled("Year", my cfgStr("pbandai.profile.year"))
+	set passText to currentPassword
+	if passText is "" then set passText to my cfgStrDefault("pbandai.password", "")
+	my tryFillLabelled("First Name", my taskOrCfg("first_name", "pbandai.profile.first_name"))
+	my tryFillLabelled("Last Name", my taskOrCfg("last_name", "pbandai.profile.last_name"))
+	my tryFillLabelled("Password", passText)
+	my tryFillLabelled("Confirm Password", passText)
+	my tryFillLabelled("Phone", my taskOrCfg("phone", "pbandai.profile.phone"))
+	my tryFillLabelled("Mobile", my taskOrCfg("phone", "pbandai.profile.phone"))
+	my tryFillLabelled("Zip", my taskOrCfg("zip", "pbandai.profile.zip"))
+	my tryFillLabelled("Postal", my taskOrCfg("zip", "pbandai.profile.zip"))
+	my tryFillLabelled("Address", my taskOrCfg("address1", "pbandai.profile.address1"))
+	my tryFillLabelled("City", my taskOrCfg("city", "pbandai.profile.city"))
+	my tryFillLabelled("State", my taskOrCfg("state", "pbandai.profile.state"))
+	my tryFillLabelled("Month", my taskOrCfg("month", "pbandai.profile.month"))
+	my tryFillLabelled("Day", my taskOrCfg("day", "pbandai.profile.day"))
+	my tryFillLabelled("Year", my taskOrCfg("year", "pbandai.profile.year"))
 	my humanPause("reviewing profile")
 	my humanScroll()
 end fillProfileIfPresent
@@ -303,9 +398,9 @@ on tryFillLabelled(labelText, valueText)
 	end try
 end tryFillLabelled
 
-on fetchICloudCode(sinceEpoch)
+on fetchICloudCode(sinceEpoch, toEmail)
 	set py to toolDir & "/fetch_icloud_code.py"
-	set cmd to "/usr/bin/python3 " & quoted form of py & " --config " & quoted form of configPath & " --since-epoch " & sinceEpoch
+	set cmd to "/usr/bin/python3 " & quoted form of py & " --config " & quoted form of configPath & " --since-epoch " & sinceEpoch & " --to-email " & quoted form of toEmail
 	try
 		return do shell script cmd
 	on error errMsg

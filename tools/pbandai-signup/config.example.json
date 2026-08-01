@@ -40,6 +40,11 @@
     "scroll_chance": 0.35,
     "mouse_wiggle": true
   },
+  "queue": {
+    "ask_confirm_success": true,
+    "cooldown_min_sec": 8,
+    "cooldown_max_sec": 20
+  },
   "code_poll": {
     "timeout_sec": 540,
     "interval_sec": 8,

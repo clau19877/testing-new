@@ -76,6 +76,24 @@ def looks_relevant(subject: str, sender: str, subject_hints: Iterable[str], from
     return False
 
 
+def mentions_recipient(msg: email.message.Message, body: str, to_email: str) -> bool:
+    if not to_email:
+        return True
+    target = to_email.strip().lower()
+    headers = " ".join(
+        [
+            decode_mime(msg.get("To")),
+            decode_mime(msg.get("Cc")),
+            decode_mime(msg.get("Delivered-To")),
+            decode_mime(msg.get("X-Original-To")),
+        ]
+    ).lower()
+    if target in headers:
+        return True
+    # Plus-alias / body mentions
+    return target in body.lower()
+
+
 def extract_code(text: str, pattern: str) -> Optional[str]:
     # Prefer explicit "code is 123456" style matches first.
     labeled = re.search(
@@ -110,7 +128,12 @@ def iter_recent_ids(client: imaplib.IMAP4_SSL, limit: int = 25) -> list[bytes]:
     return ids[-limit:]
 
 
-def find_code_in_mailbox(client: imaplib.IMAP4_SSL, cfg: dict, not_before_epoch: float) -> Optional[str]:
+def find_code_in_mailbox(
+    client: imaplib.IMAP4_SSL,
+    cfg: dict,
+    not_before_epoch: float,
+    to_email: str = "",
+) -> Optional[str]:
     poll = cfg.get("code_poll", {})
     subject_hints = poll.get("subject_hints", [])
     from_hints = poll.get("from_hints", [])
@@ -133,13 +156,19 @@ def find_code_in_mailbox(client: imaplib.IMAP4_SSL, cfg: dict, not_before_epoch:
         if not looks_relevant(subject, sender, subject_hints, from_hints):
             continue
         body = strip_html(message_body(msg))
+        if not mentions_recipient(msg, body, to_email):
+            continue
         code = extract_code(f"{subject}\n{body}", pattern)
         if code:
             return code
     return None
 
 
-def poll_for_code(cfg: dict, not_before_epoch: Optional[float] = None) -> str:
+def poll_for_code(
+    cfg: dict,
+    not_before_epoch: Optional[float] = None,
+    to_email: str = "",
+) -> str:
     poll = cfg.get("code_poll", {})
     timeout = int(poll.get("timeout_sec", 540))
     interval = int(poll.get("interval_sec", 8))
@@ -151,7 +180,7 @@ def poll_for_code(cfg: dict, not_before_epoch: Optional[float] = None) -> str:
         client = None
         try:
             client = connect_imap(cfg)
-            code = find_code_in_mailbox(client, cfg, cutoff)
+            code = find_code_in_mailbox(client, cfg, cutoff, to_email=to_email)
             if code:
                 return code
         except imaplib.IMAP4.error as exc:
@@ -179,6 +208,11 @@ def main() -> None:
         help="Only consider messages at/after this UNIX timestamp.",
     )
     parser.add_argument(
+        "--to-email",
+        default="",
+        help="Prefer messages addressed to this signup email.",
+    )
+    parser.add_argument(
         "--once",
         action="store_true",
         help="Single mailbox scan (no polling loop).",
@@ -189,7 +223,12 @@ def main() -> None:
     if args.once:
         client = connect_imap(cfg)
         try:
-            code = find_code_in_mailbox(client, cfg, args.since_epoch or (time.time() - 600))
+            code = find_code_in_mailbox(
+                client,
+                cfg,
+                args.since_epoch or (time.time() - 600),
+                to_email=args.to_email,
+            )
         finally:
             client.logout()
         if not code:
@@ -197,7 +236,7 @@ def main() -> None:
         print(code)
         return
 
-    print(poll_for_code(cfg, args.since_epoch))
+    print(poll_for_code(cfg, args.since_epoch, to_email=args.to_email))
 
 
 if __name__ == "__main__":

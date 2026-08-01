@@ -18,6 +18,10 @@ node_modules
 /cache_forge
 # Premium Bandai signup helper secrets
 tools/pbandai-signup/config.json
+tools/pbandai-signup/task.csv
+tools/pbandai-signup/success.csv
+tools/pbandai-signup/failed.csv
+tools/pbandai-signup/current_task.json
 tools/pbandai-signup/*.log
 tools/pbandai-signup/__pycache__/
 **/__pycache__/
