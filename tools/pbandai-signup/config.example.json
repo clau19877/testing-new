@@ -8,20 +8,7 @@
   },
   "pbandai": {
     "base_url": "https://p-bandai.com/us",
-    "register_url": "https://p-bandai.com/us/register",
-    "profile": {
-      "first_name": "Alex",
-      "last_name": "Example",
-      "month": "01",
-      "day": "15",
-      "year": "1990",
-      "address1": "123 Main St",
-      "address2": "",
-      "city": "Los Angeles",
-      "state": "CA",
-      "zip": "90001",
-      "country": "United States"
-    }
+    "register_url": "https://p-bandai.com/us/register"
   },
   "grizzly": {
     "enabled": true,

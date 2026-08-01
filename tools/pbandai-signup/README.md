@@ -14,12 +14,12 @@ cp config.example.json config.json
 cp task.example.csv task.csv
 ```
 
-1. `config.json` = shared settings only  
+1. `config.json` = shared settings only (no account emails/passwords/profile)  
    - iCloud IMAP app-specific password (inbox that receives Bandai emails)  
    - GrizzlySMS API key  
-   - optional default profile (name/address) used when a CSV column is blank  
+   - site URLs (`base_url` / `register_url`)  
 
-2. `task.csv` = **one row per account** (email + password required):
+2. `task.csv` = **all account data**, one row per account (email + password required):
 
 ```csv
 email,password,first_name,last_name,month,day,year,phone,address1,address2,city,state,zip,country
