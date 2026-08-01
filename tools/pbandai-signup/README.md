@@ -5,6 +5,7 @@ Personal Safari helper for Premium Bandai USA registration:
 - CSV task queue (`task.csv` → `success.csv` / `failed.csv`)
 - human-paced UI actions (helps with Shape bot protection)
 - iCloud IMAP polling for the email authentication code
+- **GrizzlySMS** phone numbers + SMS OTP ([services](https://grizzlysms.com/services), Premium Bandai code `bvq`)
 
 ## Setup (macOS)
 
@@ -19,21 +20,24 @@ cp task.example.csv task.csv
    [appleid.apple.com](https://appleid.apple.com) → Sign-In and Security → App-Specific Passwords  
    Put it in `config.json` → `icloud.app_specific_password`.
 
-3. Edit `task.csv` with the accounts you want to create:
+3. Put your **GrizzlySMS API key** in `config.json` → `grizzly.api_key`  
+   Service defaults to `bvq` (PREMIUM BANDAI). Pick country on [grizzlysms.com/services](https://grizzlysms.com/services) and set `grizzly.country` (USA commonly `12`).
+
+4. Edit `task.csv` with the accounts you want to create:
 
 ```csv
 email,password,first_name,last_name,month,day,year,phone,address1,address2,city,state,zip,country
-you@icloud.com,ChangeMe!234,Alex,Example,01,15,1990,5551234567,123 Main St,,Los Angeles,CA,90001,United States
+you@icloud.com,ChangeMe!234,Alex,Example,01,15,1990,,123 Main St,,Los Angeles,CA,90001,United States
 ```
 
-Only `email` and `password` are required. Other columns override `config.json` profile defaults when present.
+Only `email` and `password` are required. Leave `phone` empty when GrizzlySMS is enabled (number is rented per row). Other columns override `config.json` profile defaults when present.
 
-4. Permissions / Safari:
+5. Permissions / Safari:
    - System Settings → Privacy & Security → **Accessibility** for Terminal / Script Editor
    - Automation: allow controlling **Safari** and **System Events**
    - Safari → Develop → enable **Allow JavaScript from Apple Events**
 
-5. Run:
+6. Run:
 
 ```bash
 ./run.command
@@ -51,18 +55,22 @@ Flow per row:
 
 1. Read first row from `task.csv`
 2. Run signup in Safari (humanized)
-3. Pull auth code from iCloud IMAP for that email
-4. On success → append `success.csv`, **delete row** from `task.csv`
-5. On failure → append `failed.csv`, **delete row** from `task.csv`
-6. Cool down, then continue with the next row
+3. Pull email auth code from iCloud IMAP
+4. Rent a GrizzlySMS number (`bvq`) and fill phone
+5. If an SMS/OTP screen appears, poll GrizzlySMS for the code and enter it
+6. On success → append `success.csv` (includes phone + activation_id), **delete row** from `task.csv`
+7. On failure → append `failed.csv`, cancel unused Grizzly activation, **delete row** from `task.csv`
+8. Cool down, then continue with the next row
 
 By default the script asks you to confirm Success/Failed at the end of each account (`queue.ask_confirm_success` in config).
 
-Inspect queue:
+Inspect queue / SMS helpers:
 
 ```bash
 python3 csv_queue.py --dir . count
 python3 csv_queue.py --dir . next
+python3 grizzly_sms.py balance
+python3 grizzly_sms.py rent
 ```
 
 ## Shape / anti-bot notes

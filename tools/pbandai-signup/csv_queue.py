@@ -29,8 +29,8 @@ TASK_FIELDS = [
     "country",
 ]
 
-SUCCESS_FIELDS = TASK_FIELDS + ["created_at", "note"]
-FAILED_FIELDS = TASK_FIELDS + ["failed_at", "reason"]
+SUCCESS_FIELDS = TASK_FIELDS + ["activation_id", "created_at", "note"]
+FAILED_FIELDS = TASK_FIELDS + ["activation_id", "failed_at", "reason"]
 
 
 def utc_now() -> str:
@@ -152,6 +152,12 @@ def cmd_success(args: argparse.Namespace) -> int:
         print(f"email not found in task.csv: {args.email}", file=sys.stderr)
         return 1
     payload = dict(removed)
+    if args.phone:
+        payload["phone"] = args.phone
+    if args.activation_id:
+        payload["activation_id"] = args.activation_id
+    else:
+        payload.setdefault("activation_id", "")
     payload["created_at"] = utc_now()
     payload["note"] = args.note or "created"
     append_row(args.success, SUCCESS_FIELDS, payload)
@@ -169,6 +175,12 @@ def cmd_failed(args: argparse.Namespace) -> int:
         for key in TASK_FIELDS:
             removed.setdefault(key, "")
     payload = dict(removed)
+    if args.phone:
+        payload["phone"] = args.phone
+    if args.activation_id:
+        payload["activation_id"] = args.activation_id
+    else:
+        payload.setdefault("activation_id", "")
     payload["failed_at"] = utc_now()
     payload["reason"] = args.reason or "unknown"
     append_row(args.failed, FAILED_FIELDS, payload)
@@ -192,12 +204,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("success")
     sp.add_argument("--email", required=True)
     sp.add_argument("--note", default="created")
+    sp.add_argument("--phone", default="")
+    sp.add_argument("--activation-id", default="")
     sp.set_defaults(func=cmd_success)
 
     sp = sub.add_parser("failed")
     sp.add_argument("--email", required=True)
     sp.add_argument("--password", default="")
     sp.add_argument("--reason", default="unknown")
+    sp.add_argument("--phone", default="")
+    sp.add_argument("--activation-id", default="")
     sp.set_defaults(func=cmd_failed)
 
     return p

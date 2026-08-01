@@ -3,6 +3,7 @@
   Premium Bandai USA signup helper (personal use)
   - Safari UI flow with human-like pacing (Shape-friendly)
   - iCloud IMAP auth-code retrieval via fetch_icloud_code.py
+  - GrizzlySMS phone + SMS OTP (service bvq = PREMIUM BANDAI)
 *)
 
 property toolDir : ""
@@ -12,6 +13,8 @@ property humanizeOn : true
 property currentEmail : ""
 property currentPassword : ""
 property currentTaskJSON : ""
+property currentPhone : ""
+property currentActivationId : ""
 
 on run
 	set toolDir to do shell script "cd \"$(dirname " & quoted form of (POSIX path of (path to me)) & ")\" && pwd"
@@ -41,6 +44,8 @@ on run
 		
 		set currentEmail to my taskStr("email")
 		set currentPassword to my taskStr("password")
+		set currentPhone to ""
+		set currentActivationId to ""
 		if currentEmail is "" or currentPassword is "" then error "task.csv row missing email/password"
 		
 		try
@@ -48,6 +53,7 @@ on run
 			my markSuccess(currentEmail, "created")
 			set succeeded to succeeded + 1
 		on error errMsg
+			my cancelGrizzlyIfNeeded()
 			my markFailed(currentEmail, currentPassword, errMsg)
 			set failedCount to failedCount + 1
 		end try
@@ -93,6 +99,13 @@ on processOneTask()
 	my clickButtonNamed({"SUBMIT", "Submit", "Continue", "Verify", "Authenticate"})
 	
 	my waitForEnterInformation()
+	
+	if my cfgBool("grizzly.enabled", true) then
+		my rentGrizzlyNumber()
+	else
+		set currentPhone to my taskOrCfg("phone", "pbandai.profile.phone")
+	end if
+	
 	my fillProfileIfPresent()
 	
 	-- Optional auto-continue through confirmation if buttons exist.
@@ -101,8 +114,25 @@ on processOneTask()
 		my humanPause("waiting for completion")
 	end try
 	
+	-- Phone/SMS verification step (GrizzlySMS)
+	if my cfgBool("grizzly.enabled", true) and currentActivationId is not "" then
+		if my waitForSmsScreen(25) then
+			my humanPause("waiting for SMS")
+			set smsCode to my waitGrizzlySmsCode()
+			my focusBySelectors({"input[name*='code' i]", "input[id*='code' i]", "input[autocomplete='one-time-code']", "input[type='tel']", "input[type='text']"})
+			my humanType(smsCode)
+			my humanPause("confirming SMS")
+			try
+				my clickButtonNamed({"SUBMIT", "Submit", "VERIFY", "Verify", "Authenticate", "Continue", "CONFIRM", "Confirm"})
+			end try
+			my humanPause("after SMS verify")
+		end if
+	end if
+	
 	if my cfgBool("queue.ask_confirm_success", true) then
-		set answer to button returned of (display dialog "Account for:" & return & currentEmail & return & return & "Mark this row as SUCCESS and remove it from task.csv?" buttons {"Mark Failed", "Mark Success"} default button "Mark Success")
+		set phoneLine to ""
+		if currentPhone is not "" then set phoneLine to return & "Phone: " & currentPhone
+		set answer to button returned of (display dialog "Account for:" & return & currentEmail & phoneLine & return & return & "Mark this row as SUCCESS and remove it from task.csv?" buttons {"Mark Failed", "Mark Success"} default button "Mark Success")
 		if answer is "Mark Failed" then error "Marked failed by user"
 	else
 		if not my pageLooksSuccessful() then
@@ -121,16 +151,55 @@ on pageLooksSuccessful()
 end pageLooksSuccessful
 
 on markSuccess(emailAddr, noteText)
-	do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " success --email " & quoted form of emailAddr & " --note " & quoted form of noteText
+	do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " success --email " & quoted form of emailAddr & " --note " & quoted form of noteText & " --phone " & quoted form of currentPhone & " --activation-id " & quoted form of currentActivationId
 end markSuccess
 
 on markFailed(emailAddr, passText, reasonText)
 	set safeReason to my replaceText(reasonText, return, " ")
 	set safeReason to my replaceText(safeReason, linefeed, " ")
 	try
-		do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " failed --email " & quoted form of emailAddr & " --password " & quoted form of passText & " --reason " & quoted form of safeReason
+		do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " failed --email " & quoted form of emailAddr & " --password " & quoted form of passText & " --reason " & quoted form of safeReason & " --phone " & quoted form of currentPhone & " --activation-id " & quoted form of currentActivationId
 	end try
 end markFailed
+
+on rentGrizzlyNumber()
+	set raw to do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/grizzly_sms.py") & " --config " & quoted form of configPath & " rent"
+	set currentActivationId to my jsonField(raw, "activation_id")
+	set fullPhone to my jsonField(raw, "phone")
+	set formPhone to my jsonField(raw, "phone_form")
+	if formPhone is "" then set formPhone to fullPhone
+	set currentPhone to formPhone
+	if currentActivationId is "" or currentPhone is "" then error "GrizzlySMS rent returned empty phone/activation id: " & raw
+	my humanPause("got virtual number")
+end rentGrizzlyNumber
+
+on waitGrizzlySmsCode()
+	if currentActivationId is "" then error "No GrizzlySMS activation id"
+	return do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/grizzly_sms.py") & " --config " & quoted form of configPath & " wait --id " & quoted form of currentActivationId
+end waitGrizzlySmsCode
+
+on cancelGrizzlyIfNeeded()
+	if currentActivationId is "" then return
+	try
+		do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/grizzly_sms.py") & " --config " & quoted form of configPath & " cancel --id " & quoted form of currentActivationId
+	end try
+end cancelGrizzlyIfNeeded
+
+on waitForSmsScreen(maxTries)
+	repeat maxTries times
+		try
+			set r to my safariJS("(function(){ const t=(document.body&&document.body.innerText)||''; return /SMS|phone verification|authentication code|verification code|confirm code|one-time|OTP/i.test(t) ? 'yes':'no'; })()")
+			if r is "yes" then return true
+		end try
+		delay 0.5
+	end repeat
+	return false
+end waitForSmsScreen
+
+on jsonField(jsonText, keyName)
+	set py to "import json,sys; d=json.loads(sys.argv[1]); print((d.get(sys.argv[2],'') or ''))"
+	return do shell script "/usr/bin/python3 -c " & quoted form of py & " " & quoted form of jsonText & " " & quoted form of keyName
+end jsonField
 
 
 (* ===== Config ===== *)
@@ -368,12 +437,15 @@ end waitForEnterInformation
 on fillProfileIfPresent()
 	set passText to currentPassword
 	if passText is "" then set passText to my cfgStrDefault("pbandai.password", "")
+	set phoneText to currentPhone
+	if phoneText is "" then set phoneText to my taskOrCfg("phone", "pbandai.profile.phone")
 	my tryFillLabelled("First Name", my taskOrCfg("first_name", "pbandai.profile.first_name"))
 	my tryFillLabelled("Last Name", my taskOrCfg("last_name", "pbandai.profile.last_name"))
 	my tryFillLabelled("Password", passText)
 	my tryFillLabelled("Confirm Password", passText)
-	my tryFillLabelled("Phone", my taskOrCfg("phone", "pbandai.profile.phone"))
-	my tryFillLabelled("Mobile", my taskOrCfg("phone", "pbandai.profile.phone"))
+	my tryFillLabelled("Phone", phoneText)
+	my tryFillLabelled("Mobile", phoneText)
+	my tryFillLabelled("Telephone", phoneText)
 	my tryFillLabelled("Zip", my taskOrCfg("zip", "pbandai.profile.zip"))
 	my tryFillLabelled("Postal", my taskOrCfg("zip", "pbandai.profile.zip"))
 	my tryFillLabelled("Address", my taskOrCfg("address1", "pbandai.profile.address1"))

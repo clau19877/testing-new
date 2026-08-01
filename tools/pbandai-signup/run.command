@@ -4,7 +4,9 @@ cd "$(dirname "$0")"
 
 if [[ ! -f config.json ]]; then
   echo "Missing config.json"
-  echo "Copy config.example.json to config.json and fill in your iCloud IMAP settings / default profile."
+  echo "Copy config.example.json to config.json and fill in:"
+  echo "  - iCloud IMAP settings"
+  echo "  - GrizzlySMS api_key (service bvq = PREMIUM BANDAI)"
   exit 1
 fi
 
@@ -30,8 +32,20 @@ try:
     print("iCloud IMAP: OK")
 except Exception as e:
     print(f"iCloud IMAP login failed: {e}", file=sys.stderr)
-    print("Create an app-specific password at https://appleid.apple.com (Sign-In and Security → App-Specific Passwords).", file=sys.stderr)
+    print("Create an app-specific password at https://appleid.apple.com", file=sys.stderr)
     sys.exit(1)
+
+g = cfg.get("grizzly") or {}
+if g.get("enabled", True):
+    if not g.get("api_key") or g.get("api_key") == "YOUR_GRIZZLYSMS_API_KEY":
+        print("Set grizzly.api_key in config.json (from https://grizzlysms.com/services)", file=sys.stderr)
+        sys.exit(1)
+    import subprocess
+    out = subprocess.check_output(
+        ["/usr/bin/python3", "grizzly_sms.py", "--config", "config.json", "balance"],
+        text=True,
+    ).strip()
+    print(f"GrizzlySMS: {out} (service={g.get('service','bvq')} country={g.get('country',12)})")
 PY
 
 pending="$(python3 csv_queue.py --dir . count)"

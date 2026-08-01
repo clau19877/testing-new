@@ -17,7 +17,7 @@
       "month": "01",
       "day": "15",
       "year": "1990",
-      "phone": "5551234567",
+      "phone": "",
       "address1": "123 Main St",
       "address2": "",
       "city": "Los Angeles",
@@ -25,6 +25,18 @@
       "zip": "90001",
       "country": "United States"
     }
+  },
+  "grizzly": {
+    "enabled": true,
+    "api_key": "YOUR_GRIZZLYSMS_API_KEY",
+    "base_url": "https://api.grizzlysms.com",
+    "service": "bvq",
+    "country": 12,
+    "country_dial": "1",
+    "max_price": null,
+    "phone_format": "national",
+    "timeout_sec": 180,
+    "interval_sec": 5
   },
   "humanize": {
     "enabled": true,
