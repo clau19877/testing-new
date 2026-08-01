@@ -13,6 +13,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
+import signup_log
+
 
 DEFAULT_CONFIG = Path(__file__).with_name("config.json")
 DEFAULT_BASE = "https://api.grizzlysms.com"
@@ -22,9 +24,20 @@ DEFAULT_SERVICE = "bvq"
 DEFAULT_COUNTRY = 12
 
 
+def die(message: str, *, step: str = "grizzly", activation_id: str = "", phone: str = "") -> None:
+    signup_log.log_error(
+        message,
+        source="grizzly_sms",
+        step=step,
+        activation_id=activation_id,
+        phone=phone,
+    )
+    raise SystemExit(message)
+
+
 def load_config(path: Path) -> dict:
     if not path.exists():
-        raise SystemExit(f"Missing config: {path}")
+        die(f"Missing config: {path}", step="load_config")
     return json.loads(path.read_text(encoding="utf-8"))
 
 

@@ -73,6 +73,25 @@ python3 grizzly_sms.py balance
 python3 grizzly_sms.py rent
 ```
 
+## Error logging
+
+Every failure is recorded for later improvement:
+
+| File | Contents |
+|---|---|
+| `logs/errors.jsonl` | Structured ERROR records (one JSON object per line) |
+| `logs/signup.log` | Human-readable INFO + ERROR trail |
+
+Each error includes timestamp, step name (e.g. `fetch_icloud_code`, `grizzly_rent`), email, phone, activation id, and message.
+
+```bash
+# latest errors
+python3 signup_log.py tail-errors -n 20
+
+# manual note
+python3 signup_log.py write --level ERROR --step manual --message "Shape challenge appeared"
+```
+
 ## Shape / anti-bot notes
 
 Humanization knobs in `config.json` → `humanize`:

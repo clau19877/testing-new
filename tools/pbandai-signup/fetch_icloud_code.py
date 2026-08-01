@@ -15,15 +15,22 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
+import signup_log
+
 
 DEFAULT_CONFIG = Path(__file__).with_name("config.json")
 
 
+def die(message: str, *, step: str = "icloud", to_email: str = "") -> None:
+    signup_log.log_error(message, source="fetch_icloud_code", step=step, email=to_email)
+    raise SystemExit(message)
+
+
 def load_config(path: Path) -> dict:
     if not path.exists():
-        raise SystemExit(
-            f"Missing config: {path}\n"
-            f"Copy config.example.json to config.json and fill in your iCloud app password."
+        die(
+            f"Missing config: {path}. Copy config.example.json to config.json and fill in your iCloud app password.",
+            step="load_config",
         )
     with path.open(encoding="utf-8") as fh:
         return json.load(fh)

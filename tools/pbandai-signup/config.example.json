@@ -57,6 +57,10 @@
     "cooldown_min_sec": 8,
     "cooldown_max_sec": 20
   },
+  "logging": {
+    "enabled": true,
+    "dir": "logs"
+  },
   "code_poll": {
     "timeout_sec": 540,
     "interval_sec": 8,

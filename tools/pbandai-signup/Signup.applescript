@@ -29,6 +29,7 @@ on run
 	set humanizeOn to my cfgBool("humanize.enabled", true)
 	
 	do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " init"
+	my logInfo("Queue run started", "queue_start")
 	
 	set processed to 0
 	set succeeded to 0
@@ -38,23 +39,30 @@ on run
 		set taskCount to (do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " count") as integer
 		if taskCount ≤ 0 then exit repeat
 		
-		set currentTaskJSON to do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " next"
-		if currentTaskJSON is "{}" then exit repeat
-		if currentTaskJSON contains "\"error\"" then error "task.csv next failed: " & currentTaskJSON
-		
-		set currentEmail to my taskStr("email")
-		set currentPassword to my taskStr("password")
-		set currentPhone to ""
-		set currentActivationId to ""
-		if currentEmail is "" or currentPassword is "" then error "task.csv row missing email/password"
-		
 		try
+			set currentTaskJSON to do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " next"
+			if currentTaskJSON is "{}" then exit repeat
+			if currentTaskJSON contains "\"error\"" then error "task.csv next failed: " & currentTaskJSON
+			
+			set currentEmail to my taskStr("email")
+			set currentPassword to my taskStr("password")
+			set currentPhone to ""
+			set currentActivationId to ""
+			if currentEmail is "" or currentPassword is "" then error "task.csv row missing email/password"
+			my logInfo("Starting task", "task_start")
+			
 			my processOneTask()
 			my markSuccess(currentEmail, "created")
+			my logInfo("Task succeeded", "task_success")
 			set succeeded to succeeded + 1
 		on error errMsg
+			my logError(errMsg, "task_failed")
 			my cancelGrizzlyIfNeeded()
-			my markFailed(currentEmail, currentPassword, errMsg)
+			try
+				my markFailed(currentEmail, currentPassword, errMsg)
+			on error markErr
+				my logError("markFailed also failed: " & markErr, "mark_failed")
+			end try
 			set failedCount to failedCount + 1
 		end try
 		
@@ -67,65 +75,125 @@ on run
 		end if
 	end repeat
 	
+	my logInfo("Queue finished processed=" & processed & " success=" & succeeded & " failed=" & failedCount, "queue_end")
 	display notification "Done. success=" & succeeded & " failed=" & failedCount with title "Premium Bandai Signup"
-	display dialog "Queue finished." & return & return & "Processed: " & processed & return & "Success: " & succeeded & " → success.csv" & return & "Failed: " & failedCount & " → failed.csv" & return & "Remaining in task.csv: " & (do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " count") buttons {"OK"} default button 1
+	display dialog "Queue finished." & return & return & "Processed: " & processed & return & "Success: " & succeeded & " → success.csv" & return & "Failed: " & failedCount & " → failed.csv" & return & "Errors: logs/errors.jsonl" & return & "Remaining in task.csv: " & (do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " count") buttons {"OK"} default button 1
 end run
 
 on processOneTask()
-	my ensureSafariFront()
+	try
+		my ensureSafariFront()
+	on error errMsg
+		my failStep("safari_ready", errMsg)
+	end try
+	
 	if my cfgBool("humanize.warmup_browse", true) then
-		my humanWarmup()
+		try
+			my humanWarmup()
+		on error errMsg
+			my failStep("warmup_browse", errMsg)
+		end try
 	end if
 	
-	my openRegisterPage()
+	try
+		my openRegisterPage()
+	on error errMsg
+		my failStep("open_register", errMsg)
+	end try
 	my humanPause("reading age gate")
-	my clickAgeOver18()
+	
+	try
+		my clickAgeOver18()
+	on error errMsg
+		my failStep("age_gate", errMsg)
+	end try
 	my humanPause("looking at signup options")
 	
-	my focusBySelectors({"input[type='email']", "input[name*='mail' i]", "input[id*='mail' i]"})
-	my humanType(currentEmail)
+	try
+		my focusBySelectors({"input[type='email']", "input[name*='mail' i]", "input[id*='mail' i]"})
+		my humanType(currentEmail)
+	on error errMsg
+		my failStep("email_entry", errMsg)
+	end try
 	my humanPause("checking email")
 	
 	set submitEpoch to (do shell script "date +%s") as real
-	my clickButtonNamed({"SUBMIT", "Submit", "Continue", "NEXT", "Next"})
-	my waitForAuthCodeScreen()
+	try
+		my clickButtonNamed({"SUBMIT", "Submit", "Continue", "NEXT", "Next"})
+		my waitForAuthCodeScreen()
+	on error errMsg
+		my failStep("email_submit", errMsg)
+	end try
 	my humanPause("waiting for inbox")
 	
-	set authCode to my fetchICloudCode(submitEpoch, currentEmail)
+	set authCode to ""
+	try
+		set authCode to my fetchICloudCode(submitEpoch, currentEmail)
+	on error errMsg
+		my failStep("fetch_icloud_code", errMsg)
+	end try
 	my humanPause("reading code email")
-	my focusBySelectors({"input[name*='code' i]", "input[id*='code' i]", "input[autocomplete='one-time-code']", "input[type='tel']", "input[type='text']"})
-	my humanType(authCode)
-	my humanPause("confirming code")
-	my clickButtonNamed({"SUBMIT", "Submit", "Continue", "Verify", "Authenticate"})
 	
-	my waitForEnterInformation()
+	try
+		my focusBySelectors({"input[name*='code' i]", "input[id*='code' i]", "input[autocomplete='one-time-code']", "input[type='tel']", "input[type='text']"})
+		my humanType(authCode)
+		my humanPause("confirming code")
+		my clickButtonNamed({"SUBMIT", "Submit", "Continue", "Verify", "Authenticate"})
+	on error errMsg
+		my failStep("email_code_submit", errMsg)
+	end try
+	
+	try
+		my waitForEnterInformation()
+	on error errMsg
+		my failStep("wait_enter_information", errMsg)
+	end try
 	
 	if my cfgBool("grizzly.enabled", true) then
-		my rentGrizzlyNumber()
+		try
+			my rentGrizzlyNumber()
+		on error errMsg
+			my failStep("grizzly_rent", errMsg)
+		end try
 	else
 		set currentPhone to my taskOrCfg("phone", "pbandai.profile.phone")
 	end if
 	
-	my fillProfileIfPresent()
+	try
+		my fillProfileIfPresent()
+	on error errMsg
+		my failStep("fill_profile", errMsg)
+	end try
 	
 	-- Optional auto-continue through confirmation if buttons exist.
 	try
 		my clickButtonNamed({"CONTINUE", "Continue", "CONFIRM", "Confirm", "REGISTER", "Register", "SUBMIT", "Submit"})
 		my humanPause("waiting for completion")
+	on error contErr
+		my logInfo("Continue/confirm button not clicked: " & contErr, "profile_continue_optional")
 	end try
 	
 	-- Phone/SMS verification step (GrizzlySMS)
 	if my cfgBool("grizzly.enabled", true) and currentActivationId is not "" then
 		if my waitForSmsScreen(25) then
 			my humanPause("waiting for SMS")
-			set smsCode to my waitGrizzlySmsCode()
-			my focusBySelectors({"input[name*='code' i]", "input[id*='code' i]", "input[autocomplete='one-time-code']", "input[type='tel']", "input[type='text']"})
-			my humanType(smsCode)
-			my humanPause("confirming SMS")
+			set smsCode to ""
 			try
+				set smsCode to my waitGrizzlySmsCode()
+			on error errMsg
+				my failStep("grizzly_wait_sms", errMsg)
+			end try
+			try
+				my focusBySelectors({"input[name*='code' i]", "input[id*='code' i]", "input[autocomplete='one-time-code']", "input[type='tel']", "input[type='text']"})
+				my humanType(smsCode)
+				my humanPause("confirming SMS")
 				my clickButtonNamed({"SUBMIT", "Submit", "VERIFY", "Verify", "Authenticate", "Continue", "CONFIRM", "Confirm"})
+			on error errMsg
+				my failStep("sms_code_submit", errMsg)
 			end try
 			my humanPause("after SMS verify")
+		else
+			my logInfo("No SMS screen detected after profile continue", "sms_screen_missing")
 		end if
 	end if
 	
@@ -133,13 +201,36 @@ on processOneTask()
 		set phoneLine to ""
 		if currentPhone is not "" then set phoneLine to return & "Phone: " & currentPhone
 		set answer to button returned of (display dialog "Account for:" & return & currentEmail & phoneLine & return & return & "Mark this row as SUCCESS and remove it from task.csv?" buttons {"Mark Failed", "Mark Success"} default button "Mark Success")
-		if answer is "Mark Failed" then error "Marked failed by user"
+		if answer is "Mark Failed" then
+			my failStep("user_confirm", "Marked failed by user")
+		end if
 	else
 		if not my pageLooksSuccessful() then
-			error "Could not confirm success page automatically"
+			my failStep("auto_confirm", "Could not confirm success page automatically")
 		end if
 	end if
 end processOneTask
+
+on failStep(stepName, errMsg)
+	my logError(errMsg, stepName)
+	error errMsg
+end failStep
+
+on logError(messageText, stepName)
+	set safeMsg to my replaceText(messageText, return, " ")
+	set safeMsg to my replaceText(safeMsg, linefeed, " ")
+	try
+		do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/signup_log.py") & " write --level ERROR --source applescript --step " & quoted form of stepName & " --email " & quoted form of currentEmail & " --phone " & quoted form of currentPhone & " --activation-id " & quoted form of currentActivationId & " --message " & quoted form of safeMsg
+	end try
+end logError
+
+on logInfo(messageText, stepName)
+	set safeMsg to my replaceText(messageText, return, " ")
+	set safeMsg to my replaceText(safeMsg, linefeed, " ")
+	try
+		do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/signup_log.py") & " write --level INFO --source applescript --step " & quoted form of stepName & " --email " & quoted form of currentEmail & " --phone " & quoted form of currentPhone & " --activation-id " & quoted form of currentActivationId & " --message " & quoted form of safeMsg
+	end try
+end logInfo
 
 on pageLooksSuccessful()
 	try

@@ -23,6 +23,7 @@ tools/pbandai-signup/success.csv
 tools/pbandai-signup/failed.csv
 tools/pbandai-signup/current_task.json
 tools/pbandai-signup/*.log
+tools/pbandai-signup/logs/
 tools/pbandai-signup/__pycache__/
 **/__pycache__/
 *.pyc
