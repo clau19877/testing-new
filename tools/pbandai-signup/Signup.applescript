@@ -498,7 +498,7 @@ end waitForAppMounted
 on dismissCookieBanner()
 	-- OneTrust cookie consent banner can overlay the page and block clicks.
 	try
-		set js to "(function(){ const sels=['#onetrust-accept-btn-handler','#onetrust-reject-all-handler','.onetrust-close-btn-handler']; for (const s of sels){ const el=document.querySelector(s); if(el && el.offsetParent!==null){ el.click(); return 'ok:'+s; } } return 'none'; })()"
+		set js to "(function(){ const sels=['#onetrust-accept-btn-handler','#onetrust-reject-all-handler','.onetrust-close-btn-handler','#close-pc-btn-handler']; for (const s of sels){ const el=document.querySelector(s); if(el && el.offsetParent!==null){ el.click(); return 'ok:'+s; } } return 'none'; })()"
 		set r to my safariJS(js)
 		if r starts with "ok" then delay (my randBetween(300, 700) / 1000)
 	end try
@@ -584,10 +584,15 @@ on fillProfileIfPresent()
 	if passText is "" then error "task.csv row missing password"
 	set phoneText to currentPhone
 	if phoneText is "" then set phoneText to my taskStr("phone")
+	set isoCode to my countryToISO2(my taskStr("country"))
+	set genderVal to my taskStr("gender")
+	if genderVal is "" then set genderVal to "NotSelected"
 	my tryFillLabelled("First Name", my taskStr("first_name"))
 	my tryFillLabelled("Last Name", my taskStr("last_name"))
-	my tryFillLabelled("Password", passText)
-	my tryFillLabelled("Confirm Password", passText)
+	-- "Area" (home country) and "International Dialing Code" are <select> dropdowns
+	-- on the real ENTER INFORMATION screen; both accept the same 2-letter ISO code.
+	my tryFillLabelled("Area", isoCode)
+	my tryFillLabelled("International Dialing Code", isoCode)
 	my tryFillLabelled("Phone", phoneText)
 	my tryFillLabelled("Mobile", phoneText)
 	my tryFillLabelled("Telephone", phoneText)
@@ -599,6 +604,10 @@ on fillProfileIfPresent()
 	my tryFillLabelled("Month", my taskStr("month"))
 	my tryFillLabelled("Day", my taskStr("day"))
 	my tryFillLabelled("Year", my taskStr("year"))
+	my selectRadioByValue("gender", genderVal)
+	my tryFillLabelled("Password", passText)
+	my tryFillLabelled("Confirm Password", passText)
+	my checkRequiredAgreement()
 	my humanPause("reviewing profile")
 	my humanScroll()
 end fillProfileIfPresent
@@ -618,6 +627,49 @@ on tryFillLabelled(labelText, valueText)
 		end if
 	end try
 end tryFillLabelled
+
+on selectRadioByValue(groupName, valueText)
+	if valueText is "" then return
+	set safeGroup to my escapeJS(groupName)
+	set safeValue to my escapeJS(valueText)
+	set js to "(function(){ const group='" & safeGroup & "'; const value='" & safeValue & "'; const radios=[...document.getElementsByName(group)].filter(el=>el.type==='radio'); const hit=radios.find(r=>(r.value||'').toLowerCase()===value.toLowerCase()); if(!hit) return 'missing'; hit.scrollIntoView({block:'center'}); hit.click(); hit.checked=true; hit.dispatchEvent(new Event('change',{bubbles:true})); hit.dispatchEvent(new Event('input',{bubbles:true})); return 'ok'; })()"
+	try
+		set r to my safariJS(js)
+		if r is "ok" then my humanPause("selected " & groupName)
+	end try
+end selectRadioByValue
+
+on checkRequiredAgreement()
+	try
+		set js to "(function(){ const el=document.querySelector('input.inputCheckRequired[type=checkbox]') || document.querySelector('input[name=checkRequired]'); if(!el) return 'missing'; if(!el.checked){ el.scrollIntoView({block:'center'}); el.click(); el.checked=true; el.dispatchEvent(new Event('change',{bubbles:true})); } return 'ok'; })()"
+		set r to my safariJS(js)
+		if r is "ok" then my humanPause("agreeing to terms")
+	end try
+end checkRequiredAgreement
+
+on countryToISO2(countryText)
+	set t to my toLowerAS(countryText)
+	if t is "" then return "US"
+	if t is in {"us", "usa", "u.s.a.", "united states", "united states of america", "america"} then return "US"
+	if t is in {"ca", "canada"} then return "CA"
+	return "US"
+end countryToISO2
+
+on toLowerAS(t)
+	set lc to "abcdefghijklmnopqrstuvwxyz"
+	set uc to "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	set outText to ""
+	repeat with ch in t
+		set c to ch as text
+		set idx to offset of c in uc
+		if idx > 0 then
+			set outText to outText & character idx of lc
+		else
+			set outText to outText & c
+		end if
+	end repeat
+	return outText
+end toLowerAS
 
 on fetchICloudCode(sinceEpoch, toEmail)
 	set py to toolDir & "/fetch_icloud_code.py"

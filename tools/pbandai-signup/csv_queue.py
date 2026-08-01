@@ -19,6 +19,7 @@ TASK_FIELDS = [
     "password",
     "first_name",
     "last_name",
+    "gender",
     "month",
     "day",
     "year",

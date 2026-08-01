@@ -22,13 +22,31 @@ cp task.example.csv task.csv
 2. `task.csv` = **all account data**, one row per account (email + password required):
 
 ```csv
-email,password,first_name,last_name,month,day,year,phone,address1,address2,city,state,zip,country
-account1@icloud.com,PassOne!234,Alex,Example,01,15,1990,,123 Main St,,Los Angeles,CA,90001,United States
-account2@icloud.com,PassTwo!234,Sam,Example,03,22,1992,,123 Main St,,Los Angeles,CA,90001,United States
-account3@icloud.com,PassThree!234,Jordan,Example,07,08,1995,,123 Main St,,Los Angeles,CA,90001,United States
+email,password,first_name,last_name,gender,month,day,year,phone,address1,address2,city,state,zip,country
+account1@icloud.com,Bnd4iFn7Kp,Alex,Example,NotSelected,1,15,1990,,123 Main St,,Los Angeles,CA,90001,United States
+account2@icloud.com,Xq9wLm2Vhz,Sam,Example,NotSelected,3,22,1992,,123 Main St,,Los Angeles,CA,90001,United States
+account3@icloud.com,Rt5cWk8Ndp,Jordan,Example,NotSelected,7,8,1995,,123 Main St,,Los Angeles,CA,90001,United States
 ```
 
 Leave `phone` empty when GrizzlySMS is enabled (a number is rented per row).
+
+`gender` accepts (case-insensitive, matches the site's own radio values): `Male`, `Female`, `NotApplicable` (Non-binary), `NotSelected` (Prefer not to say). It's **required** by the real form and defaults to `NotSelected` if left blank.
+
+### Password rules (from the live site)
+
+The real ENTER INFORMATION screen enforces:
+- 8–20 characters
+- No character repeated 3+ times in a row
+- No 3+ sequential characters (e.g. `abc`, `321`)
+- At least 3 of: uppercase, lowercase, digits, symbols (allowed symbols: `` ` ~ ! @ # $ % ^ & * ( ) _ - . ' ``)
+
+Pick passwords that satisfy these — something like `Pass1234` would be rejected (`234` is a sequential run).
+
+### What the ENTER INFORMATION screen actually asks for
+
+Inspecting the live form: First/Last Name, an "Area" country dropdown (Canada/US), an "International Dialing Code" dropdown + Phone Number, Date of Birth, Gender (radio, required), Password, and a required Terms of Use checkbox. There is **no** street address / city / zip field at this step — `address1`/`address2`/`city`/`state`/`zip` columns are kept for forward-compatibility and are harmless no-ops if the site doesn't render them.
+
+`country` in `task.csv` drives both the "Area" and "International Dialing Code" dropdowns (mapped to a 2-letter ISO code, default `US`). The required Terms of Use checkbox is checked automatically.
 
 3. Safari permissions:
    - Accessibility for Terminal / Script Editor
