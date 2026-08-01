@@ -480,13 +480,25 @@ on ensureSafariFront()
 	delay 0.6
 end ensureSafariFront
 
+on ensureSafariDocument()
+	-- The Safari window/tab can disappear mid-run (manually closed, crash
+	-- recovery, a security prompt consuming it, etc.). Recreate one before
+	-- any operation that references "document 1", instead of failing with
+	-- a cryptic "could not get document 1" error.
+	tell application "Safari"
+		if (count of windows) is 0 then make new document
+	end tell
+end ensureSafariDocument
+
 on safariJS(jsText)
+	my ensureSafariDocument()
 	tell application "Safari"
 		return do JavaScript jsText in document 1
 	end tell
 end safariJS
 
 on openURL(u)
+	my ensureSafariDocument()
 	tell application "Safari"
 		activate
 		set URL of document 1 to u
