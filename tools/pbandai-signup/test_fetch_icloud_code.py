@@ -8,6 +8,7 @@ from fetch_icloud_code import (
     decode_mime,
     explain_imap_failure,
     extract_code,
+    extract_rfc822_bytes,
     looks_relevant,
     mentions_recipient,
     message_body,
@@ -96,6 +97,38 @@ class FetchCodeTests(unittest.TestCase):
 
         code = extract_code(f"{subject}\n{body}", r"\b(\d{4,8})\b")
         self.assertEqual(code, "387402")
+
+    def test_extract_rfc822_bytes_normal_order(self):
+        data = [(b"123 (RFC822 {42}", b"raw message bytes"), b")"]
+        self.assertEqual(extract_rfc822_bytes(data), b"raw message bytes")
+
+    def test_extract_rfc822_bytes_with_interleaved_flags_update(self):
+        # Reproduces a real crash: an automatic \Seen flag update sent as its
+        # own plain-bytes entry ordered BEFORE the literal. Naively indexing
+        # data[0][1] would index into these bytes and return an int, causing
+        # AttributeError: 'int' object has no attribute 'decode'.
+        data = [b"123 (FLAGS (\\Seen))", (b"123 (RFC822 {42}", b"raw message bytes")]
+        self.assertEqual(extract_rfc822_bytes(data), b"raw message bytes")
+
+    def test_extract_rfc822_bytes_plain_bytes_no_tuple(self):
+        # Real iCloud IMAP responses (confirmed live against a real mailbox)
+        # return the whole message as a single plain bytes entry, not a
+        # tuple at all. The original bug indexed data[0][1] assuming a
+        # tuple, which on real bytes returns an int (AttributeError on
+        # .decode()) instead of the message content.
+        data = [b"From: a@b.com\r\nSubject: hi\r\n\r\nbody"]
+        self.assertEqual(extract_rfc822_bytes(data), b"From: a@b.com\r\nSubject: hi\r\n\r\nbody")
+
+    def test_extract_rfc822_bytes_prefers_longest_when_no_tuple(self):
+        data = [b"123 (FLAGS (\\Seen))", b"From: a@b.com\r\nSubject: hi\r\n\r\nbody, much longer than the flags line"]
+        self.assertEqual(
+            extract_rfc822_bytes(data),
+            b"From: a@b.com\r\nSubject: hi\r\n\r\nbody, much longer than the flags line",
+        )
+
+    def test_extract_rfc822_bytes_empty(self):
+        self.assertIsNone(extract_rfc822_bytes([]))
+        self.assertIsNone(extract_rfc822_bytes([None]))
 
 
 if __name__ == "__main__":

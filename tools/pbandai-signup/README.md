@@ -143,6 +143,12 @@ python3 grizzly_sms.py balance
 python3 signup_log.py tail-errors -n 20
 ```
 
+## Confirmed fixes from real-world testing
+
+- **Empty message content on some iCloud accounts**: the legacy `FETCH (RFC822)` IMAP command returns genuinely empty content (`* n FETCH ()`) on some real iCloud accounts, even though the message exists and has real content. Switched to `FETCH (BODY.PEEK[])` (the modern IMAP4rev1 equivalent, confirmed working end-to-end against a real 1600-message mailbox) — also better behaved since `.PEEK` avoids marking scanned messages as read.
+- **Long-running shell calls could be aborted early**: `fetchICloudCode` and the GrizzlySMS SMS wait can legitimately run for minutes, longer than AppleScript's default 2-minute Apple Event timeout. Both are now wrapped in explicit `with timeout of ...` blocks.
+- Added `extract_rfc822_bytes()` to robustly parse whatever shape an IMAP FETCH response comes back in (plain bytes vs. tuple-literal, and tolerant of an interleaved flag-update response) instead of assuming a fixed shape.
+
 ## IMAP troubleshooting
 
 If setup fails with an iCloud IMAP error, run the diagnostic directly for a clear explanation instead of a raw error:

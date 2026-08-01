@@ -235,6 +235,28 @@ def iter_recent_ids(client: imaplib.IMAP4_SSL, limit: int = 25) -> list[bytes]:
     return ids[-limit:]
 
 
+def extract_rfc822_bytes(data: list) -> Optional[bytes]:
+    """Find the RFC822 message bytes within an IMAP FETCH response.
+
+    imaplib's `data` shape isn't guaranteed: some servers/parses represent a
+    fetched literal as a (info_line, literal_bytes) tuple; iCloud's real
+    responses (confirmed live) instead return the whole message as a single
+    plain bytes entry — no tuple at all. Servers can also interleave an
+    unrelated untagged response (e.g. an automatic \\Seen flag update, sent
+    as its own short plain-bytes entry) before or after the real content.
+    Blindly indexing data[0] can grab the wrong entry in either shape.
+    """
+    for item in data:
+        if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[1], bytes):
+            return item[1]
+    byte_items = [item for item in data if isinstance(item, bytes) and item]
+    if byte_items:
+        # The real message body is virtually always far longer than a short
+        # status line like b'123 (FLAGS (\\Seen))'.
+        return max(byte_items, key=len)
+    return None
+
+
 def find_code_in_mailbox(
     client: imaplib.IMAP4_SSL,
     cfg: dict,
@@ -247,27 +269,45 @@ def find_code_in_mailbox(
     pattern = poll.get("code_regex", r"\b(\d{4,8})\b")
 
     for msg_id in reversed(iter_recent_ids(client)):
-        typ, data = client.fetch(msg_id, "(RFC822)")
-        if typ != "OK" or not data or not data[0]:
+        try:
+            # Some IMAP servers (confirmed on real iCloud accounts) return an
+            # empty response for the legacy "(RFC822)" fetch item while the
+            # modern IMAP4rev1 "(BODY.PEEK[])" works fine and returns the
+            # full message without marking it \Seen.
+            typ, data = client.fetch(msg_id, "(BODY.PEEK[])")
+            if typ != "OK" or not data:
+                continue
+            raw = extract_rfc822_bytes(data)
+            if raw is None:
+                continue
+            msg = email.message_from_bytes(raw)
+            subject = decode_mime(msg.get("Subject"))
+            sender = decode_mime(msg.get("From"))
+            date_hdr = msg.get("Date")
+            if date_hdr:
+                try:
+                    if parsedate_to_datetime(date_hdr).timestamp() < not_before_epoch - 30:
+                        continue
+                except (TypeError, ValueError, IndexError, OverflowError):
+                    pass
+            if not looks_relevant(subject, sender, subject_hints, from_hints):
+                continue
+            body = strip_html(message_body(msg))
+            if not mentions_recipient(msg, body, to_email):
+                continue
+            code = extract_code(f"{subject}\n{body}", pattern)
+            if code:
+                return code
+        except (imaplib.IMAP4.error, OSError, socket.timeout):
+            raise
+        except Exception as exc:  # noqa: BLE001 - one bad message must not kill the whole scan
+            signup_log.log_error(
+                f"Skipping unparseable message {msg_id!r}: {type(exc).__name__}: {exc}",
+                source="fetch_icloud_code",
+                step="mailbox_scan_skip",
+                email=to_email,
+            )
             continue
-        msg = email.message_from_bytes(data[0][1])
-        subject = decode_mime(msg.get("Subject"))
-        sender = decode_mime(msg.get("From"))
-        date_hdr = msg.get("Date")
-        if date_hdr:
-            try:
-                if parsedate_to_datetime(date_hdr).timestamp() < not_before_epoch - 30:
-                    continue
-            except (TypeError, ValueError, IndexError, OverflowError):
-                pass
-        if not looks_relevant(subject, sender, subject_hints, from_hints):
-            continue
-        body = strip_html(message_body(msg))
-        if not mentions_recipient(msg, body, to_email):
-            continue
-        code = extract_code(f"{subject}\n{body}", pattern)
-        if code:
-            return code
     return None
 
 

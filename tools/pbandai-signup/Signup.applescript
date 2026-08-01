@@ -308,7 +308,12 @@ end rentGrizzlyNumber
 
 on waitGrizzlySmsCode()
 	if currentActivationId is "" then error "No GrizzlySMS activation id"
-	return do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/grizzly_sms.py") & " --config " & quoted form of configPath & " wait --id " & quoted form of currentActivationId
+	-- Same rationale as fetchICloudCode: this can run up to
+	-- grizzly.timeout_sec, well past AppleScript's default 2-minute
+	-- Apple Event timeout.
+	with timeout of 600 seconds
+		return do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/grizzly_sms.py") & " --config " & quoted form of configPath & " wait --id " & quoted form of currentActivationId
+	end timeout
 end waitGrizzlySmsCode
 
 on cancelGrizzlyIfNeeded()
@@ -683,8 +688,13 @@ end toLowerAS
 on fetchICloudCode(sinceEpoch, toEmail)
 	set py to toolDir & "/fetch_icloud_code.py"
 	set cmd to "/usr/bin/python3 " & quoted form of py & " --config " & quoted form of configPath & " --since-epoch " & quoted form of sinceEpoch & " --to-email " & quoted form of toEmail
+	-- This can legitimately run for several minutes (code_poll.timeout_sec).
+	-- AppleScript's default Apple Event timeout (2 minutes) would otherwise
+	-- abort it prematurely with a generic "operation cancelled" error.
 	try
-		return do shell script cmd
+		with timeout of 900 seconds
+			return do shell script cmd
+		end timeout
 	on error errMsg
 		error "iCloud IMAP code fetch failed: " & errMsg
 	end try
