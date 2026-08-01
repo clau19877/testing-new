@@ -1,2 +1,4 @@
 email,password,first_name,last_name,month,day,year,phone,address1,address2,city,state,zip,country
-you@icloud.com,ChangeMe!234,Alex,Example,01,15,1990,,123 Main St,,Los Angeles,CA,90001,United States
+account1@icloud.com,PassOne!234,Alex,Example,01,15,1990,,123 Main St,,Los Angeles,CA,90001,United States
+account2@icloud.com,PassTwo!234,Sam,Example,03,22,1992,,123 Main St,,Los Angeles,CA,90001,United States
+account3@icloud.com,PassThree!234,Jordan,Example,07,08,1995,,123 Main St,,Los Angeles,CA,90001,United States

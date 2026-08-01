@@ -9,15 +9,12 @@
   "pbandai": {
     "base_url": "https://p-bandai.com/us",
     "register_url": "https://p-bandai.com/us/register",
-    "signup_email": "yourname@icloud.com",
-    "password": "ChangeMe!234",
     "profile": {
       "first_name": "Alex",
       "last_name": "Example",
       "month": "01",
       "day": "15",
       "year": "1990",
-      "phone": "",
       "address1": "123 Main St",
       "address2": "",
       "city": "Los Angeles",

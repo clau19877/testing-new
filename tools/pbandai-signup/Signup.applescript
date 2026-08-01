@@ -526,10 +526,11 @@ on waitForEnterInformation()
 end waitForEnterInformation
 
 on fillProfileIfPresent()
+	-- email/password always come from the current task.csv row
 	set passText to currentPassword
-	if passText is "" then set passText to my cfgStrDefault("pbandai.password", "")
+	if passText is "" then error "task.csv row missing password"
 	set phoneText to currentPhone
-	if phoneText is "" then set phoneText to my taskOrCfg("phone", "pbandai.profile.phone")
+	if phoneText is "" then set phoneText to my taskStr("phone")
 	my tryFillLabelled("First Name", my taskOrCfg("first_name", "pbandai.profile.first_name"))
 	my tryFillLabelled("Last Name", my taskOrCfg("last_name", "pbandai.profile.last_name"))
 	my tryFillLabelled("Password", passText)

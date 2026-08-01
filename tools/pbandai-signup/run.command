@@ -5,14 +5,16 @@ cd "$(dirname "$0")"
 if [[ ! -f config.json ]]; then
   echo "Missing config.json"
   echo "Copy config.example.json to config.json and fill in:"
-  echo "  - iCloud IMAP settings"
+  echo "  - iCloud IMAP settings (shared inbox for auth codes)"
   echo "  - GrizzlySMS api_key (service bvq = PREMIUM BANDAI)"
+  echo "Account emails/passwords go in task.csv, not config.json."
   exit 1
 fi
 
 if [[ ! -f task.csv ]]; then
   cp task.example.csv task.csv
-  echo "Created task.csv from task.example.csv — add your email,password rows, then re-run."
+  echo "Created task.csv from task.example.csv"
+  echo "Put ONE account per row (email,password,...), then re-run."
   exit 1
 fi
 
