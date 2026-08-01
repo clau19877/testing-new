@@ -16,6 +16,25 @@ property currentTaskJSON : ""
 property currentPhone : ""
 property currentActivationId : ""
 
+-- cached config values (loaded once per run to avoid repeated subprocess calls)
+property cfgWarmupBrowse : true
+property cfgGrizzlyEnabled : true
+property cfgAskConfirmSuccess : true
+property cfgCooldownMinSec : 8
+property cfgCooldownMaxSec : 20
+property cfgMinActionMs : 450
+property cfgMaxActionMs : 1600
+property cfgMinKeyMs : 55
+property cfgMaxKeyMs : 180
+property cfgThinkChance : 0.18
+property cfgThinkMinMs : 800
+property cfgThinkMaxMs : 2600
+property cfgTypoChance : 0.04
+property cfgScrollChance : 0.35
+property cfgMouseWiggle : true
+property cfgSmsWaitTries : 25
+property cfgSmsWaitIntervalMs : 500
+
 on run
 	set toolDir to do shell script "cd \"$(dirname " & quoted form of (POSIX path of (path to me)) & ")\" && pwd"
 	set configPath to toolDir & "/config.json"
@@ -27,6 +46,23 @@ on run
 		error "Missing task.csv. Copy task.example.csv to task.csv and add email,password rows."
 	end if
 	set humanizeOn to my cfgBool("humanize.enabled", true)
+	set cfgWarmupBrowse to my cfgBool("humanize.warmup_browse", true)
+	set cfgGrizzlyEnabled to my cfgBool("grizzly.enabled", true)
+	set cfgAskConfirmSuccess to my cfgBool("queue.ask_confirm_success", true)
+	set cfgCooldownMinSec to my cfgInt("queue.cooldown_min_sec", 8)
+	set cfgCooldownMaxSec to my cfgInt("queue.cooldown_max_sec", 20)
+	set cfgMinActionMs to my cfgInt("humanize.min_action_delay_ms", 450)
+	set cfgMaxActionMs to my cfgInt("humanize.max_action_delay_ms", 1600)
+	set cfgMinKeyMs to my cfgInt("humanize.min_key_delay_ms", 55)
+	set cfgMaxKeyMs to my cfgInt("humanize.max_key_delay_ms", 180)
+	set cfgThinkChance to my cfgNum("humanize.think_pause_chance", 0.18)
+	set cfgThinkMinMs to my cfgInt("humanize.think_pause_min_ms", 800)
+	set cfgThinkMaxMs to my cfgInt("humanize.think_pause_max_ms", 2600)
+	set cfgTypoChance to my cfgNum("humanize.typo_chance", 0.04)
+	set cfgScrollChance to my cfgNum("humanize.scroll_chance", 0.35)
+	set cfgMouseWiggle to my cfgBool("humanize.mouse_wiggle", true)
+	set cfgSmsWaitTries to my cfgInt("grizzly.sms_screen_wait_tries", 25)
+	set cfgSmsWaitIntervalMs to my cfgInt("grizzly.sms_screen_wait_interval_ms", 500)
 	
 	do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " init"
 	my logInfo("Queue run started", "queue_start")
@@ -56,7 +92,9 @@ on run
 			my logInfo("Task succeeded", "task_success")
 			set succeeded to succeeded + 1
 		on error errMsg
-			my logError(errMsg, "task_failed")
+			if not (errMsg starts with "[step:") then
+				my logError(errMsg, "task_failed")
+			end if
 			my cancelGrizzlyIfNeeded()
 			try
 				my markFailed(currentEmail, currentPassword, errMsg)
@@ -71,7 +109,7 @@ on run
 		set leftCount to (do shell script "/usr/bin/python3 " & quoted form of (toolDir & "/csv_queue.py") & " --dir " & quoted form of toolDir & " count") as integer
 		if leftCount > 0 then
 			my humanPause("cooldown between tasks")
-			delay (my randBetween(my cfgInt("queue.cooldown_min_sec", 8), my cfgInt("queue.cooldown_max_sec", 20)))
+			delay (my randBetween(cfgCooldownMinSec, cfgCooldownMaxSec))
 		end if
 	end repeat
 	
@@ -87,7 +125,7 @@ on processOneTask()
 		my failStep("safari_ready", errMsg)
 	end try
 	
-	if my cfgBool("humanize.warmup_browse", true) then
+	if cfgWarmupBrowse then
 		try
 			my humanWarmup()
 		on error errMsg
@@ -117,7 +155,7 @@ on processOneTask()
 	end try
 	my humanPause("checking email")
 	
-	set submitEpoch to (do shell script "date +%s") as real
+	set submitEpoch to do shell script "date +%s"
 	try
 		my clickButtonNamed({"SUBMIT", "Submit", "Continue", "NEXT", "Next"})
 		my waitForAuthCodeScreen()
@@ -149,7 +187,7 @@ on processOneTask()
 		my failStep("wait_enter_information", errMsg)
 	end try
 	
-	if my cfgBool("grizzly.enabled", true) then
+	if cfgGrizzlyEnabled then
 		try
 			my rentGrizzlyNumber()
 		on error errMsg
@@ -174,8 +212,8 @@ on processOneTask()
 	end try
 	
 	-- Phone/SMS verification step (GrizzlySMS)
-	if my cfgBool("grizzly.enabled", true) and currentActivationId is not "" then
-		if my waitForSmsScreen(25) then
+	if cfgGrizzlyEnabled and (currentActivationId is not "") then
+		if my waitForSmsScreen(cfgSmsWaitTries) then
 			my humanPause("waiting for SMS")
 			set smsCode to ""
 			try
@@ -197,7 +235,7 @@ on processOneTask()
 		end if
 	end if
 	
-	if my cfgBool("queue.ask_confirm_success", true) then
+	if cfgAskConfirmSuccess then
 		set phoneLine to ""
 		if currentPhone is not "" then set phoneLine to return & "Phone: " & currentPhone
 		set answer to button returned of (display dialog "Account for:" & return & currentEmail & phoneLine & return & return & "Mark this row as SUCCESS and remove it from task.csv?" buttons {"Mark Failed", "Mark Success"} default button "Mark Success")
@@ -213,7 +251,7 @@ end processOneTask
 
 on failStep(stepName, errMsg)
 	my logError(errMsg, stepName)
-	error errMsg
+	error "[step:" & stepName & "] " & errMsg
 end failStep
 
 on logError(messageText, stepName)
@@ -282,7 +320,7 @@ on waitForSmsScreen(maxTries)
 			set r to my safariJS("(function(){ const t=(document.body&&document.body.innerText)||''; return /SMS|phone verification|authentication code|verification code|confirm code|one-time|OTP/i.test(t) ? 'yes':'no'; })()")
 			if r is "yes" then return true
 		end try
-		delay 0.5
+		delay (cfgSmsWaitIntervalMs / 1000)
 	end repeat
 	return false
 end waitForSmsScreen
@@ -331,13 +369,6 @@ on taskStr(keyName)
 	return do shell script "/usr/bin/python3 -c " & quoted form of py & " " & quoted form of currentTaskJSON & " " & quoted form of keyName
 end taskStr
 
-on taskOrCfg(taskKey, cfgKey)
-	set v to my taskStr(taskKey)
-	if v is "" then set v to my cfgStrDefault(cfgKey, "")
-	return v
-end taskOrCfg
-
-
 (* ===== Humanization ===== *)
 
 on randBetween(lo, hi)
@@ -355,14 +386,12 @@ on humanPause(reason)
 		delay 0.35
 		return
 	end if
-	set lo to my cfgInt("humanize.min_action_delay_ms", 450)
-	set hi to my cfgInt("humanize.max_action_delay_ms", 1600)
-	my sleepMs(my randBetween(lo, hi))
-	if (random number from 0.0 to 1.0) < my cfgNum("humanize.think_pause_chance", 0.18) then
-		my sleepMs(my randBetween(my cfgInt("humanize.think_pause_min_ms", 800), my cfgInt("humanize.think_pause_max_ms", 2600)))
-		if my cfgBool("humanize.mouse_wiggle", true) then my mouseWiggle()
+	my sleepMs(my randBetween(cfgMinActionMs, cfgMaxActionMs))
+	if (random number from 0.0 to 1.0) < cfgThinkChance then
+		my sleepMs(my randBetween(cfgThinkMinMs, cfgThinkMaxMs))
+		if cfgMouseWiggle then my mouseWiggle()
 	end if
-	if (random number from 0.0 to 1.0) < my cfgNum("humanize.scroll_chance", 0.35) then
+	if (random number from 0.0 to 1.0) < cfgScrollChance then
 		my humanScroll()
 	end if
 end humanPause
@@ -393,13 +422,13 @@ on humanType(theText)
 		delay 0.08
 		key code 51
 	end tell
-	set typoChance to my cfgNum("humanize.typo_chance", 0.04)
-	set klo to my cfgInt("humanize.min_key_delay_ms", 55)
-	set khi to my cfgInt("humanize.max_key_delay_ms", 180)
+	set typoChance to cfgTypoChance
+	set klo to cfgMinKeyMs
+	set khi to cfgMaxKeyMs
 	set chars to characters of theText
 	repeat with i from 1 to count of chars
 		set ch to item i of chars as text
-		if humanizeOn and (random number from 0.0 to 1.0) < typoChance and i > 1 and i < (count of chars) then
+		if humanizeOn and ((random number from 0.0 to 1.0) < typoChance) and (i > 1) and (i < (count of chars)) then
 			set wrong to item (my randBetween(1, count of chars)) of chars as text
 			tell application "System Events" to keystroke wrong
 			my sleepMs(my randBetween(klo, khi))
@@ -523,6 +552,7 @@ on waitForEnterInformation()
 		end try
 		delay 0.5
 	end repeat
+	error "Timed out waiting for ENTER INFORMATION screen."
 end waitForEnterInformation
 
 on fillProfileIfPresent()
@@ -552,10 +582,14 @@ end fillProfileIfPresent
 
 on tryFillLabelled(labelText, valueText)
 	if valueText is "" then return
-	set js to "(function(){ const label='" & my escapeJS(labelText) & "'; const re=new RegExp(label,'i'); const labs=[...document.querySelectorAll('label,span,p,div,th,td')]; let input=null; for (const lab of labs){ if(!re.test((lab.textContent||'').trim())) continue; if(lab.control){ input=lab.control; break;} const near=lab.parentElement && lab.parentElement.querySelector('input,select,textarea'); if(near){ input=near; break;} } if(!input){ input=[...document.querySelectorAll('input,select,textarea')].find(el=>re.test(el.name||'')||re.test(el.id||'')||re.test(el.placeholder||'')||re.test(el.getAttribute('aria-label')||'')); } if(!input) return 'missing'; input.scrollIntoView({block:'center'}); input.focus(); input.click(); return 'ok'; })()"
+	set safeLabel to my escapeJS(labelText)
+	set safeValue to my escapeJS(valueText)
+	set js to "(function(){ const label='" & safeLabel & "'; const value='" & safeValue & "'; const re=new RegExp(label,'i'); const free=el=>!(el.dataset&&el.dataset.pbandaiFilled==='1'); const labs=[...document.querySelectorAll('label,span,p,div,th,td')]; let input=null; for (const lab of labs){ if(!re.test((lab.textContent||'').trim())) continue; if(lab.control && free(lab.control)){ input=lab.control; break; } const near=lab.parentElement && lab.parentElement.querySelector('input,select,textarea'); if(near && free(near)){ input=near; break; } } if(!input){ input=[...document.querySelectorAll('input,select,textarea')].find(el=>free(el) && (re.test(el.name||'')||re.test(el.id||'')||re.test(el.placeholder||'')||re.test(el.getAttribute('aria-label')||''))); } if(!input) return 'missing'; input.scrollIntoView({block:'center'}); if(input.tagName==='SELECT'){ const opts=[...input.options]; let m=opts.find(o=>(o.value||'').toLowerCase()===value.toLowerCase()||(o.textContent||'').trim().toLowerCase()===value.toLowerCase()); if(!m) m=opts.find(o=>(o.textContent||'').toLowerCase().includes(value.toLowerCase())||(o.value||'').toLowerCase().includes(value.toLowerCase())); if(!m) return 'missing'; input.value=m.value; input.dispatchEvent(new Event('input',{bubbles:true})); input.dispatchEvent(new Event('change',{bubbles:true})); input.dataset.pbandaiFilled='1'; return 'select-ok'; } input.dataset.pbandaiFilled='1'; input.focus(); input.click(); return 'ok'; })()"
 	try
 		set r to my safariJS(js)
-		if r is "ok" then
+		if r is "select-ok" then
+			my humanPause("selected " & labelText)
+		else if r is "ok" then
 			my humanPause("focus " & labelText)
 			my humanType(valueText)
 		end if
@@ -564,7 +598,7 @@ end tryFillLabelled
 
 on fetchICloudCode(sinceEpoch, toEmail)
 	set py to toolDir & "/fetch_icloud_code.py"
-	set cmd to "/usr/bin/python3 " & quoted form of py & " --config " & quoted form of configPath & " --since-epoch " & sinceEpoch & " --to-email " & quoted form of toEmail
+	set cmd to "/usr/bin/python3 " & quoted form of py & " --config " & quoted form of configPath & " --since-epoch " & quoted form of sinceEpoch & " --to-email " & quoted form of toEmail
 	try
 		return do shell script cmd
 	on error errMsg

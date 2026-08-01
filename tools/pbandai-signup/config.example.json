@@ -20,7 +20,9 @@
     "max_price": null,
     "phone_format": "national",
     "timeout_sec": 180,
-    "interval_sec": 5
+    "interval_sec": 5,
+    "sms_screen_wait_tries": 25,
+    "sms_screen_wait_interval_ms": 500
   },
   "humanize": {
     "enabled": true,

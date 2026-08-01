@@ -76,6 +76,12 @@ python3 grizzly_sms.py balance
 python3 signup_log.py tail-errors -n 20
 ```
 
+## Notes on reliability
+
+- `failed.csv`'s `reason` column is now prefixed with the failing step, e.g. `[step:grizzly_rent] ...`, for faster triage.
+- State/Country fields are auto-detected as `<select>` dropdowns when present and matched by option text/value, not just typed as raw keystrokes.
+- If the site takes longer than usual to show the SMS/OTP screen, raise `grizzly.sms_screen_wait_tries` / `grizzly.sms_screen_wait_interval_ms` in `config.json`.
+
 ## Error logging
 
 | File | Contents |
