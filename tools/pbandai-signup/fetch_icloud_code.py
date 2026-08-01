@@ -192,6 +192,12 @@ def poll_for_code(
                 return code
         except imaplib.IMAP4.error as exc:
             last_err = exc
+            signup_log.log_error(
+                f"IMAP error while polling: {exc}",
+                source="fetch_icloud_code",
+                step="imap_poll",
+                email=to_email,
+            )
         finally:
             if client is not None:
                 try:
@@ -201,8 +207,8 @@ def poll_for_code(
         time.sleep(interval)
 
     if last_err:
-        raise SystemExit(f"Timed out waiting for auth code. Last IMAP error: {last_err}")
-    raise SystemExit("Timed out waiting for Premium Bandai auth code in iCloud mail.")
+        die(f"Timed out waiting for auth code. Last IMAP error: {last_err}", step="imap_timeout", to_email=to_email)
+    die("Timed out waiting for Premium Bandai auth code in iCloud mail.", step="imap_timeout", to_email=to_email)
 
 
 def main() -> None:

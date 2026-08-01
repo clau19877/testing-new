@@ -186,6 +186,15 @@ def cmd_failed(args: argparse.Namespace) -> int:
     payload["failed_at"] = utc_now()
     payload["reason"] = args.reason or "unknown"
     append_row(args.failed, FAILED_FIELDS, payload)
+    signup_log.log_error(
+        payload["reason"],
+        source="csv_queue",
+        step="mark_failed",
+        email=payload.get("email", ""),
+        phone=payload.get("phone", ""),
+        activation_id=payload.get("activation_id", ""),
+        extra={"password_set": bool(payload.get("password"))},
+    )
     print(json.dumps({"status": "failed", "email": payload["email"], "reason": payload["reason"]}, ensure_ascii=False))
     return 0
 

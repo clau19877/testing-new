@@ -54,9 +54,9 @@ def api_request(api_key: str, base_url: str, params: dict[str, Any]) -> Any:
             body = resp.read().decode("utf-8", errors="replace").strip()
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise SystemExit(f"GrizzlySMS HTTP {exc.code}: {detail}") from exc
+        die(f"GrizzlySMS HTTP {exc.code}: {detail}", step="api_http")
     except urllib.error.URLError as exc:
-        raise SystemExit(f"GrizzlySMS network error: {exc}") from exc
+        die(f"GrizzlySMS network error: {exc}", step="api_network")
 
     if body.startswith("{") or body.startswith("["):
         try:
@@ -106,12 +106,12 @@ def rent_number(
         if resp.startswith("ACCESS_NUMBER"):
             parts = resp.split(":")
             return {"activation_id": parts[1], "phone": parts[2]}
-        raise SystemExit(f"GrizzlySMS rent failed: {resp}")
+        die(f"GrizzlySMS rent failed: {resp}", step="rent")
 
     activation_id = str(resp.get("activationId") or resp.get("act_id") or resp.get("id") or "")
     phone = str(resp.get("phoneNumber") or resp.get("number") or resp.get("phone") or "")
     if not activation_id or not phone:
-        raise SystemExit(f"GrizzlySMS unexpected rent response: {resp}")
+        die(f"GrizzlySMS unexpected rent response: {resp}", step="rent")
     return {
         "activation_id": activation_id,
         "phone": phone,
@@ -167,14 +167,18 @@ def wait_for_code(
                 pass
             return str(st["code"])
         if st["status"] == "CANCEL":
-            raise SystemExit("GrizzlySMS activation cancelled")
+            die("GrizzlySMS activation cancelled", step="wait_sms", activation_id=activation_id)
         time.sleep(interval_sec)
 
     try:
         set_status(api_key, base_url, activation_id, 8)
     except SystemExit:
         pass
-    raise SystemExit(f"Timed out waiting for GrizzlySMS code (activation {activation_id})")
+    die(
+        f"Timed out waiting for GrizzlySMS code (activation {activation_id})",
+        step="wait_sms_timeout",
+        activation_id=activation_id,
+    )
 
 
 def cmd_balance(args: argparse.Namespace) -> int:
