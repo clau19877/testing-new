@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
+import email
 import imaplib
 import socket
 import unittest
 
-from fetch_icloud_code import explain_imap_failure, extract_code, looks_relevant, strip_html
+from fetch_icloud_code import (
+    decode_mime,
+    explain_imap_failure,
+    extract_code,
+    looks_relevant,
+    mentions_recipient,
+    message_body,
+    strip_html,
+)
 
 
 class FetchCodeTests(unittest.TestCase):
@@ -46,6 +55,47 @@ class FetchCodeTests(unittest.TestCase):
         msg = explain_imap_failure(socket.gaierror("no address"), cfg)
         self.assertIn("imap.mail.me.com", msg)
         self.assertIn("firewall", msg.lower())
+
+    def test_real_premium_bandai_email_with_hide_my_email_relay(self):
+        # Real sample: sent through an iCloud Hide My Email alias, with a
+        # blockquote-style ("> ") plain-text body — both are handled fine.
+        raw = (
+            "From: PREMIUM BANDAI USA "
+            "<info-us_at_p-bandai_com_5nv79m7jx68054_a2ad75c7@icloud.com>\n"
+            'To: "Hide My Email"<search.rein-7t@icloud.com>\n'
+            "Date: Sat, 01 Aug 2026 14:36:39 +0800\n"
+            "Subject: [PREMIUM BANDAI] Temporary Member Registration Complete\n"
+            "Content-Type: text/plain; charset=utf-8\n"
+            "\n"
+            " > Thank you very much for using PREMIUM BANDAI.\n"
+            " > \n"
+            " > Temporary member registration complete.\n"
+            " > \n"
+            " >  Authentication Code\n"
+            " > \n"
+            " > 387402\n"
+            " > \n"
+            " > This Authentication Code will be valid for 10 minutes.\n"
+        )
+        msg = email.message_from_string(raw)
+        subject = decode_mime(msg.get("Subject"))
+        sender = decode_mime(msg.get("From"))
+
+        self.assertTrue(
+            looks_relevant(
+                subject,
+                sender,
+                ["PREMIUM BANDAI", "authentication", "verification"],
+                ["p-bandai", "bandai", "noreply"],
+            )
+        )
+
+        body = strip_html(message_body(msg))
+        self.assertTrue(mentions_recipient(msg, body, "search.rein-7t@icloud.com"))
+        self.assertFalse(mentions_recipient(msg, body, "someoneelse@icloud.com"))
+
+        code = extract_code(f"{subject}\n{body}", r"\b(\d{4,8})\b")
+        self.assertEqual(code, "387402")
 
 
 if __name__ == "__main__":

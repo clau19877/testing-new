@@ -30,6 +30,10 @@ account3@icloud.com,Rt5cWk8Ndp,Jordan,Example,NotSelected,7,8,1995,,123 Main St,
 
 Leave `phone` empty when GrizzlySMS is enabled (a number is rented per row).
 
+### Per-account email addresses (iCloud Hide My Email)
+
+Instead of a single real inbox for every account, you can use an iCloud **Hide My Email** alias as the `email` value in each `task.csv` row (create them via Settings → your name → iCloud → Hide My Email, or Safari's autofill suggestion on a signup form). Apple forwards mail sent to each alias into the same primary inbox your `config.json` `icloud` credentials poll — no extra IMAP config needed. The email confirmation flow has been verified against a real Premium Bandai email delivered this way, including the address-relay format Apple uses for the `From` header and the blockquote-style plain text some clients show.
+
 `gender` accepts (case-insensitive, matches the site's own radio values): `Male`, `Female`, `NotApplicable` (Non-binary), `NotSelected` (Prefer not to say). It's **required** by the real form and defaults to `NotSelected` if left blank.
 
 ### Password rules (from the live site)
