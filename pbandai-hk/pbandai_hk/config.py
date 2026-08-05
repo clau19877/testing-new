@@ -66,6 +66,16 @@ class Config:
     # Never auto-close a Chrome window that is holding a cart (Chrome is detached
     # from chromedriver, so it survives the bot exiting).
     keep_browser_open: bool = True
+    # Read orderStartDate/preOrderStatus and hold clicks until the drop opens
+    # instead of hammering a page that has no PLACE PRE-ORDER button yet.
+    prerelease_wait: bool = True
+    # Right after a drop opens, retry this often for this long instead of waiting
+    # for the next :00 — the button can lag a few seconds and a missed minute
+    # usually means a missed drop.
+    drop_burst_seconds: float = 120.0
+    drop_burst_interval: float = 2.5
+    # Reload the PDP this many seconds before the drop so the button is fresh.
+    predrop_refresh_seconds: float = 25.0
     # Stagger Chrome launch + PDP (seconds * instance index + jitter) to cut PNA/WAF.
     open_stagger_seconds: float = 1.5
     # Retries when first PDP visit returns 500 / "page not available".
@@ -160,6 +170,10 @@ class Config:
             stop_on_first_cart=_as_bool(os.getenv("STOP_ON_FIRST_CART"), False),
             park_on_cart=_as_bool(os.getenv("PARK_ON_CART"), True),
             keep_browser_open=_as_bool(os.getenv("KEEP_BROWSER_OPEN"), True),
+            prerelease_wait=_as_bool(os.getenv("PRERELEASE_WAIT"), True),
+            drop_burst_seconds=float(os.getenv("DROP_BURST_SECONDS") or "120"),
+            drop_burst_interval=float(os.getenv("DROP_BURST_INTERVAL") or "2.5"),
+            predrop_refresh_seconds=float(os.getenv("PREDROP_REFRESH_SECONDS") or "25"),
             open_stagger_seconds=float(os.getenv("OPEN_STAGGER_SECONDS") or "1.5"),
             open_pdp_retries=int(os.getenv("OPEN_PDP_RETRIES") or "5"),
             open_pdp_retry_wait=float(os.getenv("OPEN_PDP_RETRY_WAIT") or "3"),

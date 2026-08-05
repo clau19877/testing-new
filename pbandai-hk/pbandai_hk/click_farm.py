@@ -20,6 +20,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -124,6 +125,15 @@ class ClickFarm:
     _successes: List[FarmBrowser] = field(default_factory=list)
     _plan: List[tuple[str, str]] = field(default_factory=list)  # (name, proxy)
     _pdp_gate: Optional[threading.Semaphore] = field(default=None, repr=False)
+    # Drop timing from /api/products (orderStartDate + preOrderStatus).
+    _drop_at: Optional[float] = None  # epoch seconds, None = open / unknown
+    _drop_status: str = ""
+    _drop_checked_at: float = 0.0
+    _drop_lock: threading.Lock = field(default_factory=threading.Lock)
+    _prerelease_logged_at: float = 0.0
+    _predrop_refreshed: bool = False
+    _drop_burst_until: float = 0.0
+    _drop_warned: bool = False
 
     def prepare(self) -> int:
         """Plan N independent workers. Does NOT open browsers (no global wait)."""
@@ -136,6 +146,9 @@ class ClickFarm:
             for i in range(n)
         ]
         self._pdp_gate = threading.Semaphore(max(1, int(self.config.pdp_max_concurrent)))
+        self._prerelease_logged_at = 0.0
+        self._predrop_refreshed = False
+        self._fetch_drop_info()
         webhook, hook_src = self._resolve_webhook()
         if webhook:
             self.config.discord_webhook_url = webhook
@@ -147,6 +160,16 @@ class ClickFarm:
             f"[farm] planned {n} independent instance(s) on {self.product_code} "
             f"({schedule}; each opens + clicks on its own thread)"
         )
+        remain = self._seconds_until_drop()
+        if remain is not None and remain > 0:
+            print(
+                f"[farm] NOT ON SALE YET — preOrderStatus="
+                f"{self._drop_status or 'NotStarted'} · sale starts "
+                f"{self._drop_label(remain)}\n"
+                "[farm] browsers stay warm on the PDP; clicking starts at the drop"
+            )
+        elif self._drop_status:
+            print(f"[farm] preOrderStatus={self._drop_status} — on sale, clicking now")
         if webhook:
             print(f"[farm] Discord webhook ON · source={hook_src or 'config'} · {redact_webhook(webhook)}")
         else:
@@ -281,6 +304,172 @@ class ClickFarm:
         self._stop = threading.Event()
         self._pdp_gate = None
 
+    def _fetch_drop_info(self) -> None:
+        """Read orderStartDate / preOrderStatus from /api/products (no browser)."""
+        if not bool(getattr(self.config, "prerelease_wait", True)):
+            return
+        url = f"{self.config.base_url.rstrip('/')}/api/products/{self.product_code}"
+        try:
+            import requests
+
+            resp = requests.get(
+                url,
+                headers={
+                    "Accept": "application/json",
+                    "Accept-Language": self.config.accept_language or "en",
+                    "X-G1-Area-Code": (self.config.area_code or "hk").lower(),
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+                    ),
+                },
+                timeout=15,
+            )
+            detail = resp.json() if resp.ok else {}
+            if not resp.ok:
+                self._warn_drop_unavailable(
+                    f"HTTP {resp.status_code} for {self.product_code} "
+                    f"in area={(self.config.area_code or 'hk').lower()}"
+                )
+                return
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[farm] drop info fetch failed: %s", exc)
+            self._warn_drop_unavailable(str(exc))
+            return
+
+        order = ((detail.get("infoSection") or {}).get("orderInfo") or {})
+        if not order:
+            self._warn_drop_unavailable("product API had no orderInfo")
+            return
+        status = str(order.get("preOrderStatus") or "")
+        start_raw = str(order.get("orderStartDate") or "")
+        start_ts: Optional[float] = None
+        text = start_raw.strip()
+        if text:
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            try:
+                parsed = datetime.fromisoformat(text)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                start_ts = parsed.timestamp()
+            except ValueError:
+                start_ts = None
+
+        with self._drop_lock:
+            self._drop_status = status
+            # Only treat as pre-release while the start is genuinely in the future.
+            self._drop_at = start_ts if (start_ts and start_ts > time.time()) else None
+            self._drop_checked_at = time.time()
+
+    def _warn_drop_unavailable(self, reason: str) -> None:
+        """Tell the user drop timing is unknown, so clicking falls back to blind."""
+        if self._drop_warned:
+            return
+        self._drop_warned = True
+        print(
+            f"[farm] WARNING: could not read sale timing ({reason}).\n"
+            "         Falling back to clicking on schedule. Check AREA_CODE matches "
+            "the product's region."
+        )
+        logger.warning("[farm] drop timing unavailable: %s", reason)
+
+    def _seconds_until_drop(self) -> Optional[float]:
+        """Seconds until orderStartDate, or None when open / unknown."""
+        with self._drop_lock:
+            drop_at = self._drop_at
+            checked = self._drop_checked_at
+        if drop_at is None:
+            # Re-check occasionally in case the listing gains a future start date.
+            if checked and time.time() - checked > 300:
+                self._fetch_drop_info()
+            return None
+        remain = drop_at - time.time()
+        if remain <= 0:
+            self._open_drop_burst(drop_at)
+            return None
+        # Refresh timing as the drop approaches (Bandai can shift the start).
+        age = time.time() - checked
+        if (remain > 600 and age > 120) or (remain <= 600 and age > 30):
+            self._fetch_drop_info()
+            with self._drop_lock:
+                drop_at = self._drop_at
+            if drop_at is None:
+                return None
+            remain = drop_at - time.time()
+            if remain <= 0:
+                self._open_drop_burst(drop_at)
+                return None
+        return remain
+
+    def _open_drop_burst(self, drop_at: float) -> None:
+        """Drop just opened: clear the gate and start the fast-retry window."""
+        burst = max(0.0, float(getattr(self.config, "drop_burst_seconds", 120)))
+        with self._drop_lock:
+            if self._drop_at is None:
+                return
+            self._drop_at = None
+            self._drop_burst_until = drop_at + burst if burst else 0.0
+        if burst:
+            print(
+                f"[farm] DROP OPEN — fast retry every "
+                f"~{float(self.config.drop_burst_interval):.1f}s for {int(burst)}s"
+            )
+            logger.info("[farm] drop open; burst=%ss product=%s", int(burst), self.product_code)
+
+    def _drop_label(self, remain: float) -> str:
+        with self._drop_lock:
+            drop_at = self._drop_at
+        when = ""
+        if drop_at:
+            when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(drop_at))
+        hrs, rem = divmod(int(max(0, remain)), 3600)
+        mins, secs = divmod(rem, 60)
+        if hrs:
+            eta = f"{hrs}h {mins}m"
+        elif mins:
+            eta = f"{mins}m {secs}s"
+        else:
+            eta = f"{secs}s"
+        return f"{when} (in {eta})" if when else f"in {eta}"
+
+    def _handle_prerelease(self, wb: FarmBrowser, remain: float) -> None:
+        """Hold fire until the drop, keeping the window warm and the page fresh."""
+        now = time.time()
+        if now - self._prerelease_logged_at >= 60.0:
+            self._prerelease_logged_at = now
+            status = self._drop_status or "NotStarted"
+            print(
+                f"[farm] pre-order not open ({status}) — sale starts "
+                f"{self._drop_label(remain)}; holding clicks until then"
+            )
+            logger.info(
+                "[farm] prerelease status=%s remain=%.0fs product=%s",
+                status,
+                remain,
+                self.product_code,
+            )
+
+        lead = max(5.0, float(self.config.predrop_refresh_seconds))
+        # One fresh PDP load just before T-0 so the button renders in time.
+        if remain <= lead and not self._predrop_refreshed:
+            self._predrop_refreshed = True
+            print(f"[{wb.name}] pre-drop refresh (T-{int(remain)}s)")
+            logger.info("[farm] %s pre-drop refresh remain=%.0fs", wb.name, remain)
+            self._hard_refresh_pdp(wb)
+            return
+
+        # Sleep toward the drop in short chunks: wake at ~T-lead, then at T-0.
+        if remain > lead:
+            chunk = min(remain - lead, 20.0)
+        else:
+            chunk = min(remain, 0.5)
+        end = time.time() + max(0.1, chunk)
+        while time.time() < end and not self._stop.is_set():
+            if remain > lead:
+                self._maybe_human_idle(wb, seconds_until_click=remain)
+            time.sleep(max(0.0, min(0.2, end - time.time())))
+
     def _acquire_pdp_slot(self, name: str) -> bool:
         """Block until a PDP navigation slot is free (limits origin stampede)."""
         gate = self._pdp_gate
@@ -318,8 +507,24 @@ class ClickFarm:
             return f"at :{at:02d} every minute"
         return f"every {self.config.click_interval_seconds}s"
 
+    def _drop_burst_remaining(self) -> float:
+        """Seconds left in the fast-retry window that follows a drop opening."""
+        with self._drop_lock:
+            until = self._drop_burst_until
+        return max(0.0, until - time.time()) if until else 0.0
+
     def _wait_for_next_click(self, wb: Optional[FarmBrowser] = None) -> None:
         """Block until the next scheduled ATC time; idle + OOS refresh while waiting."""
+        # Just after a drop opens, retry every few seconds instead of waiting for
+        # the next :00 — the button can take a moment to appear and a missed
+        # minute usually means a missed drop.
+        burst = self._drop_burst_remaining()
+        if burst > 0:
+            interval = max(0.5, float(self.config.drop_burst_interval))
+            end = time.time() + interval * random.uniform(0.85, 1.2)
+            while time.time() < end and not self._stop.is_set():
+                time.sleep(max(0.0, min(0.15, end - time.time())))
+            return
         at = int(self.config.click_at_second)
         if at < 0:
             interval = max(0.5, float(self.config.click_interval_seconds))
@@ -489,6 +694,13 @@ class ClickFarm:
             else:
                 print(f"[{wb.name}] PDP still bad — will heal on jittered interval")
         while not self._stop.is_set():
+            # Pre-order not open yet: clicking cannot work, so don't hammer the
+            # PDP or spam "no ATC button". Handled before the :00 scheduler so we
+            # can wake exactly at the drop instead of on the minute.
+            remain = self._seconds_until_drop()
+            if remain is not None and remain > 0.4:
+                self._handle_prerelease(wb, remain)
+                continue
             self._wait_for_next_click(wb)
             if self._stop.is_set():
                 return
@@ -560,10 +772,24 @@ class ClickFarm:
                         print(f"[{wb.name}] no ATC button (bad PDP) — one refresh for next round")
                         self._hard_refresh_pdp(wb)
                     else:
-                        print(
-                            f"[{wb.name}] no enabled ATC button "
-                            "(not OOS text / not error page) — soft refresh"
-                        )
+                        burst = self._drop_burst_remaining()
+                        status = self._drop_status or ""
+                        if burst > 0:
+                            print(
+                                f"[{wb.name}] drop open but button not live yet — "
+                                f"refresh + retry (~{self.config.drop_burst_interval:.1f}s, "
+                                f"{int(burst)}s left)"
+                            )
+                        elif status and status.lower() != "inprogress":
+                            print(
+                                f"[{wb.name}] no ATC button — pre-order status="
+                                f"{status} (not on sale yet); refreshing"
+                            )
+                        else:
+                            print(
+                                f"[{wb.name}] no enabled ATC button "
+                                "(not OOS text / not error page) — soft refresh"
+                            )
                         self._hard_refresh_pdp(wb)
             except Exception as exc:  # noqa: BLE001
                 wb.last_error = str(exc)

@@ -86,6 +86,21 @@ BACKGROUND_MODE=0
 
 Each instance clicks PLACE PRE-ORDER at **:00 of every minute**.
 
+### Products that are not on sale yet
+
+The bot reads `orderStartDate` / `preOrderStatus` from Bandai's product API and adapts:
+
+- **Before the drop** it holds clicks entirely (a PDP with no PLACE PRE-ORDER button cannot be carted) and prints the sale time with a countdown, keeping the windows warm
+- **~25s before** the drop it reloads the PDP so the button renders in time
+- **At the drop** it switches to a fast-retry burst — every ~2.5s for 2 minutes — instead of waiting for the next `:00`, because the button often appears a few seconds late and a missed minute is a missed drop
+
+```env
+PRERELEASE_WAIT=1           # hold clicks until orderStartDate
+PREDROP_REFRESH_SECONDS=25  # PDP reload before T-0
+DROP_BURST_SECONDS=120      # fast-retry window after the drop
+DROP_BURST_INTERVAL=2.5     # retry spacing inside that window
+```
+
 ### What happens on cart success
 
 1. The winning instance **stops clicking permanently** — it will never add another item
