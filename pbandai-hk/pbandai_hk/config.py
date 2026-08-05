@@ -85,7 +85,7 @@ class Config:
     oos_refresh_seconds: float = 18.0
     # Cap how many instances may navigate PDP/home at once (cuts heal stampede).
     pdp_max_concurrent: int = 3
-    # Human-like idle (scroll / blank click) while waiting; 0 disables.
+    # Human-like idle (scroll up/down only, never clicks) while waiting; 0 disables.
     idle_activity_seconds: float = 8.0
     # Per-instance Chrome profile dir + UA/viewport/locale (cuts identical fingerprints).
     unique_browser_profiles: bool = True
