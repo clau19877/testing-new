@@ -159,9 +159,8 @@ def append_cart_success(
     extra = extra or {}
     line = (
         f"{stamp}\t{instance}\t{product_code}\t{payment_url}\t{note}\t{product_url}\t"
-        f"portable={extra.get('portable','')}\t"
-        f"ge={extra.get('ge_cart_token','')}\t"
-        f"merchant={extra.get('merchant_cart_token','')}\n"
+        f"loggedIn={extra.get('logged_in','')}\t"
+        f"cartId={extra.get('cart_id','')}\n"
     )
     log_path = folder / "cart_successes.log"
     with log_path.open("a", encoding="utf-8") as fh:
@@ -173,11 +172,8 @@ def append_cart_success(
         f"product={product_code}",
         f"note={note}",
         f"at={stamp}",
-        f"portable={extra.get('portable', '')}",
-        f"source={extra.get('source', '')}",
-        f"confirmationCartToken={extra.get('ge_cart_token', '')}",
-        f"GlobalECartId={extra.get('merchant_cart_token', '')}",
-        f"countryCode={extra.get('country_code', '')}",
+        f"loggedIn={extra.get('logged_in', '')}",
+        f"cartId={extra.get('cart_id', '')}",
         f"cookies={extra.get('cookie_header', '')}",
     ]
     last.write_text("\n".join(details) + "\n", encoding="utf-8")

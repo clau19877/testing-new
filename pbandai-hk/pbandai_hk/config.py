@@ -57,8 +57,12 @@ class Config:
     # Wall-clock second within each minute to ATC (0 = :00). Set -1 to use interval instead.
     click_at_second: int = 0
     click_interval_seconds: float = 5.0
-    # Keep all instances running after a cart success (Discord still notified).
+    # Stop every instance after the first cart success (default: only the winning
+    # instance stops; the rest keep racing).
     stop_on_first_cart: bool = False
+    # After ATC, navigate the winning instance's window to /{area}/cart so you can
+    # log in and check out manually without hunting for the page.
+    park_on_cart: bool = True
     # Stagger Chrome launch + PDP (seconds * instance index + jitter) to cut PNA/WAF.
     open_stagger_seconds: float = 1.5
     # Retries when first PDP visit returns 500 / "page not available".
@@ -75,8 +79,8 @@ class Config:
     # Seconds to linger on /{area}/ home (scroll) before first PDP open.
     home_warmup_seconds: float = 3.0
     # Optional logged-in cookie files (Cookie-Editor JSON), one per instance,
-    # round-robined. Bandai only creates the checkout hold for signed-in members,
-    # so portable /orderdetails?confirmationCartToken links need these.
+    # round-robined, so a winning window is already signed in and manual checkout
+    # is one click away.
     farm_cookie_files: List[str] = field(default_factory=list)
     discord_webhook_url: str = ""
     task_csv: str = "task.csv"
@@ -151,6 +155,7 @@ class Config:
             click_at_second=int(os.getenv("CLICK_AT_SECOND") or "0"),
             click_interval_seconds=float(os.getenv("CLICK_INTERVAL_SECONDS") or "5"),
             stop_on_first_cart=_as_bool(os.getenv("STOP_ON_FIRST_CART"), False),
+            park_on_cart=_as_bool(os.getenv("PARK_ON_CART"), True),
             open_stagger_seconds=float(os.getenv("OPEN_STAGGER_SECONDS") or "1.5"),
             open_pdp_retries=int(os.getenv("OPEN_PDP_RETRIES") or "5"),
             open_pdp_retry_wait=float(os.getenv("OPEN_PDP_RETRY_WAIT") or "3"),

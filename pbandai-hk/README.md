@@ -84,24 +84,33 @@ PRODUCT_LINKS=https://p-bandai.com/us/item/N2890904001
 BACKGROUND_MODE=0
 ```
 
-Each instance clicks PLACE PRE-ORDER at **:00 of every minute**. On ATC success the cart is held — the bot soft-opens `/cart`, calls Bandai’s cart→checkout export API, then posts the checkout link to Discord and **keeps going**.
+Each instance clicks PLACE PRE-ORDER at **:00 of every minute**.
 
-### Guest vs logged-in checkout links
+### What happens on cart success
 
-Bandai only creates the checkout hold (`POST /api/cart/{cartSn}/checkout`) for **signed-in members**; guests get `500 InternalRestApiServerError`, so Global-e never issues a `confirmationCartToken`.
+1. The winning instance **stops clicking** — its task is done
+2. Its Chrome window navigates to `/{area}/cart` and **stays open**
+3. Discord gets a "CART SECURED" ping with the instance name, cart details and cookies
+4. **You** switch to that window, log in, and press Proceed to checkout
 
-| Mode | Discord link | Claim flow |
-|---|---|---|
-| Guest (default) | `/{area}/orderdetails?countryCode=…` + SESSION/cookies | Import cookies (Cookie-Editor) → sign in → `/hk/cart` → Proceed to checkout |
-| Logged-in cookies | `/{area}/orderdetails?confirmationCartToken=…` | Paste straight into a fresh browser |
+Other instances keep racing unless `STOP_ON_FIRST_CART=1`.
 
-For fully portable links, export cookies from a signed-in P-Bandai browser session and point the farm at them (round-robined per instance):
+The bot deliberately does not attempt checkout. Bandai only creates the checkout hold (`POST /api/cart/{cartSn}/checkout`) for **signed-in members** — guests get `500 InternalRestApiServerError`, so no automated checkout URL can exist for a guest cart. Logging in manually is the fastest reliable path.
+
+```env
+# Navigate the winning window to the cart page (default 1)
+PARK_ON_CART=1
+# Stop every instance after the first cart (default 0 = only the winner stops)
+STOP_ON_FIRST_CART=0
+```
+
+Cart details are also written to `logs/cart_<instance>.txt` (SESSION + cookies) so you can finish on another machine with Cookie-Editor.
+
+Optional: start instances already signed in, so you only have to press Proceed:
 
 ```env
 FARM_COOKIE_FILES=sessions/acct1.json,sessions/acct2.json
 ```
-
-`/checkout` is not a valid route — always use `/{area}/orderdetails`.
 
 ### Monitor-only `.env` example
 

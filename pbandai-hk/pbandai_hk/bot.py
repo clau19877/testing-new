@@ -844,9 +844,14 @@ class PBandaiHkBot:
                 logger.info("[farm] starting click loop")
                 successes = self.click_farm.run()
                 print(
-                    f"[farm] finished successes={len(successes)} "
-                    f"links={[s.payment_url for s in successes]}"
+                    f"[farm] finished carts={len(successes)} "
+                    f"instances={[s.name for s in successes]}"
                 )
+                if successes:
+                    print(
+                        "[farm] log in to those Chrome windows and complete "
+                        "checkout manually (cookies saved under logs/)"
+                    )
                 return
 
             if self.config.schedule_mode:

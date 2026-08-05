@@ -1,14 +1,16 @@
 """Click farm: N browsers click PLACE PRE-ORDER on a wall-clock schedule.
 
 Guest by default. Each instance parks on the PDP and clicks at second :00 of every
-minute (or CLICK_AT_SECOND). Instances keep running after cart success.
-On ATC success the cart is already held — export a checkout URL and post it to
-Discord.
+minute (or CLICK_AT_SECOND).
+
+On ATC success the cart is held, so that instance **stops clicking**, parks its
+Chrome window on `/{area}/cart`, and posts a Discord notification. You then log in
+in that window and complete checkout manually — Bandai refuses to create a
+checkout hold for guests, so there is nothing useful to automate past this point.
+Other instances keep racing unless STOP_ON_FIRST_CART=1.
 
 Optional: FARM_COOKIE_FILES points at logged-in Cookie-Editor JSON exports
-(round-robined per instance). Bandai only creates the checkout hold for signed-in
-members, so a fully portable `/orderdetails?confirmationCartToken=...` link
-requires those cookies; guests get the cart hold plus SESSION for manual claim.
+(round-robined per instance) so the window is already signed in.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from .browser_cart import _click_add_to_cart, _wait_for_product_ready
-from .checkout_link import PortableCheckout, export_checkout_from_held_cart
+from .checkout_link import CartHandoff, capture_cart_handoff
 from .discord_util import (
     append_cart_success,
     looks_like_discord_webhook,
@@ -103,7 +105,7 @@ class FarmBrowser:
     clicks: int = 0
     success: bool = False
     payment_url: str = ""
-    checkout: Optional[PortableCheckout] = None
+    checkout: Optional[CartHandoff] = None
     _last_oos_refresh: float = 0.0
     _last_oos_log: float = 0.0
     _last_idle_activity: float = 0.0
@@ -151,8 +153,8 @@ class ClickFarm:
             print(
                 "[farm] WARNING: Discord webhook OFF — cart success will NOT ping Discord.\n"
                 "         Fix: set DISCORD_WEBHOOK_URL in .env  OR  put the URL alone in\n"
-                "         discord_webhook.txt (same folder as the bot). Success URLs are\n"
-                "         always saved to logs/cart_successes.log + logs/last_payment_url.txt"
+                "         discord_webhook.txt (same folder as the bot). Cart details are\n"
+                "         always saved to logs/cart_successes.log + logs/cart_<instance>.txt"
             )
         logger.info(
             "[farm] prepare planned=%s product=%s schedule=%s discord=%s "
@@ -493,23 +495,28 @@ class ClickFarm:
                         wb.success = True
                         wb.payment_url = payment
                         if wb.checkout is None and payment:
-                            wb.checkout = PortableCheckout(payment_url=payment, raw_url=payment)
+                            wb.checkout = CartHandoff(cart_url=payment)
                         with self._success_lock:
                             self._successes.append(wb)
-                        portable = "portable" if (wb.checkout and wb.checkout.portable) else "raw"
-                        print(f"[{wb.name}] CART SUCCESS ({portable}) → {payment}")
+                        print(f"[{wb.name}] CART SUCCESS → {payment}")
                         logger.info(
-                            "[farm] success session=%s payment=%s note=%s portable=%s ge_token=%s",
+                            "[farm] success session=%s cart=%s note=%s loggedIn=%s",
                             wb.name,
                             payment,
                             note,
-                            bool(wb.checkout.portable) if wb.checkout else False,
-                            "yes" if wb.checkout and wb.checkout.ge_cart_token else "no",
+                            bool(wb.checkout.logged_in) if wb.checkout else False,
                         )
                         self._notify_discord(wb, payment, note)
+                        # Cart is held: this instance is done. Leave Chrome open on
+                        # the cart page so the user can log in and check out.
+                        print(
+                            f"[{wb.name}] task finished — browser left open for manual "
+                            "login + checkout (this instance stops clicking)"
+                        )
+                        logger.info("[farm] %s stopped after cart success", wb.name)
                         if self.config.stop_on_first_cart:
                             self._stop.set()
-                            return
+                        return
                 else:
                     logger.warning("[farm] %s no button (click #%s)", wb.name, wb.clicks)
                     if self._shows_out_of_stock(wb.driver):
@@ -710,7 +717,7 @@ class ClickFarm:
         *,
         before_ts: float,
     ) -> tuple[bool, str, str]:
-        """Poll hooked addToCart response, then export checkout link from held cart."""
+        """Poll hooked addToCart response, then snapshot the held cart."""
         driver = wb.driver
         assert driver is not None
         deadline = time.time() + 8.0
@@ -722,73 +729,45 @@ class ClickFarm:
             if ts > before_ts and status:
                 body = str(last.get("body") or "")
                 if 200 <= status < 300:
-                    payment = self._export_checkout_link(wb, add_to_cart_body=body)
-                    return True, f"addToCart status={status}", payment
+                    cart_url = self._capture_cart(wb)
+                    return True, f"addToCart status={status}", cart_url
                 if status == 409 or "preallocation" in body.lower() or "outofstock" in body.lower():
                     return False, f"stock hold status={status}", ""
                 # 500/501/502 — not success; keep looping outer click interval
                 return False, f"addToCart status={status}: {body[:120]}", ""
             time.sleep(0.25)
 
-        # No XHR capture — still try held-cart export from SESSION on PDP.
-        payment = self._export_checkout_link(wb, add_to_cart_body="")
-        if payment and wb.checkout and (wb.checkout.portable or wb.checkout.session_cookie):
-            return True, "held-cart export (no XHR capture)", payment
+        # No XHR capture — the cart may still hold the item; check before giving up.
+        cart_url = self._capture_cart(wb)
+        if wb.checkout and (wb.checkout.item_count > 0 or wb.checkout.cart_id):
+            return True, "cart held (no XHR capture)", cart_url
         return False, "no addToCart response", ""
 
-    def _export_checkout_link(self, wb: FarmBrowser, *, add_to_cart_body: str = "") -> str:
-        """Export tokenized checkout URL from held cart. Stays on PDP (no checkout step)."""
+    def _capture_cart(self, wb: FarmBrowser) -> str:
+        """Snapshot the held cart and park the window for manual checkout."""
         driver = wb.driver
         assert driver is not None
         area = (self.config.area_code or "hk").strip().lower()
-        fallback = f"{self.config.base_url.rstrip('/')}/{area}/orderdetails"
+        cart_url = f"{self.config.base_url.rstrip('/')}/{area}/cart"
         try:
             # Small settle so SESSION / cart hold is committed after ATC.
             time.sleep(0.8)
-            portable = export_checkout_from_held_cart(
+            handoff = capture_cart_handoff(
                 driver,
                 base_url=self.config.base_url,
                 area_code=self.config.area_code,
-                add_to_cart_body=add_to_cart_body,
+                park_on_cart=bool(getattr(self.config, "park_on_cart", True)),
             )
-            wb.checkout = portable
-            payment = portable.payment_url or fallback
-            # Guard against asset URLs and the invalid /checkout SPA route.
-            low = payment.lower().split("?", 1)[0]
-            bad = any(x in low for x in ("/includes/css/", "/includes/js/", ".css", ".js"))
-            if (not bad) and low.rstrip("/").endswith("/checkout") and "/orderdetails" not in low:
-                bad = True
-            if bad:
-                logger.error("[farm] %s rejected bad export url=%s", wb.name, payment[:160])
-                area = (self.config.area_code or "hk").strip().lower()
-                payment = f"{self.config.base_url.rstrip('/')}/{area}/orderdetails"
-                portable.payment_url = payment
-                portable.portable = False
-                portable.source = "rejected-bad-url"
-                wb.checkout = portable
+            wb.checkout = handoff
             print(
-                f"[{wb.name}] held-cart export portable={portable.portable} "
-                f"source={portable.source} loggedIn={portable.logged_in} "
-                f"ge_token={'yes' if portable.ge_cart_token else 'no'} "
-                f"checkoutSn={portable.checkout_sn or '-'} "
-                f"session={'yes' if portable.session_cookie else 'no'}"
+                f"[{wb.name}] cart held items={handoff.item_count} "
+                f"cartId={handoff.cart_id or '-'} "
+                f"loggedIn={handoff.logged_in} parked={handoff.parked}"
             )
-            if portable.login_required_hint and not portable.logged_in:
-                print(
-                    f"[{wb.name}] guest cart held — Bandai needs a signed-in member "
-                    "for the checkout hold; set FARM_COOKIE_FILES for portable links"
-                )
-            logger.info(
-                "[farm] %s portable=%s source=%s payment=%s",
-                wb.name,
-                portable.portable,
-                portable.source,
-                payment[:200],
-            )
-            return payment
+            return handoff.cart_url or cart_url
         except Exception as exc:  # noqa: BLE001
-            log_exception(logger, f"held-cart export failed {wb.name}", exc)
-            return fallback
+            log_exception(logger, f"cart capture failed {wb.name}", exc)
+            return cart_url
 
     def _resolve_webhook(self) -> tuple[str, str]:
         """Re-read webhook at runtime (env / .env value / discord_webhook.txt)."""
@@ -804,42 +783,35 @@ class ClickFarm:
     def _notify_discord(self, wb: FarmBrowser, payment_url: str, note: str) -> None:
         product_url = self._product_url()
         area = (getattr(self.config, "area_code", "") or "hk").upper()
-        checkout = wb.checkout or PortableCheckout(payment_url=payment_url, raw_url=payment_url)
-        if payment_url and checkout.payment_url != payment_url and not checkout.portable:
-            checkout.payment_url = payment_url
-        # Always persist locally first — never lose a checkout link.
+        checkout = wb.checkout or CartHandoff(cart_url=payment_url)
+        if payment_url and not checkout.cart_url:
+            checkout.cart_url = payment_url
+        # Always persist locally first — never lose a cart.
         try:
             log_path = append_cart_success(
                 folder=Path.cwd() / "logs",
                 instance=wb.name,
                 product_code=self.product_code,
-                payment_url=checkout.payment_url or payment_url,
+                payment_url=checkout.cart_url or payment_url,
                 note=note,
                 product_url=product_url,
                 extra={
-                    "portable": checkout.portable,
-                    "ge_cart_token": checkout.ge_cart_token,
-                    "merchant_cart_token": checkout.merchant_cart_token,
-                    "country_code": checkout.country_code,
+                    "logged_in": checkout.logged_in,
+                    "cart_id": checkout.cart_id,
                     "cookie_header": checkout.cookie_header,
-                    "source": checkout.source,
                 },
             )
-            # Dedicated token dump for manual recovery.
-            token_path = Path.cwd() / "logs" / f"checkout_tokens_{wb.name}.txt"
+            # Dedicated dump for manual recovery on another machine.
+            token_path = Path.cwd() / "logs" / f"cart_{wb.name}.txt"
             token_path.write_text(
                 "\n".join(
                     [
-                        checkout.payment_url or payment_url,
-                        f"portable={checkout.portable}",
-                        f"source={checkout.source}",
-                        f"confirmationCartToken={checkout.ge_cart_token}",
-                        f"MerchantCartToken={checkout.merchant_cart_token}",
-                        f"checkoutSn={checkout.checkout_sn}",
+                        checkout.cart_url or payment_url,
+                        f"instance={wb.name}",
+                        f"loggedIn={checkout.logged_in}",
+                        f"items={checkout.item_count}",
                         f"cartId={checkout.cart_id}",
                         f"cartSn={checkout.cart_sn}",
-                        f"loggedIn={checkout.logged_in}",
-                        f"countryCode={checkout.country_code}",
                         f"SESSION={checkout.session_cookie}",
                         f"cookies={checkout.cookie_header}",
                         f"product={self.product_code}",
@@ -849,8 +821,8 @@ class ClickFarm:
                 + "\n",
                 encoding="utf-8",
             )
-            print(f"[{wb.name}] saved payment → {log_path}")
-            print(f"[{wb.name}] saved tokens → {token_path}")
+            print(f"[{wb.name}] saved cart → {log_path}")
+            print(f"[{wb.name}] saved cookies → {token_path}")
         except Exception as exc:  # noqa: BLE001
             log_exception(logger, f"cart success log failed {wb.name}", exc)
 
@@ -865,19 +837,19 @@ class ClickFarm:
             note=note,
         )
         if not webhook:
-            print(f"[farm] Discord webhook not set — payment link:\n{checkout.payment_url}")
-            logger.warning("[farm] no DISCORD_WEBHOOK_URL; payment=%s", checkout.payment_url)
+            print(f"[farm] Discord webhook not set — cart page:\n{checkout.cart_url}")
+            logger.warning("[farm] no DISCORD_WEBHOOK_URL; cart=%s", checkout.cart_url)
             return
         if not looks_like_discord_webhook(webhook):
             print(
                 f"[farm] Discord webhook looks invalid ({redact_webhook(webhook)}) — "
-                f"payment link:\n{checkout.payment_url}"
+                f"cart page:\n{checkout.cart_url}"
             )
             logger.warning(
-                "[farm] invalid webhook source=%s url=%s payment=%s",
+                "[farm] invalid webhook source=%s url=%s cart=%s",
                 hook_src,
                 redact_webhook(webhook),
-                checkout.payment_url,
+                checkout.cart_url,
             )
             return
         embeds = [
@@ -896,23 +868,23 @@ class ClickFarm:
         )
         if ok:
             logger.info(
-                "[farm] discord ok instance=%s source=%s detail=%s portable=%s",
+                "[farm] discord ok instance=%s source=%s detail=%s loggedIn=%s",
                 wb.name,
                 hook_src or "config",
                 detail,
-                checkout.portable,
+                checkout.logged_in,
             )
-            print(f"[{wb.name}] Discord webhook sent ({detail}) portable={checkout.portable}")
+            print(f"[{wb.name}] Discord notified ({detail})")
         else:
             logger.error(
-                "[farm] discord FAILED instance=%s source=%s detail=%s payment=%s",
+                "[farm] discord FAILED instance=%s source=%s detail=%s cart=%s",
                 wb.name,
                 hook_src or "config",
                 detail,
-                checkout.payment_url,
+                checkout.cart_url,
             )
             print(f"[{wb.name}] Discord webhook error: {detail}")
-            print(f"[{wb.name}] payment link (saved to logs/):\n{checkout.payment_url}")
+            print(f"[{wb.name}] cart page (saved to logs/):\n{checkout.cart_url}")
 
     def _inject_login_cookies(
         self, driver: Any, *, name: str, index: int, home: str
