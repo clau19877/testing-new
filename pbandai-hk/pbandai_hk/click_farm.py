@@ -214,7 +214,27 @@ class ClickFarm:
                         fut.result(timeout=15)
                     except Exception:  # noqa: BLE001
                         pass
+        self._hold_for_manual_checkout()
         return list(self._successes)
+
+    def _hold_for_manual_checkout(self) -> None:
+        """Keep the process (and carted Chrome windows) alive until Ctrl+C."""
+        with self._success_lock:
+            carted = [wb for wb in self._successes if wb.driver is not None]
+        if not carted or not bool(getattr(self.config, "keep_browser_open", True)):
+            return
+        names = ", ".join(wb.name for wb in carted)
+        print(
+            f"\n[farm] {len(carted)} cart(s) held — Chrome left open: {names}\n"
+            "[farm] log in in those window(s) and complete checkout.\n"
+            "[farm] press Ctrl+C when done (windows stay open after exit)."
+        )
+        logger.info("[farm] holding for manual checkout instances=%s", names)
+        try:
+            while True:
+                time.sleep(1.0)
+        except KeyboardInterrupt:
+            print("[farm] exiting — carted Chrome windows stay open")
 
     def _instance_lifecycle(self, index: int, name: str, proxy: str) -> None:
         """Open this instance, then click forever — never waits on other instances."""
@@ -237,8 +257,16 @@ class ClickFarm:
         with self._browsers_lock:
             browsers = list(self.browsers)
             self.browsers = []
+        keep_open = bool(getattr(self.config, "keep_browser_open", True))
+        kept = 0
         for wb in browsers:
             if wb.driver is None:
+                continue
+            # A window holding a cart is the whole point — never close it.
+            if wb.success and keep_open:
+                kept += 1
+                wb.driver = None
+                wb.ready = False
                 continue
             try:
                 wb.driver.quit()
@@ -246,6 +274,9 @@ class ClickFarm:
                 log_exception(logger, f"farm quit failed {wb.name}", exc)
             wb.driver = None
             wb.ready = False
+        if kept:
+            print(f"[farm] left {kept} Chrome window(s) open for manual checkout")
+            logger.info("[farm] kept %s carted browser(s) open", kept)
         self._plan = []
         self._stop = threading.Event()
         self._pdp_gate = None
@@ -507,13 +538,13 @@ class ClickFarm:
                             bool(wb.checkout.logged_in) if wb.checkout else False,
                         )
                         self._notify_discord(wb, payment, note)
-                        # Cart is held: this instance is done. Leave Chrome open on
-                        # the cart page so the user can log in and check out.
+                        # Cart is held: this instance is done for good. No further
+                        # clicks, no refreshes — the window is yours to check out in.
                         print(
-                            f"[{wb.name}] task finished — browser left open for manual "
-                            "login + checkout (this instance stops clicking)"
+                            f"[{wb.name}] TASK COMPLETE — no more add-to-cart from this "
+                            "instance. Chrome stays open for manual login + checkout."
                         )
-                        logger.info("[farm] %s stopped after cart success", wb.name)
+                        logger.info("[farm] %s stopped clicking after cart success", wb.name)
                         if self.config.stop_on_first_cart:
                             self._stop.set()
                         return

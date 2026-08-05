@@ -63,6 +63,9 @@ class Config:
     # After ATC, navigate the winning instance's window to /{area}/cart so you can
     # log in and check out manually without hunting for the page.
     park_on_cart: bool = True
+    # Never auto-close a Chrome window that is holding a cart (Chrome is detached
+    # from chromedriver, so it survives the bot exiting).
+    keep_browser_open: bool = True
     # Stagger Chrome launch + PDP (seconds * instance index + jitter) to cut PNA/WAF.
     open_stagger_seconds: float = 1.5
     # Retries when first PDP visit returns 500 / "page not available".
@@ -156,6 +159,7 @@ class Config:
             click_interval_seconds=float(os.getenv("CLICK_INTERVAL_SECONDS") or "5"),
             stop_on_first_cart=_as_bool(os.getenv("STOP_ON_FIRST_CART"), False),
             park_on_cart=_as_bool(os.getenv("PARK_ON_CART"), True),
+            keep_browser_open=_as_bool(os.getenv("KEEP_BROWSER_OPEN"), True),
             open_stagger_seconds=float(os.getenv("OPEN_STAGGER_SECONDS") or "1.5"),
             open_pdp_retries=int(os.getenv("OPEN_PDP_RETRIES") or "5"),
             open_pdp_retry_wait=float(os.getenv("OPEN_PDP_RETRY_WAIT") or "3"),

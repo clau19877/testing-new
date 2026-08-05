@@ -589,6 +589,10 @@ def _common_options(
             "profile.password_manager_enabled": False,
         }
         options.add_experimental_option("prefs", prefs)
+        # Chrome outlives chromedriver, so a window holding a cart survives the
+        # bot exiting and stays usable for manual login + checkout.
+        if getattr(config, "keep_browser_open", True):
+            options.add_experimental_option("detach", True)
     except Exception:  # noqa: BLE001
         pass
     options.add_argument("--disable-blink-features=AutomationControlled")

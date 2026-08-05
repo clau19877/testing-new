@@ -88,12 +88,17 @@ Each instance clicks PLACE PRE-ORDER at **:00 of every minute**.
 
 ### What happens on cart success
 
-1. The winning instance **stops clicking** — its task is done
+1. The winning instance **stops clicking permanently** — it will never add another item
 2. Its Chrome window navigates to `/{area}/cart` and **stays open**
 3. Discord gets a "CART SECURED" ping with the instance name, cart details and cookies
 4. **You** switch to that window, log in, and press Proceed to checkout
 
 Other instances keep racing unless `STOP_ON_FIRST_CART=1`.
+
+Carted windows are never closed by the bot: Chrome is launched detached from
+chromedriver, `close()` skips any window holding a cart, and the bot waits for
+Ctrl+C instead of exiting while carts are open. **Your cart survives even after
+you stop the bot** — finish checkout whenever you like.
 
 The bot deliberately does not attempt checkout. Bandai only creates the checkout hold (`POST /api/cart/{cartSn}/checkout`) for **signed-in members** — guests get `500 InternalRestApiServerError`, so no automated checkout URL can exist for a guest cart. Logging in manually is the fastest reliable path.
 
@@ -102,6 +107,8 @@ The bot deliberately does not attempt checkout. Bandai only creates the checkout
 PARK_ON_CART=1
 # Stop every instance after the first cart (default 0 = only the winner stops)
 STOP_ON_FIRST_CART=0
+# Never auto-close a window holding a cart; keeps Chrome alive after exit (default 1)
+KEEP_BROWSER_OPEN=1
 ```
 
 Cart details are also written to `logs/cart_<instance>.txt` (SESSION + cookies) so you can finish on another machine with Cookie-Editor.
