@@ -6,16 +6,17 @@ Bandai / Global-e facts (from live SPA assets):
 - Merchant token: `{cartId}_Checkout_{PRELOAD_DATA.globaleMerchantCartTokenSuffix}`
 - Cart UI gates Proceed-to-checkout on login, but the API is:
   `POST /api/cart/{cartSn}/checkout` → `{ checkoutSn, ... }`
-- After createCheckout, `/orderdetails` SSR-injects `PRELOAD_DATA.checkout`
-  (merchantCartToken). Global-e then writes:
-  `?confirmationCartToken=<GE_TOKEN>&countryCode=XX`
-- Bare `/orderdetails` without a checkout hold often 500s.
+- createCheckout body must match SPA: omit shippingAreaCode/defaultAreaCode
+  for normal carts; HK eventPickup uses lowercase `hk`|`mo` (not `HK`).
+- After createCheckout, `/orderdetails` SSR-injects `PRELOAD_DATA.checkout`.
+  Global-e then writes `?confirmationCartToken=<GE_TOKEN>&countryCode=XX`.
+- GetCartToken fails until Bandai accepts createCheckout (GE CartNotFound).
 
 Export strategy:
 1) Soft-open `/cart` (suffix + DOM `[merchantcarttoken]`)
 2) Bootstrap CSRF via `/api/context/member`
-3) Read `/api/cart/detail`, build merchant token, try createCheckout
-4) JSONP Global-e GetCartToken (+ GlobalECartId cookie / DOM seed)
+3) Read `/api/cart/detail`, build merchant token, try createCheckout variants
+4) JSONP Global-e GetCartToken (+ DOM seed)
 5) If checkoutSn exists, soft-open `/orderdetails` and poll GE token
 6) Return to PDP
 """
@@ -102,6 +103,7 @@ const fetchJson = async (url, opts) => {
   opts = opts || {};
   const headers = Object.assign({
     'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en',
     'X-Requested-With': 'XMLHttpRequest',
     'X-G1-Area-Code': area,
   }, opts.headers || {});
@@ -188,6 +190,7 @@ const pickSubCart = (root) => {
 };
 
 const lineItemsFromCart = (cartObj) => {
+  // SPA: getLineItem().map(li => ({ cartItemSn: li.product.cartItemSn }))
   const lines = [];
   try {
     ((cartObj && cartObj.combinedShippings) || []).forEach((sh) => {
@@ -196,16 +199,30 @@ const lineItemsFromCart = (cartObj) => {
     (cartObj && (cartObj.cartLineItems || cartObj.lineItems || cartObj.items) || []).forEach((li) => lines.push(li));
   } catch (e) {}
   return lines.map((li) => {
-    const sn = (li && (li.cartItemSn || (li.product && li.product.cartItemSn) || li.cartLineItemSn)) || null;
+    const sn = (li && (
+      (li.product && li.product.cartItemSn) || li.cartItemSn || li.cartLineItemSn
+    )) || null;
     return sn ? { cartItemSn: sn } : null;
   }).filter(Boolean);
 };
 
-const seedMerchantToken = (token) => {
-  if (!token) return;
+const readDefaultShippingAreaCookie = () => {
   try {
-    document.cookie = 'GlobalECartId=' + encodeURIComponent(String(token))
-      + '; path=/; max-age=3600; SameSite=Lax';
+    const m = String(document.cookie || '').match(
+      /(?:^|;\s*)_BSP_CART_DEFAULT_SHIPPING_AREA_CODE_=([^;]+)/
+    );
+    return m ? decodeURIComponent(m[1]) : '';
+  } catch (e) { return ''; }
+};
+
+const seedMerchantToken = (token, cartId) => {
+  if (!token) return;
+  // Bandai/GE often keep GlobalECartId as bare cartId; DOM holds full merchant token.
+  try {
+    if (cartId) {
+      document.cookie = 'GlobalECartId=' + encodeURIComponent(String(cartId))
+        + '; path=/; max-age=3600; SameSite=Lax';
+    }
   } catch (e) {}
   try {
     let el = document.getElementById('pbhk-merchant-token');
@@ -228,7 +245,7 @@ const tryGetCartTokens = async (candidates, country, currency, culture) => {
     const token = String(candidates[i] || '').trim();
     if (!token || seen[token]) continue;
     seen[token] = true;
-    seedMerchantToken(token);
+    seedMerchantToken(token, token.indexOf('_Checkout_') > 0 ? token.split('_Checkout_')[0] : '');
     const resp = await jsonpGetCartToken({
       MerchantCartToken: token,
       CountryCode: country,
@@ -345,8 +362,8 @@ _EXPORT_CART_JS = _JS_HELPERS + r"""
   const cartId = cartObj && (cartObj.cartId || cartObj.id) || '';
   const cartSn = cartObj && (cartObj.cartSn || cartObj.cartSN) || '';
   const items = lineItemsFromCart(cartObj);
-  const shippingArea = (cartObj && (cartObj.shippingAreaCode || cartObj.areaCode
-    || (cartObj.deliveryGroup && cartObj.deliveryGroup.areaCode))) || country;
+  const hasEventPickup = !!(cartObj && cartObj.eventPickup);
+  const defaultShipCookie = readDefaultShippingAreaCookie();
   steps.push({
     step: 'cart',
     detailOk: !!detail.ok,
@@ -357,6 +374,8 @@ _EXPORT_CART_JS = _JS_HELPERS + r"""
     cartSn: cartSn ? String(cartSn) : '',
     itemCount: items.length,
     totalItemCount: root && root.totalItemCount,
+    eventPickup: hasEventPickup,
+    defaultShipCookie: defaultShipCookie || '',
   });
 
   let merchantCartToken = domTokens[0] || '';
@@ -365,37 +384,81 @@ _EXPORT_CART_JS = _JS_HELPERS + r"""
   } else if (!merchantCartToken && cartId) {
     merchantCartToken = String(cartId) + '_Checkout_';
   }
-  if (merchantCartToken) seedMerchantToken(merchantCartToken);
+  if (merchantCartToken) seedMerchantToken(merchantCartToken, cartId);
 
-  // 5) Bandai createCheckout (client UI requires login; API may still work for guests).
+  // 5) Bandai createCheckout.
+  // SPA payload (Cart-nuJ3): shippingAreaCode / defaultAreaCode are OMITTED for normal
+  // carts. HK shipping UI only appears for eventPickup and uses lowercase hk|mo —
+  // NOT country "HK". Sending defaultAreaCode:"HK" caused InternalRestApiServerError 500.
   let checkoutSn = '';
   let checkoutStatus = 0;
   let checkoutErr = '';
+  let checkoutVariant = '';
   if (cartSn && merchantCartToken) {
-    const created = await fetchJson('/api/cart/' + encodeURIComponent(String(cartSn)) + '/checkout', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        merchantCartToken,
-        shippingAreaCode: shippingArea || country,
-        defaultAreaCode: area.toUpperCase(),
-        items,
-      }),
-    });
-    checkoutStatus = created.status;
-    if (created.ok && created.body && created.body.checkoutSn != null) {
-      checkoutSn = String(created.body.checkoutSn);
-      try { sessionStorage.setItem('bsp_checkout_sn', checkoutSn); } catch (e) {}
-      if (created.body.merchantCartToken) {
-        merchantCartToken = String(created.body.merchantCartToken);
-        seedMerchantToken(merchantCartToken);
-      }
+    const variants = [];
+    // Primary: match non-event-pickup SPA (omit area codes).
+    variants.push({ name: 'token+items', body: { merchantCartToken, items } });
+    if (hasEventPickup || defaultShipCookie) {
+      const ship = defaultShipCookie || 'hk';
+      variants.push({
+        name: 'ship-' + ship,
+        body: { merchantCartToken, shippingAreaCode: ship, items },
+      });
+      variants.push({
+        name: 'ship+default-' + ship,
+        body: {
+          merchantCartToken,
+          shippingAreaCode: ship,
+          defaultAreaCode: ship,
+          items,
+        },
+      });
     } else {
+      // Fallback lowercase area codes (HK shipping selector values).
+      variants.push({
+        name: 'ship-hk',
+        body: { merchantCartToken, shippingAreaCode: 'hk', items },
+      });
+      variants.push({
+        name: 'ship-hk+default',
+        body: {
+          merchantCartToken,
+          shippingAreaCode: 'hk',
+          defaultAreaCode: 'hk',
+          items,
+        },
+      });
+    }
+
+    for (let vi = 0; vi < variants.length && !checkoutSn; vi++) {
+      const v = variants[vi];
+      const created = await fetchJson(
+        '/api/cart/' + encodeURIComponent(String(cartSn)) + '/checkout',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(v.body),
+        }
+      );
+      checkoutStatus = created.status;
+      checkoutVariant = v.name;
+      if (created.ok && created.body && created.body.checkoutSn != null) {
+        checkoutSn = String(created.body.checkoutSn);
+        try { sessionStorage.setItem('bsp_checkout_sn', checkoutSn); } catch (e) {}
+        if (created.body.merchantCartToken) {
+          merchantCartToken = String(created.body.merchantCartToken);
+          seedMerchantToken(merchantCartToken, cartId);
+        }
+        checkoutErr = '';
+        break;
+      }
       try {
         checkoutErr = (typeof created.body === 'object' && created.body)
           ? JSON.stringify(created.body).slice(0, 220)
           : String(created.body || created.error || '').slice(0, 220);
       } catch (e) { checkoutErr = String(created.status || ''); }
+      // 401/403 = auth; no point trying more area variants.
+      if (created.status === 401 || created.status === 403) break;
     }
   }
   steps.push({
@@ -403,8 +466,10 @@ _EXPORT_CART_JS = _JS_HELPERS + r"""
     ok: !!checkoutSn,
     status: checkoutStatus,
     checkoutSn: checkoutSn || '',
+    variant: checkoutVariant,
     err: checkoutErr,
     merchantCartToken: merchantCartToken ? String(merchantCartToken).slice(0, 120) : '',
+    itemSns: items.map((x) => x.cartItemSn).slice(0, 5),
   });
 
   // 6) Global-e GetCartToken candidates.
@@ -509,8 +574,9 @@ class PortableCheckout:
             )
             if self.login_required_hint:
                 lines.append(
-                    "_Bandai cart UI requires login before checkout export — "
-                    "after importing SESSION, sign in → Cart → Proceed to checkout._"
+                    "_Bandai `createCheckout` failed for this guest session — "
+                    "sign in (same SESSION) → Cart → Proceed to checkout → "
+                    "copy the `/orderdetails?confirmationCartToken=…` URL._"
                 )
         if self.ge_cart_token:
             lines.append(f"`confirmationCartToken` = `{self.ge_cart_token}`")
@@ -597,8 +663,10 @@ class PortableCheckout:
                 {
                     "name": "Login note",
                     "value": (
-                        "createCheckout blocked/unauthorized for guest. "
-                        "Import SESSION → sign in → Cart → Proceed → `/orderdetails`."
+                        "createCheckout failed (guest/area payload). "
+                        "GE token needs a checkout hold. "
+                        "Import SESSION → sign in → Cart → Proceed → "
+                        "`/orderdetails?confirmationCartToken=…`."
                     ),
                     "inline": False,
                 }
@@ -917,13 +985,14 @@ def export_checkout_from_held_cart(
         )
 
     portable = bool(ge_token) and _url_has_checkout_token(payment)
-    if not portable and not checkout_sn and not login_hint:
-        # Guest createCheckout often 401/403 — surface that clearly when empty.
+    if not portable and not checkout_sn:
         for step in snap.get("steps") or []:
             if isinstance(step, dict) and step.get("step") == "createCheckout":
                 status = int(step.get("status") or 0)
-                err = str(step.get("err") or "")
-                if status in (401, 403) or "login" in err.lower() or "auth" in err.lower():
+                err = str(step.get("err") or "").lower()
+                if status in (401, 403, 500) or any(
+                    x in err for x in ("login", "auth", "unauthorized", "internalrestapi")
+                ):
                     login_hint = True
                 break
 
