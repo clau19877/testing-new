@@ -151,25 +151,36 @@ def append_cart_success(
     payment_url: str,
     note: str,
     product_url: str = "",
+    extra: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Always persist cart success locally (even when Discord is off)."""
     folder.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    extra = extra or {}
     line = (
-        f"{stamp}\t{instance}\t{product_code}\t{payment_url}\t{note}\t{product_url}\n"
+        f"{stamp}\t{instance}\t{product_code}\t{payment_url}\t{note}\t{product_url}\t"
+        f"portable={extra.get('portable','')}\t"
+        f"ge={extra.get('ge_cart_token','')}\t"
+        f"merchant={extra.get('merchant_cart_token','')}\n"
     )
     log_path = folder / "cart_successes.log"
     with log_path.open("a", encoding="utf-8") as fh:
         fh.write(line)
     last = folder / "last_payment_url.txt"
-    last.write_text(
-        f"{payment_url}\n"
-        f"instance={instance}\n"
-        f"product={product_code}\n"
-        f"note={note}\n"
-        f"at={stamp}\n",
-        encoding="utf-8",
-    )
+    details = [
+        payment_url,
+        f"instance={instance}",
+        f"product={product_code}",
+        f"note={note}",
+        f"at={stamp}",
+        f"portable={extra.get('portable', '')}",
+        f"source={extra.get('source', '')}",
+        f"confirmationCartToken={extra.get('ge_cart_token', '')}",
+        f"GlobalECartId={extra.get('merchant_cart_token', '')}",
+        f"countryCode={extra.get('country_code', '')}",
+        f"cookies={extra.get('cookie_header', '')}",
+    ]
+    last.write_text("\n".join(details) + "\n", encoding="utf-8")
     return log_path
 
 

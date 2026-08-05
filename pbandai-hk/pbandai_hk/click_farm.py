@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from .browser_cart import _click_add_to_cart, _wait_for_product_ready
+from .checkout_link import PortableCheckout, extract_portable_checkout
 from .discord_util import (
     append_cart_success,
     looks_like_discord_webhook,
@@ -96,6 +97,7 @@ class FarmBrowser:
     clicks: int = 0
     success: bool = False
     payment_url: str = ""
+    checkout: Optional[PortableCheckout] = None
     _last_oos_refresh: float = 0.0
     _last_oos_log: float = 0.0
     _last_idle_activity: float = 0.0
@@ -484,10 +486,20 @@ class ClickFarm:
                     if ok:
                         wb.success = True
                         wb.payment_url = payment
+                        if wb.checkout is None and payment:
+                            wb.checkout = PortableCheckout(payment_url=payment, raw_url=payment)
                         with self._success_lock:
                             self._successes.append(wb)
-                        print(f"[{wb.name}] CART SUCCESS → {payment}")
-                        logger.info("[farm] success session=%s payment=%s note=%s", wb.name, payment, note)
+                        portable = "portable" if (wb.checkout and wb.checkout.portable) else "raw"
+                        print(f"[{wb.name}] CART SUCCESS ({portable}) → {payment}")
+                        logger.info(
+                            "[farm] success session=%s payment=%s note=%s portable=%s ge_token=%s",
+                            wb.name,
+                            payment,
+                            note,
+                            bool(wb.checkout.portable) if wb.checkout else False,
+                            "yes" if wb.checkout and wb.checkout.ge_cart_token else "no",
+                        )
                         self._notify_discord(wb, payment, note)
                         if self.config.stop_on_first_cart:
                             self._stop.set()
@@ -724,6 +736,10 @@ class ClickFarm:
         cart_url = f"{self.config.base_url}/{self.config.area_code}/cart"
         checkout_url = f"{self.config.base_url}/{self.config.area_code}/checkout"
         try:
+            try:
+                driver.set_script_timeout(20)
+            except Exception:  # noqa: BLE001
+                pass
             driver.get(cart_url)
             time.sleep(2.0)
             source = (driver.page_source or "").lower()
@@ -748,30 +764,40 @@ class ClickFarm:
                         pass
                     return ""
 
-            # Try checkout CTA
+            # Try checkout CTA (Global-e rewrites buttons / issues GE_CART_TOKEN).
             clicked_checkout = self._click_checkout(driver)
             if clicked_checkout:
-                time.sleep(2.5)
+                time.sleep(2.0)
             url = (driver.current_url or "").strip()
-            # Prefer Global-e / checkout / payment URLs
-            low = url.lower()
-            if any(x in low for x in ("global-e", "globale", "checkout", "payment", "pay.")):
-                payment = url
-            elif "/cart" in low:
-                payment = url or cart_url
-            else:
-                payment = url or cart_url
-
-            # Soft attempt checkout URL if still on cart
-            if payment.rstrip("/").endswith("/cart"):
+            if url.rstrip("/").endswith("/cart") or "checkout" not in (url or "").lower():
                 try:
                     driver.get(checkout_url)
                     time.sleep(1.5)
-                    cur = (driver.current_url or "").strip()
-                    if cur and "page not available" not in (driver.title or "").lower():
-                        payment = cur
                 except Exception:  # noqa: BLE001
                     pass
+            # Second checkout click if still on cart/checkout landing (GE hydrate).
+            self._click_checkout(driver)
+            time.sleep(1.0)
+
+            portable = extract_portable_checkout(
+                driver,
+                base_url=self.config.base_url,
+                area_code=self.config.area_code,
+                wait_seconds=14.0,
+            )
+            wb.checkout = portable
+            payment = portable.payment_url or (driver.current_url or "").strip() or cart_url
+            print(
+                f"[{wb.name}] checkout link portable={portable.portable} "
+                f"source={portable.source} ge_token={'yes' if portable.ge_cart_token else 'no'}"
+            )
+            logger.info(
+                "[farm] %s portable=%s source=%s payment=%s",
+                wb.name,
+                portable.portable,
+                portable.source,
+                payment[:200],
+            )
 
             # Park back on PDP for continued farm (unless stopping)
             if not self.config.stop_on_first_cart:
@@ -834,57 +860,84 @@ class ClickFarm:
     def _notify_discord(self, wb: FarmBrowser, payment_url: str, note: str) -> None:
         product_url = self._product_url()
         area = (getattr(self.config, "area_code", "") or "hk").upper()
+        checkout = wb.checkout or PortableCheckout(payment_url=payment_url, raw_url=payment_url)
+        if payment_url and checkout.payment_url != payment_url and not checkout.portable:
+            checkout.payment_url = payment_url
         # Always persist locally first — never lose a checkout link.
         try:
             log_path = append_cart_success(
                 folder=Path.cwd() / "logs",
                 instance=wb.name,
                 product_code=self.product_code,
-                payment_url=payment_url,
+                payment_url=checkout.payment_url or payment_url,
                 note=note,
                 product_url=product_url,
+                extra={
+                    "portable": checkout.portable,
+                    "ge_cart_token": checkout.ge_cart_token,
+                    "merchant_cart_token": checkout.merchant_cart_token,
+                    "country_code": checkout.country_code,
+                    "cookie_header": checkout.cookie_header,
+                    "source": checkout.source,
+                },
+            )
+            # Dedicated token dump for manual recovery.
+            token_path = Path.cwd() / "logs" / f"checkout_tokens_{wb.name}.txt"
+            token_path.write_text(
+                "\n".join(
+                    [
+                        checkout.payment_url or payment_url,
+                        f"portable={checkout.portable}",
+                        f"source={checkout.source}",
+                        f"confirmationCartToken={checkout.ge_cart_token}",
+                        f"GlobalECartId={checkout.merchant_cart_token}",
+                        f"countryCode={checkout.country_code}",
+                        f"cookies={checkout.cookie_header}",
+                        f"product={self.product_code}",
+                        f"note={note}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
             )
             print(f"[{wb.name}] saved payment → {log_path}")
+            print(f"[{wb.name}] saved tokens → {token_path}")
         except Exception as exc:  # noqa: BLE001
             log_exception(logger, f"cart success log failed {wb.name}", exc)
 
         webhook, hook_src = self._resolve_webhook()
         if webhook:
             self.config.discord_webhook_url = webhook
-        content = (
-            f"**P-Bandai {area} cart success** `{wb.name}`\n"
-            f"Product: `{self.product_code}`\n"
-            f"Product URL: {product_url}\n"
-            f"Payment / cart link: {payment_url}\n"
-            f"Note: {note}"
+        content = checkout.discord_content(
+            area=area,
+            product_code=self.product_code,
+            product_url=product_url,
+            instance=wb.name,
+            note=note,
         )
         if not webhook:
-            print(f"[farm] Discord webhook not set — payment link:\n{payment_url}")
-            logger.warning("[farm] no DISCORD_WEBHOOK_URL; payment=%s", payment_url)
+            print(f"[farm] Discord webhook not set — payment link:\n{checkout.payment_url}")
+            logger.warning("[farm] no DISCORD_WEBHOOK_URL; payment=%s", checkout.payment_url)
             return
         if not looks_like_discord_webhook(webhook):
             print(
                 f"[farm] Discord webhook looks invalid ({redact_webhook(webhook)}) — "
-                f"payment link:\n{payment_url}"
+                f"payment link:\n{checkout.payment_url}"
             )
             logger.warning(
                 "[farm] invalid webhook source=%s url=%s payment=%s",
                 hook_src,
                 redact_webhook(webhook),
-                payment_url,
+                checkout.payment_url,
             )
             return
         embeds = [
-            {
-                "title": f"Cart OK — {self.product_code}",
-                "description": (
-                    f"**Instance:** `{wb.name}`\n"
-                    f"**Area:** `{area}`\n"
-                    f"**Payment link:** {payment_url}\n"
-                    f"**Product:** {product_url}"
-                ),
-                "color": 5763719,
-            }
+            checkout.discord_embed(
+                area=area,
+                product_code=self.product_code,
+                product_url=product_url,
+                instance=wb.name,
+            )
         ]
         ok, detail = send_discord_webhook(
             webhook,
@@ -894,22 +947,23 @@ class ClickFarm:
         )
         if ok:
             logger.info(
-                "[farm] discord ok instance=%s source=%s detail=%s",
+                "[farm] discord ok instance=%s source=%s detail=%s portable=%s",
                 wb.name,
                 hook_src or "config",
                 detail,
+                checkout.portable,
             )
-            print(f"[{wb.name}] Discord webhook sent ({detail})")
+            print(f"[{wb.name}] Discord webhook sent ({detail}) portable={checkout.portable}")
         else:
             logger.error(
                 "[farm] discord FAILED instance=%s source=%s detail=%s payment=%s",
                 wb.name,
                 hook_src or "config",
                 detail,
-                payment_url,
+                checkout.payment_url,
             )
             print(f"[{wb.name}] Discord webhook error: {detail}")
-            print(f"[{wb.name}] payment link (saved to logs/):\n{payment_url}")
+            print(f"[{wb.name}] payment link (saved to logs/):\n{checkout.payment_url}")
 
     def _warm_home(self, driver: Any, *, home: str, name: str) -> None:
         """Browse /{area}/ briefly so the first PDP hit is not a cold direct open."""

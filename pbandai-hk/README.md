@@ -84,7 +84,7 @@ PRODUCT_LINKS=https://p-bandai.com/us/item/N2890904001
 BACKGROUND_MODE=0
 ```
 
-Each instance clicks PLACE PRE-ORDER at **:00 of every minute**. On cart success the bot opens cart/checkout, posts the payment (or cart) URL to Discord, then **keeps going** on the next minute marks.
+Each instance clicks PLACE PRE-ORDER at **:00 of every minute**. On cart success the bot opens cart/checkout, captures the Global-e cart token (`confirmationCartToken` / `GE_CART_TOKEN`), and posts a **pasteable checkout URL** (plus token/cookie backup) to Discord, then **keeps going** on the next minute marks.
 
 ### Monitor-only `.env` example
 
