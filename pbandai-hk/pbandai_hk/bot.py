@@ -93,11 +93,17 @@ class PBandaiHkBot:
                 raise RuntimeError("click farm: no instances planned")
             at = int(self.config.click_at_second)
             sched = f":{at:02d}/min" if at >= 0 else f"every {self.config.click_interval_seconds}s"
+            discord_state = "on" if self.config.discord_webhook_url else "OFF"
             print(
                 f"Click farm planned={planned} independent instance(s) "
                 f"| schedule={sched} (keep going) "
-                f"| discord={'on' if self.config.discord_webhook_url else 'OFF'}"
+                f"| discord={discord_state}"
             )
+            if not self.config.discord_webhook_url:
+                print(
+                    "WARNING: DISCORD_WEBHOOK_URL is empty — Discord will not be notified.\n"
+                    "         Put your webhook in .env OR in discord_webhook.txt next to the bot."
+                )
             return
 
         # CSV tasks: N rows => N parallel sessions, each with a random proxy.

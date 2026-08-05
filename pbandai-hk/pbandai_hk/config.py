@@ -4,6 +4,7 @@ from typing import List
 
 from dotenv import load_dotenv
 
+from .discord_util import normalize_webhook, resolve_discord_webhook
 from .links import extract_product_codes
 
 
@@ -95,12 +96,27 @@ class Config:
 
     @classmethod
     def from_env(cls, dotenv_path: str | None = None) -> "Config":
-        load_dotenv(dotenv_path)
+        # override=True so a local .env wins over empty shell exports.
+        load_dotenv(dotenv_path, override=True)
         precheck = _split_csv(os.getenv("PRECHECK_LIST"))
         target = _split_csv(os.getenv("TARGET_LIST"))
         product_links = _split_csv(os.getenv("PRODUCT_LINKS"))
         explicit_codes = _split_csv(os.getenv("PRODUCT_CODES"))
         product_codes = extract_product_codes([*product_links, *explicit_codes])
+        # Prefer .env value; fall back to discord_webhook.txt / aliases.
+        env_hook = normalize_webhook(
+            os.getenv("DISCORD_WEBHOOK_URL")
+            or os.getenv("DISCORD_WEBHOOK")
+            or os.getenv("DISCORD_HOOK")
+        )
+        hook, hook_src = resolve_discord_webhook(config_value=env_hook, reload_env=False)
+        if hook and hook_src and hook_src != "config":
+            # Surface non-.env sources for prepare() logging.
+            os.environ["DISCORD_WEBHOOK_SOURCE"] = hook_src
+        elif hook:
+            os.environ["DISCORD_WEBHOOK_SOURCE"] = "env"
+        else:
+            os.environ.pop("DISCORD_WEBHOOK_SOURCE", None)
         return cls(
             area_code=(os.getenv("AREA_CODE") or "hk").lower(),
             base_url=(os.getenv("BASE_URL") or "https://p-bandai.com").rstrip("/"),
@@ -139,7 +155,7 @@ class Config:
             idle_activity_seconds=float(os.getenv("IDLE_ACTIVITY_SECONDS") or "8"),
             unique_browser_profiles=_as_bool(os.getenv("UNIQUE_BROWSER_PROFILES"), True),
             home_warmup_seconds=float(os.getenv("HOME_WARMUP_SECONDS") or "3"),
-            discord_webhook_url=(os.getenv("DISCORD_WEBHOOK_URL") or "").strip(),
+            discord_webhook_url=hook,
             task_csv=os.getenv("TASK_CSV") or "task.csv",
             proxy_csv=os.getenv("PROXY_CSV") or "proxy.csv",
             proxy_assign_mode=(os.getenv("PROXY_ASSIGN_MODE") or "random").strip().lower(),

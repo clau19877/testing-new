@@ -55,6 +55,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 # edit .env — set DISCORD_WEBHOOK_URL
+# (or put the webhook alone in discord_webhook.txt — survives .env reset)
 ```
 
 ## Quick use
@@ -125,7 +126,7 @@ Accepted proxy formats: `host:port:user:pass`, `http://user:pass@host:port`, `so
 | `OOS_REFRESH_SECONDS` | Hard-refresh while waiting if UI shows OOS/PNA (jittered per instance) |
 | `PDP_MAX_CONCURRENT` | Max simultaneous PDP/home navigations (default 3; cuts heal stampede) |
 | `IDLE_ACTIVITY_SECONDS` | Scroll/blank-click while waiting (keep session alive) |
-| `DISCORD_WEBHOOK_URL` | Discord webhook; receives payment/cart link |
+| `DISCORD_WEBHOOK_URL` | Discord webhook; receives payment/cart link. Also reads `discord_webhook.txt` if .env is empty. Cart URLs always saved to `logs/cart_successes.log` |
 | `BACKGROUND_MODE` | `0` headed (recommended), `1` headless |
 | `PROXY_URL` / `PROXY_CSV` | Optional proxies |
 | `SEARCH_KEYWORDS` | Optional keywords for `/api/search` |

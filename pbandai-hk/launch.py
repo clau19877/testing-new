@@ -48,12 +48,31 @@ def ensure_env_file() -> None:
     if not env.exists():
         print("Creating .env from .env.example ...")
         shutil.copyfile(example, env)
+        # Prefer durable sidecar webhook if present.
+        sidecar = ROOT / "discord_webhook.txt"
+        if sidecar.exists():
+            for raw in sidecar.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw.strip()
+                if line and not line.startswith("#"):
+                    _set_env_value(env, "DISCORD_WEBHOOK_URL", line.strip('"').strip("'"))
+                    print("Filled DISCORD_WEBHOOK_URL from discord_webhook.txt")
+                    break
         print(f"Edit {env} then re-run.")
         return
     added = merge_missing_env_keys(example, env)
     if added:
         print(f"Updated .env with {len(added)} new key(s): {', '.join(added)}")
         print("Review .env — new drop settings may need values.")
+    # If .env has empty webhook but sidecar has one, inject it.
+    if not _read_env_value(env, "DISCORD_WEBHOOK_URL"):
+        sidecar = ROOT / "discord_webhook.txt"
+        if sidecar.exists():
+            for raw in sidecar.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw.strip()
+                if line and not line.startswith("#"):
+                    _set_env_value(env, "DISCORD_WEBHOOK_URL", line.strip('"').strip("'"))
+                    print("Filled DISCORD_WEBHOOK_URL from discord_webhook.txt")
+                    break
 
 
 def merge_missing_env_keys(example: Path, env: Path) -> list[str]:
@@ -89,17 +108,62 @@ def _env_keys(text: str) -> set[str]:
     return keys
 
 
+def _read_env_value(path: Path, key: str) -> str:
+    if not path.exists():
+        return ""
+    prefix = f"{key}="
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if line.startswith(prefix):
+            return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
+def _set_env_value(path: Path, key: str, value: str) -> None:
+    """Set or replace KEY=value in an .env file (preserves other lines)."""
+    if not value:
+        return
+    lines: list[str] = []
+    found = False
+    if path.exists():
+        for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if raw.strip().startswith(f"{key}="):
+                lines.append(f"{key}={value}")
+                found = True
+            else:
+                lines.append(raw.rstrip("\n"))
+    if not found:
+        lines.append(f"{key}={value}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def reset_env_from_example() -> None:
     example = ROOT / ".env.example"
     env = ROOT / ".env"
     if not example.exists():
         print(".env.example not found")
         return
+    # Preserve Discord webhook across reset (also write durable sidecar).
+    old_hook = _read_env_value(env, "DISCORD_WEBHOOK_URL") if env.exists() else ""
+    sidecar = ROOT / "discord_webhook.txt"
+    if not old_hook and sidecar.exists():
+        for raw in sidecar.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if line and not line.startswith("#"):
+                old_hook = line.strip('"').strip("'")
+                break
     if env.exists():
         bak = ROOT / f".env.bak.{int(__import__('time').time())}"
         shutil.copyfile(env, bak)
         print(f"Backed up old .env -> {bak.name}")
     shutil.copyfile(example, env)
+    if old_hook:
+        _set_env_value(env, "DISCORD_WEBHOOK_URL", old_hook)
+        try:
+            sidecar.write_text(old_hook + "\n", encoding="utf-8")
+        except OSError:
+            pass
+        print("Preserved DISCORD_WEBHOOK_URL from previous .env / discord_webhook.txt")
     print("Replaced .env with latest .env.example")
     open_env()
 

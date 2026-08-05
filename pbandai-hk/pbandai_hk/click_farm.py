@@ -8,7 +8,6 @@ to Discord webhook, then returns to the PDP for the next minute mark.
 
 from __future__ import annotations
 
-import json
 import random
 import threading
 import time
@@ -16,9 +15,16 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
-from urllib import request as urlrequest
 
 from .browser_cart import _click_add_to_cart, _wait_for_product_ready
+from .discord_util import (
+    append_cart_success,
+    looks_like_discord_webhook,
+    redact_webhook,
+    resolve_discord_webhook,
+    send_discord_webhook,
+    write_webhook_sidecar,
+)
 from .logging_utils import get_logger, log_exception
 from .proxy_util import redact_proxy
 from .session_login import _create_webdriver, build_browser_identity
@@ -120,17 +126,33 @@ class ClickFarm:
             for i in range(n)
         ]
         self._pdp_gate = threading.Semaphore(max(1, int(self.config.pdp_max_concurrent)))
+        webhook, hook_src = self._resolve_webhook()
+        if webhook:
+            self.config.discord_webhook_url = webhook
+            # Keep a sidecar so menu [0] .env reset cannot wipe Discord again.
+            write_webhook_sidecar(webhook, Path.cwd())
+            write_webhook_sidecar(webhook, Path(__file__).resolve().parent.parent)
+        discord_label = f"yes ({hook_src or 'config'})" if webhook else "no"
         print(
             f"[farm] planned {n} independent instance(s) on {self.product_code} "
             f"({schedule}; each opens + clicks on its own thread)"
         )
+        if webhook:
+            print(f"[farm] Discord webhook ON · source={hook_src or 'config'} · {redact_webhook(webhook)}")
+        else:
+            print(
+                "[farm] WARNING: Discord webhook OFF — cart success will NOT ping Discord.\n"
+                "         Fix: set DISCORD_WEBHOOK_URL in .env  OR  put the URL alone in\n"
+                "         discord_webhook.txt (same folder as the bot). Success URLs are\n"
+                "         always saved to logs/cart_successes.log + logs/last_payment_url.txt"
+            )
         logger.info(
             "[farm] prepare planned=%s product=%s schedule=%s discord=%s "
             "independent=yes stop_on_first=%s pdp_max_concurrent=%s",
             n,
             self.product_code,
             schedule,
-            "yes" if self.config.discord_webhook_url else "no",
+            discord_label,
             self.config.stop_on_first_cart,
             self.config.pdp_max_concurrent,
         )
@@ -798,11 +820,39 @@ class ClickFarm:
             pass
         return False
 
+    def _resolve_webhook(self) -> tuple[str, str]:
+        """Re-read webhook at runtime (env / .env value / discord_webhook.txt)."""
+        return resolve_discord_webhook(
+            config_value=getattr(self.config, "discord_webhook_url", "") or "",
+            search_dirs=[
+                Path.cwd(),
+                Path(__file__).resolve().parent.parent,
+            ],
+            reload_env=True,
+        )
+
     def _notify_discord(self, wb: FarmBrowser, payment_url: str, note: str) -> None:
-        webhook = (self.config.discord_webhook_url or "").strip()
         product_url = self._product_url()
+        area = (getattr(self.config, "area_code", "") or "hk").upper()
+        # Always persist locally first — never lose a checkout link.
+        try:
+            log_path = append_cart_success(
+                folder=Path.cwd() / "logs",
+                instance=wb.name,
+                product_code=self.product_code,
+                payment_url=payment_url,
+                note=note,
+                product_url=product_url,
+            )
+            print(f"[{wb.name}] saved payment → {log_path}")
+        except Exception as exc:  # noqa: BLE001
+            log_exception(logger, f"cart success log failed {wb.name}", exc)
+
+        webhook, hook_src = self._resolve_webhook()
+        if webhook:
+            self.config.discord_webhook_url = webhook
         content = (
-            f"**P-Bandai HK cart success** `{wb.name}`\n"
+            f"**P-Bandai {area} cart success** `{wb.name}`\n"
             f"Product: `{self.product_code}`\n"
             f"Product URL: {product_url}\n"
             f"Payment / cart link: {payment_url}\n"
@@ -812,34 +862,54 @@ class ClickFarm:
             print(f"[farm] Discord webhook not set — payment link:\n{payment_url}")
             logger.warning("[farm] no DISCORD_WEBHOOK_URL; payment=%s", payment_url)
             return
-        payload = {
-            "content": content,
-            "embeds": [
-                {
-                    "title": f"Cart OK — {self.product_code}",
-                    "description": (
-                        f"**Instance:** `{wb.name}`\n"
-                        f"**Payment link:** {payment_url}\n"
-                        f"**Product:** {product_url}"
-                    ),
-                    "color": 5763719,
-                }
-            ],
-        }
-        try:
-            data = json.dumps(payload).encode("utf-8")
-            req = urlrequest.Request(
-                webhook,
-                data=data,
-                headers={"Content-Type": "application/json", "User-Agent": "pbandai-hk-bot"},
-                method="POST",
+        if not looks_like_discord_webhook(webhook):
+            print(
+                f"[farm] Discord webhook looks invalid ({redact_webhook(webhook)}) — "
+                f"payment link:\n{payment_url}"
             )
-            with urlrequest.urlopen(req, timeout=15) as resp:
-                logger.info("[farm] discord status=%s instance=%s", getattr(resp, "status", "?"), wb.name)
-            print(f"[{wb.name}] Discord webhook sent")
-        except Exception as exc:  # noqa: BLE001
-            log_exception(logger, f"discord webhook failed {wb.name}", exc)
-            print(f"[{wb.name}] Discord webhook error: {exc}")
+            logger.warning(
+                "[farm] invalid webhook source=%s url=%s payment=%s",
+                hook_src,
+                redact_webhook(webhook),
+                payment_url,
+            )
+            return
+        embeds = [
+            {
+                "title": f"Cart OK — {self.product_code}",
+                "description": (
+                    f"**Instance:** `{wb.name}`\n"
+                    f"**Area:** `{area}`\n"
+                    f"**Payment link:** {payment_url}\n"
+                    f"**Product:** {product_url}"
+                ),
+                "color": 5763719,
+            }
+        ]
+        ok, detail = send_discord_webhook(
+            webhook,
+            content=content,
+            embeds=embeds,
+            retries=3,
+        )
+        if ok:
+            logger.info(
+                "[farm] discord ok instance=%s source=%s detail=%s",
+                wb.name,
+                hook_src or "config",
+                detail,
+            )
+            print(f"[{wb.name}] Discord webhook sent ({detail})")
+        else:
+            logger.error(
+                "[farm] discord FAILED instance=%s source=%s detail=%s payment=%s",
+                wb.name,
+                hook_src or "config",
+                detail,
+                payment_url,
+            )
+            print(f"[{wb.name}] Discord webhook error: {detail}")
+            print(f"[{wb.name}] payment link (saved to logs/):\n{payment_url}")
 
     def _warm_home(self, driver: Any, *, home: str, name: str) -> None:
         """Browse /{area}/ briefly so the first PDP hit is not a cold direct open."""

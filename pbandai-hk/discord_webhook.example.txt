@@ -1,0 +1,2 @@
+# Paste your Discord webhook URL on the next line (no quotes), then save as discord_webhook.txt
+# https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN

@@ -19,7 +19,9 @@ node_modules
 # P-Bandai HK module
 pbandai-hk/.venv/
 pbandai-hk/.env
+pbandai-hk/discord_webhook.txt
 pbandai-hk/logs/
+pbandai-hk/chrome_profiles/
 pbandai-hk.zip
 pbandai-hk/sessions.json
 pbandai-hk/sessions/*.cookies.json
