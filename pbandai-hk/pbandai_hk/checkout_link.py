@@ -1,22 +1,23 @@
-"""Export a pasteable Global-e checkout URL from a held cart (no checkout click).
+"""Export a pasteable P-Bandai / Global-e checkout URL from a held cart.
 
-After addToCart succeeds the guest cart is already held. We read SESSION /
-cart ids from the current page, call Global-e GetCartToken, and build:
+Bandai reality (from storefront JS):
+- ATC holds the cart (SESSION).
+- Real checkout route is `/{area}/orderdetails` (NOT `/{area}/checkout`).
+- Merchant cart token format: `{cartId}_Checkout_{globaleMerchantCartTokenSuffix}`
+- Export API: POST `/api/cart/{cartSn}/checkout` → `{ checkoutSn, ... }`
+- Global-e then issues GE_CART_TOKEN; pasteable URL uses
+  `/{area}/orderdetails?confirmationCartToken=...&countryCode=...`
 
-  /{area}/checkout?confirmationCartToken=<GE_TOKEN>&countryCode=XX
-
-Never navigate to /cart or /checkout for export. Never treat GE CSS/JS
-includes as checkout links.
+No Selenium navigation to /cart or /checkout — all via in-page fetch.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import urlencode, urlparse, urlunparse
 
 from .logging_utils import get_logger
 
@@ -57,13 +58,11 @@ _ASSET_HINTS = (
     "favicon",
 )
 
-# Runs entirely on the current page (PDP). No navigation.
+# Runs on the current page (PDP). Creates checkout via API, then GE token.
 _EXPORT_JS = r"""
 const area = String(arguments[0] || 'hk').toLowerCase();
 const merchantId = String(arguments[1] || '');
 const done = arguments[arguments.length - 1];
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const cookieMap = () => {
   const out = {};
@@ -73,35 +72,48 @@ const cookieMap = () => {
       if (i < 0) return;
       const k = part.slice(0, i).trim();
       const v = part.slice(i + 1).trim();
-      if (k) {
-        try { out[k] = decodeURIComponent(v); }
-        catch (e) { out[k] = v; }
-      }
+      if (!k) return;
+      try { out[k] = decodeURIComponent(v); } catch (e) { out[k] = v; }
     });
   } catch (e) {}
   return out;
 };
 
-const collectIds = (node, out, depth) => {
-  if (depth > 6 || node == null) return;
-  if (typeof node === 'string' || typeof node === 'number') {
-    const s = String(node);
-    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) out.push(s);
-    if (/^[A-Za-z0-9_-]{16,80}$/.test(s) && /cart|session|token/i.test(s)) out.push(s);
-    return;
-  }
-  if (Array.isArray(node)) {
-    node.slice(0, 40).forEach((v) => collectIds(v, out, depth + 1));
-    return;
-  }
-  if (typeof node === 'object') {
-    Object.keys(node).forEach((k) => {
-      const v = node[k];
-      if (/^(cartId|cartID|cart_id|merchantCartToken|MerchantCartToken|cartToken|CartToken|id)$/i.test(k)) {
-        if (v != null && v !== '') out.push(String(v));
-      }
-      collectIds(v, out, depth + 1);
-    });
+const csrfToken = () => {
+  try {
+    if (window.USER_DATA && window.USER_DATA.csrfToken) return String(window.USER_DATA.csrfToken);
+  } catch (e) {}
+  try {
+    const m = document.querySelector('meta[name="csrf-token"]');
+    if (m && m.content) return String(m.content);
+  } catch (e) {}
+  return '';
+};
+
+const fetchJson = async (url, opts) => {
+  opts = opts || {};
+  const headers = Object.assign({
+    'Accept': 'application/json, text/plain, */*',
+    'X-Requested-With': 'XMLHttpRequest',
+    'X-G1-Area-Code': area,
+  }, opts.headers || {});
+  const csrf = csrfToken();
+  if (csrf) headers['X-CSRF-TOKEN'] = csrf;
+  try {
+    const resp = await fetch(url, Object.assign({
+      credentials: 'include',
+      headers,
+    }, opts, { headers }));
+    const ct = String(resp.headers.get('content-type') || '');
+    let body = null;
+    if (ct.indexOf('json') >= 0) {
+      try { body = await resp.json(); } catch (e) { body = null; }
+    } else {
+      try { body = await resp.text(); } catch (e) { body = null; }
+    }
+    return { ok: resp.ok, status: resp.status, ct, body };
+  } catch (e) {
+    return { ok: false, status: 0, ct: '', body: null, error: String(e) };
   }
 };
 
@@ -125,24 +137,16 @@ const jsonpGetCartToken = (params) => new Promise((resolve) => {
   script.src = 'https://gepi.global-e.com/Checkout/GetCartToken?' + q + '&jsoncallback=' + cb;
   window[cb] = (data) => finish(data);
   script.onerror = () => finish(null);
-  setTimeout(() => finish(null), 8000);
+  setTimeout(() => finish(null), 9000);
   (document.head || document.documentElement).appendChild(script);
 });
 
-const fetchJson = async (url) => {
+const readSuffixFromHtml = (html) => {
   try {
-    const resp = await fetch(url, {
-      credentials: 'include',
-      headers: { 'Accept': 'application/json' },
-    });
-    const ct = String(resp.headers.get('content-type') || '');
-    if (!resp.ok || ct.indexOf('json') < 0) {
-      return { ok: false, status: resp.status, ct, body: null };
-    }
-    return { ok: true, status: resp.status, ct, body: await resp.json() };
-  } catch (e) {
-    return { ok: false, status: 0, ct: '', body: null, error: String(e) };
-  }
+    const m = String(html || '').match(/globaleMerchantCartTokenSuffix"\s*:\s*([0-9]+)/);
+    if (m) return m[1];
+  } catch (e) {}
+  return '';
 };
 
 (async () => {
@@ -163,83 +167,146 @@ const fetchJson = async (url) => {
     if (ge.CultureCode) culture = String(ge.CultureCode);
   } catch (e) {}
 
-  const idHints = [];
-  if (session) idHints.push(session);
-  if (sessionUuid) idHints.push(sessionUuid);
-  if (cookies.GlobalECartId) idHints.push(cookies.GlobalECartId);
-  if (cookies.GE_CART_TOKEN) idHints.push(cookies.GE_CART_TOKEN);
-
-  // Mine cart ids from summary / globale cart APIs (no navigation).
-  const summaryAttempts = [];
-  for (const path of ['/api/cart/summary', '/' + area + '/api/cart/summary']) {
-    const got = await fetchJson(path);
-    summaryAttempts.push({ path, status: got.status, ok: !!got.ok });
-    if (got.ok && got.body) collectIds(got.body, idHints, 0);
-  }
-  for (const tok of [session, sessionUuid].filter(Boolean)) {
-    const path = '/api/cart/external/globale/carts/' + encodeURIComponent(tok);
-    const got = await fetchJson(path);
-    summaryAttempts.push({ path, status: got.status, ok: !!got.ok });
-    if (got.ok && got.body) collectIds(got.body, idHints, 0);
-  }
-
-  // DOM merchantcarttoken attrs if somehow present on PDP widgets.
+  // Suffix lives in PRELOAD_DATA on cart/checkout pages; fetch cart HTML (no nav).
+  let suffix = '';
   try {
-    document.querySelectorAll('[merchantcarttoken]').forEach((el) => {
-      const v = el.getAttribute('merchantcarttoken');
-      if (v) idHints.push(v);
+    if (window.PRELOAD_DATA && window.PRELOAD_DATA.globaleMerchantCartTokenSuffix != null) {
+      suffix = String(window.PRELOAD_DATA.globaleMerchantCartTokenSuffix);
+    }
+  } catch (e) {}
+  if (!suffix) {
+    const cartHtml = await fetchJson('/' + area + '/cart', {
+      headers: { 'Accept': 'text/html,*/*' },
     });
+    if (typeof cartHtml.body === 'string') {
+      suffix = readSuffixFromHtml(cartHtml.body);
+    }
+  }
+
+  // Cart detail shape: { subCarts: [{ cartId, cartSn, combinedShippings: [{ lineItems }] }] }
+  const detail = await fetchJson('/api/cart/detail');
+  const summary = detail.ok ? null : await fetchJson('/api/cart/summary');
+  const root = (detail.ok && detail.body) ? detail.body
+    : (summary && summary.ok && summary.body) ? summary.body
+    : null;
+  const subCarts = (root && Array.isArray(root.subCarts)) ? root.subCarts : [];
+  const cartObj = subCarts[0] || root || null;
+
+  const cartId = cartObj && (cartObj.cartId || cartObj.id) || '';
+  const cartSn = cartObj && (cartObj.cartSn || cartObj.cartSN) || '';
+  const shippingArea = (cartObj && (cartObj.shippingAreaCode || cartObj.areaCode
+    || (cartObj.deliveryGroup && cartObj.deliveryGroup.areaCode))) || country;
+  const defaultArea = area.toUpperCase();
+
+  // Build Bandai merchant token: {cartId}_Checkout_{suffix}
+  let merchantCartToken = '';
+  if (cartId && suffix) {
+    merchantCartToken = String(cartId) + '_Checkout_' + String(suffix);
+  } else if (cartId) {
+    merchantCartToken = String(cartId) + '_Checkout_';
+  }
+
+  // Line items for proceed-to-checkout API (from combinedShippings.lineItems).
+  let items = [];
+  try {
+    const lines = [];
+    const ships = (cartObj && cartObj.combinedShippings) || [];
+    if (Array.isArray(ships)) {
+      ships.forEach((sh) => {
+        (sh.lineItems || []).forEach((li) => lines.push(li));
+      });
+    }
+    (cartObj && (cartObj.cartLineItems || cartObj.lineItems || cartObj.items) || []).forEach((li) => lines.push(li));
+    items = lines.map((li) => {
+      const sn = (li && (li.cartItemSn || (li.product && li.product.cartItemSn) || li.cartLineItemSn)) || null;
+      return sn ? { cartItemSn: sn } : null;
+    }).filter(Boolean);
   } catch (e) {}
 
-  const candidates = [];
-  idHints.forEach((v) => {
-    const s = String(v || '').trim();
-    if (s && candidates.indexOf(s) < 0) candidates.push(s);
+  const steps = [];
+  steps.push({
+    step: 'cartDetail',
+    ok: !!(detail && detail.ok),
+    status: detail ? detail.status : 0,
+    cartId: cartId ? String(cartId).slice(0, 64) : '',
+    cartSn: cartSn ? String(cartSn) : '',
+    suffix: suffix || '',
+    itemCount: items.length,
   });
 
-  const tokenAttempts = [];
+  // Export checkout hold → checkoutSn (Bandai's "proceed to checkout" API).
+  let checkoutSn = '';
+  let checkoutResp = null;
+  if (cartSn && merchantCartToken) {
+    const body = {
+      merchantCartToken: merchantCartToken,
+      shippingAreaCode: shippingArea || country,
+      defaultAreaCode: defaultArea,
+      items: items,
+    };
+    const created = await fetchJson('/api/cart/' + encodeURIComponent(String(cartSn)) + '/checkout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    checkoutResp = {
+      ok: !!created.ok,
+      status: created.status,
+      error: created.error || '',
+      bodyKeys: created.body && typeof created.body === 'object' ? Object.keys(created.body).slice(0, 20) : [],
+    };
+    if (created.ok && created.body && created.body.checkoutSn != null) {
+      checkoutSn = String(created.body.checkoutSn);
+      try { sessionStorage.setItem('bsp_checkout_sn', checkoutSn); } catch (e) {}
+      // Prefer merchant token returned by API if present.
+      if (created.body.merchantCartToken) {
+        merchantCartToken = String(created.body.merchantCartToken);
+      }
+    }
+    steps.push({ step: 'createCheckout', ok: !!checkoutSn, status: created.status, checkoutSn: checkoutSn });
+  } else {
+    steps.push({
+      step: 'createCheckout',
+      ok: false,
+      status: 0,
+      reason: !cartSn ? 'missing cartSn' : 'missing merchantCartToken',
+    });
+  }
+
+  // Ask Global-e for portable cart token using the REAL merchant token format.
   let geCartToken = cookies.GE_CART_TOKEN || '';
-  let merchantCartToken = '';
+  const tokenAttempts = [];
+  const candidates = [];
+  if (merchantCartToken) candidates.push(merchantCartToken);
+  if (cartId && suffix) candidates.push(String(cartId) + '_Checkout_' + String(suffix));
+  if (cartId) candidates.push(String(cartId));
+  if (sessionUuid) candidates.push(sessionUuid);
+  if (session) candidates.push(session);
 
   for (let i = 0; i < candidates.length && !geCartToken; i++) {
-    const merchantToken = candidates[i];
-    const params = {
-      MerchantCartToken: merchantToken,
+    const token = candidates[i];
+    const resp = await jsonpGetCartToken({
+      MerchantCartToken: token,
       CountryCode: country,
       CurrencyCode: currency,
       CultureCode: culture,
       MerchantId: merchantId,
       PreferedCultureCode: culture,
       IsJSONP: true,
-    };
-    const resp = await jsonpGetCartToken(params);
+    });
     tokenAttempts.push({
-      merchantToken: merchantToken.slice(0, 64),
-      success: !!(resp && (resp.CartToken || resp.Success)),
-      message: resp && (resp.Message || resp.message) || '',
+      merchantToken: String(token).slice(0, 96),
       hasToken: !!(resp && resp.CartToken),
+      success: !!(resp && (resp.Success || resp.CartToken)),
+      message: resp && (resp.Message || resp.message) || '',
     });
     if (resp && resp.CartToken) {
       geCartToken = String(resp.CartToken);
-      merchantCartToken = merchantToken;
+      merchantCartToken = token;
       break;
     }
   }
-
-  // Optional: GEM helper if already loaded on PDP.
-  let gemUrl = null;
-  try {
-    const gem = window.GEM_Components && window.GEM_Components.ExternalMethodsComponent;
-    if (gem && typeof gem.GetCheckoutUrl === 'function' && (merchantCartToken || session)) {
-      gemUrl = await new Promise((resolve) => {
-        let finished = false;
-        const finish = (v) => { if (!finished) { finished = true; resolve(v || null); } };
-        try { gem.GetCheckoutUrl({ CartToken: merchantCartToken || session }, finish); }
-        catch (e) { finish(null); }
-        setTimeout(() => finish(null), 4000);
-      });
-    }
-  } catch (e) {}
+  steps.push({ step: 'getCartToken', ok: !!geCartToken, attempts: tokenAttempts.length });
 
   done({
     href: String(location.href || ''),
@@ -250,21 +317,27 @@ const fetchJson = async (url) => {
     currency,
     culture,
     merchantId,
-    candidates: candidates.slice(0, 12),
-    summaryAttempts,
-    tokenAttempts,
+    suffix,
+    cartId: cartId ? String(cartId) : '',
+    cartSn: cartSn ? String(cartSn) : '',
+    checkoutSn,
+    merchantCartToken,
     geCartToken,
-    merchantCartToken: merchantCartToken || session || sessionUuid || '',
-    gemUrl,
+    checkoutResp,
+    steps,
+    tokenAttempts,
   });
-})().catch((e) => done({ error: String(e), cookies: {}, candidates: [], tokenAttempts: [] }));
+})().catch((e) => done({
+  error: String(e),
+  cookies: {},
+  steps: [],
+  tokenAttempts: [],
+}));
 """
 
 
 @dataclass
 class PortableCheckout:
-    """Checkout payload safe to paste into another browser."""
-
     payment_url: str
     portable: bool = False
     ge_cart_token: str = ""
@@ -275,6 +348,8 @@ class PortableCheckout:
     cookie_header: str = ""
     raw_url: str = ""
     source: str = ""
+    checkout_sn: str = ""
+    cart_id: str = ""
     notes: List[str] = field(default_factory=list)
 
     def discord_content(
@@ -294,19 +369,21 @@ class PortableCheckout:
         ]
         if self.portable:
             lines.append(
-                "_Tokenized Global-e link from held cart (no checkout click). "
+                "_Tokenized `/orderdetails` link (held-cart export). "
                 "Paste into a fresh browser to pay._"
             )
         else:
             lines.append(
-                "_⚠️ GE cart token not exported yet — use cookies/SESSION below "
-                "or retry; do not open CSS/JS links._"
+                "_⚠️ GE token missing — import SESSION cookies then open `/orderdetails`. "
+                "Do not use `/checkout` (that route 404s)._"
             )
         if self.ge_cart_token:
             lines.append(f"`confirmationCartToken` = `{self.ge_cart_token}`")
         if self.merchant_cart_token:
             lines.append(f"`MerchantCartToken` = `{self.merchant_cart_token}`")
-        if self.session_cookie and not self.portable:
+        if self.checkout_sn:
+            lines.append(f"`checkoutSn` = `{self.checkout_sn}`")
+        if self.session_cookie:
             lines.append(f"`SESSION` = `{self.session_cookie}`")
         if note:
             lines.append(f"Note: {note}")
@@ -337,7 +414,7 @@ class PortableCheckout:
         if self.ge_cart_token:
             fields.append(
                 {
-                    "name": "confirmationCartToken / GE_CART_TOKEN",
+                    "name": "confirmationCartToken",
                     "value": f"`{self.ge_cart_token[:300]}`",
                     "inline": False,
                 }
@@ -348,6 +425,14 @@ class PortableCheckout:
                     "name": "MerchantCartToken",
                     "value": f"`{self.merchant_cart_token[:300]}`",
                     "inline": False,
+                }
+            )
+        if self.checkout_sn:
+            fields.append(
+                {
+                    "name": "checkoutSn",
+                    "value": f"`{self.checkout_sn}`",
+                    "inline": True,
                 }
             )
         if self.session_cookie:
@@ -376,8 +461,8 @@ class PortableCheckout:
         return {
             "title": f"Cart OK — {product_code}",
             "description": (
-                "Held-cart export (no checkout step). "
-                "Paste the checkout link in another browser."
+                "Held-cart export → `/orderdetails` "
+                "(Bandai checkout route; `/checkout` is invalid)."
             )[:4096],
             "color": 5763719 if self.portable else 16776960,
             "fields": fields[:25],
@@ -395,11 +480,7 @@ def _url_has_checkout_token(url: str) -> bool:
     if _is_asset_url(url):
         return False
     low = (url or "").lower()
-    if "confirmationcarttoken=" in low:
-        return True
-    if "carttoken=" in low and ("checkout" in low or "global-e.com" in low):
-        return True
-    return False
+    return "confirmationcarttoken=" in low
 
 
 def _cookie_dict_from_driver(driver: Any) -> Dict[str, str]:
@@ -443,23 +524,22 @@ def _cookie_header(cookies: Dict[str, str]) -> str:
     return "; ".join(parts)[:1500]
 
 
-def _build_confirmation_url(
+def _orderdetails_url(
     *,
     base_url: str,
     area_code: str,
-    ge_cart_token: str,
+    ge_cart_token: str = "",
     country_code: str = "",
     currency_code: str = "",
 ) -> str:
-    token = (ge_cart_token or "").strip()
-    if not token:
-        return ""
     area = area_code.strip().lower() or "hk"
-    parts = urlparse(f"{base_url.rstrip('/')}/{area}/checkout")
-    q: Dict[str, str] = {"confirmationCartToken": token}
+    parts = urlparse(f"{base_url.rstrip('/')}/{area}/orderdetails")
+    q: Dict[str, str] = {}
+    if ge_cart_token:
+        q["confirmationCartToken"] = ge_cart_token
     if country_code:
         q["countryCode"] = country_code
-    if currency_code:
+    if currency_code and ge_cart_token:
         q["currencyCode"] = currency_code
     return urlunparse(
         (
@@ -467,46 +547,10 @@ def _build_confirmation_url(
             parts.netloc,
             parts.path,
             "",
-            urlencode(q),
+            urlencode(q) if q else "",
             "",
         )
     )
-
-
-def _ids_from_add_to_cart_body(body: str) -> List[str]:
-    text = (body or "").strip()
-    if not text:
-        return []
-    found: List[str] = []
-    try:
-        data = json.loads(text)
-    except Exception:  # noqa: BLE001
-        data = None
-    if data is not None:
-        stack = [data]
-        while stack and len(found) < 20:
-            cur = stack.pop()
-            if isinstance(cur, dict):
-                for k, v in cur.items():
-                    if re.search(r"cartid|merchantcarttoken|cart_token|carttoken", str(k), re.I):
-                        if v is not None and str(v).strip():
-                            found.append(str(v).strip())
-                    if isinstance(v, (dict, list)):
-                        stack.append(v)
-            elif isinstance(cur, list):
-                stack.extend(cur[:40])
-    for m in re.findall(
-        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-        text,
-        flags=re.I,
-    ):
-        found.append(m)
-    # de-dupe
-    out: List[str] = []
-    for x in found:
-        if x not in out:
-            out.append(x)
-    return out
 
 
 def export_checkout_from_held_cart(
@@ -516,13 +560,14 @@ def export_checkout_from_held_cart(
     area_code: str,
     add_to_cart_body: str = "",
 ) -> PortableCheckout:
-    """Export tokenized checkout URL from held cart without leaving the PDP."""
+    """Export tokenized /orderdetails checkout URL from held cart (no UI checkout)."""
+    del add_to_cart_body  # reserved for future body mining
     area = (area_code or "hk").strip().lower()
     merchant_id = _MERCHANT_IDS.get(area, "1925")
-    fallback = f"{base_url.rstrip('/')}/{area}/checkout"
+    fallback = _orderdetails_url(base_url=base_url, area_code=area)
 
     try:
-        driver.set_script_timeout(45)
+        driver.set_script_timeout(60)
     except Exception:  # noqa: BLE001
         pass
 
@@ -545,66 +590,68 @@ def export_checkout_from_held_cart(
     session = str(snap.get("session") or merged.get("SESSION") or "").strip()
     country = str(snap.get("country") or "").strip().upper() or area.upper()
     currency = str(snap.get("currency") or "").strip().upper()
+    checkout_sn = str(snap.get("checkoutSn") or "").strip()
+    cart_id = str(snap.get("cartId") or "").strip()
 
-    # Mine ids from addToCart response body as extra merchant-token candidates
-    # if script did not already get a GE token.
-    if not ge_token:
-        extra_ids = _ids_from_add_to_cart_body(add_to_cart_body)
-        if extra_ids:
-            logger.info("addToCart body yielded %s id hint(s)", len(extra_ids))
-
-    payment = _build_confirmation_url(
+    payment = _orderdetails_url(
         base_url=base_url,
         area_code=area,
         ge_cart_token=ge_token,
         country_code=country,
         currency_code=currency,
     )
-    source = "getCartToken" if payment else "fallback"
-    gem_url = str(snap.get("gemUrl") or "").strip()
-    if gem_url and not _is_asset_url(gem_url) and _url_has_checkout_token(gem_url):
-        payment = gem_url
-        source = "gemGetCheckoutUrl"
-    if not payment:
-        # Last resort: checkout URL is useless alone; still avoid asset URLs.
+    # Never emit /checkout (invalid SPA route → "wandered off").
+    if "/checkout" in payment.lower() and "/orderdetails" not in payment.lower():
         payment = fallback
-        source = "fallback-no-token"
+
+    if _is_asset_url(payment):
+        payment = fallback
+        ge_token = ""
 
     portable = bool(ge_token) and _url_has_checkout_token(payment)
+    source = "orderdetails+geToken" if portable else (
+        "orderdetails+checkoutSn" if checkout_sn else "orderdetails-fallback"
+    )
+
     notes: List[str] = []
     if snap.get("error"):
         notes.append(str(snap.get("error")))
+    steps = snap.get("steps") or []
     attempts = snap.get("tokenAttempts") or []
-    if not portable and attempts:
-        notes.append(f"getCartToken attempts={len(attempts)}")
+    if not portable:
+        notes.append("ge_token_missing")
+    if checkout_sn:
+        notes.append(f"checkoutSn={checkout_sn}")
 
     result = PortableCheckout(
         payment_url=payment,
         portable=portable,
         ge_cart_token=ge_token,
-        merchant_cart_token=merchant or session,
+        merchant_cart_token=merchant,
         country_code=country,
         currency_code=currency,
         session_cookie=session,
         cookie_header=_cookie_header(merged),
         raw_url=str(snap.get("href") or ""),
         source=source,
+        checkout_sn=checkout_sn,
+        cart_id=cart_id,
         notes=notes,
     )
     logger.info(
-        "held-cart export portable=%s source=%s ge_token=%s merchant=%s attempts=%s",
+        "held-cart export portable=%s source=%s ge_token=%s checkoutSn=%s merchant=%s steps=%s",
         result.portable,
         result.source,
         "yes" if result.ge_cart_token else "no",
-        (result.merchant_cart_token or "")[:48],
-        len(attempts) if isinstance(attempts, list) else 0,
+        result.checkout_sn or "-",
+        (result.merchant_cart_token or "")[:80],
+        json.dumps(steps)[:500],
     )
     if attempts:
-        logger.info("getCartToken attempts detail=%s", json.dumps(attempts)[:800])
+        logger.info("getCartToken attempts=%s", json.dumps(attempts)[:800])
     return result
 
 
-# Back-compat alias used by older call sites.
 def extract_portable_checkout(
     driver: Any,
     *,
@@ -613,7 +660,7 @@ def extract_portable_checkout(
     wait_seconds: float = 12.0,
     add_to_cart_body: str = "",
 ) -> PortableCheckout:
-    del wait_seconds  # no polling/navigation loop anymore
+    del wait_seconds
     return export_checkout_from_held_cart(
         driver,
         base_url=base_url,

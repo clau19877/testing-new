@@ -734,7 +734,8 @@ class ClickFarm:
         """Export tokenized checkout URL from held cart. Stays on PDP (no checkout step)."""
         driver = wb.driver
         assert driver is not None
-        fallback = f"{self.config.base_url}/{self.config.area_code}/checkout"
+        area = (self.config.area_code or "hk").strip().lower()
+        fallback = f"{self.config.base_url.rstrip('/')}/{area}/orderdetails"
         try:
             # Small settle so SESSION / cart hold is committed after ATC.
             time.sleep(0.8)
@@ -746,18 +747,23 @@ class ClickFarm:
             )
             wb.checkout = portable
             payment = portable.payment_url or fallback
-            # Guard against ever posting asset URLs again.
-            low = payment.lower()
-            if any(x in low for x in ("/includes/css/", "/includes/js/", ".css", ".js")):
+            # Guard against asset URLs and the invalid /checkout SPA route.
+            low = payment.lower().split("?", 1)[0]
+            bad = any(x in low for x in ("/includes/css/", "/includes/js/", ".css", ".js"))
+            if (not bad) and low.rstrip("/").endswith("/checkout") and "/orderdetails" not in low:
+                bad = True
+            if bad:
                 logger.error("[farm] %s rejected bad export url=%s", wb.name, payment[:160])
-                payment = fallback
+                area = (self.config.area_code or "hk").strip().lower()
+                payment = f"{self.config.base_url.rstrip('/')}/{area}/orderdetails"
                 portable.payment_url = payment
                 portable.portable = False
-                portable.source = "rejected-asset-url"
+                portable.source = "rejected-bad-url"
                 wb.checkout = portable
             print(
                 f"[{wb.name}] held-cart export portable={portable.portable} "
                 f"source={portable.source} ge_token={'yes' if portable.ge_cart_token else 'no'} "
+                f"checkoutSn={portable.checkout_sn or '-'} "
                 f"session={'yes' if portable.session_cookie else 'no'}"
             )
             logger.info(
@@ -816,8 +822,11 @@ class ClickFarm:
                         f"portable={checkout.portable}",
                         f"source={checkout.source}",
                         f"confirmationCartToken={checkout.ge_cart_token}",
-                        f"GlobalECartId={checkout.merchant_cart_token}",
+                        f"MerchantCartToken={checkout.merchant_cart_token}",
+                        f"checkoutSn={checkout.checkout_sn}",
+                        f"cartId={checkout.cart_id}",
                         f"countryCode={checkout.country_code}",
+                        f"SESSION={checkout.session_cookie}",
                         f"cookies={checkout.cookie_header}",
                         f"product={self.product_code}",
                         f"note={note}",
