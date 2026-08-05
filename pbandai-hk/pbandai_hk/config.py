@@ -51,7 +51,7 @@ class Config:
     drop_lead_seconds: int = 30
     # Parallel cart attempts when CART_MODE=all (important for low-stock drops).
     cart_parallel: bool = True
-    # Guest click farm (no login): N browsers click PLACE PRE-ORDER on schedule.
+    # Guest click farm (no login): N browsers watch for PLACE PRE-ORDER on schedule.
     click_farm: bool = True
     browser_instances: int = 20
     # Wall-clock second within each minute to ATC (0 = :00). Set -1 to use interval instead.
@@ -60,11 +60,15 @@ class Config:
     # Stop every instance after the first cart success (default: only the winning
     # instance stops; the rest keep racing).
     stop_on_first_cart: bool = False
-    # After ATC, navigate the winning instance's window to /{area}/cart so you can
-    # log in and check out manually without hunting for the page.
+    # 0 (default) = when PLACE PRE-ORDER appears, stop refreshing/clicking and
+    # leave Chrome open on the PDP for you to ATC + checkout manually.
+    # 1 = old behaviour: auto-click PLACE PRE-ORDER.
+    auto_atc: bool = False
+    # After ATC (AUTO_ATC=1 only), navigate the winning instance's window to
+    # /{area}/cart so you can log in and check out manually.
     park_on_cart: bool = True
-    # Never auto-close a Chrome window that is holding a cart (Chrome is detached
-    # from chromedriver, so it survives the bot exiting).
+    # Never auto-close Chrome windows after the button goes live / a cart is held
+    # (Chrome is detached from chromedriver, so it survives the bot exiting).
     keep_browser_open: bool = True
     # Read orderStartDate/preOrderStatus and hold clicks until the drop opens
     # instead of hammering a page that has no PLACE PRE-ORDER button yet.
@@ -178,6 +182,7 @@ class Config:
             click_at_second=int(os.getenv("CLICK_AT_SECOND") or "0"),
             click_interval_seconds=float(os.getenv("CLICK_INTERVAL_SECONDS") or "5"),
             stop_on_first_cart=_as_bool(os.getenv("STOP_ON_FIRST_CART"), False),
+            auto_atc=_as_bool(os.getenv("AUTO_ATC"), False),
             park_on_cart=_as_bool(os.getenv("PARK_ON_CART"), True),
             keep_browser_open=_as_bool(os.getenv("KEEP_BROWSER_OPEN"), True),
             prerelease_wait=_as_bool(os.getenv("PRERELEASE_WAIT"), True),

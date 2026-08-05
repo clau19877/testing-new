@@ -843,15 +843,28 @@ class PBandaiHkBot:
             if self.click_farm is not None:
                 logger.info("[farm] starting click loop")
                 successes = self.click_farm.run()
-                print(
-                    f"[farm] finished carts={len(successes)} "
-                    f"instances={[s.name for s in successes]}"
+                button_live = any(
+                    s.checkout and s.checkout.is_button_live for s in successes
                 )
-                if successes:
+                if button_live:
                     print(
-                        "[farm] log in to those Chrome windows and complete "
-                        "checkout manually (cookies saved under logs/)"
+                        f"[farm] finished button-live={len(successes)} "
+                        f"instances={[s.name for s in successes]}"
                     )
+                    print(
+                        "[farm] Chrome windows left open — click PLACE PRE-ORDER "
+                        "yourself and complete checkout"
+                    )
+                else:
+                    print(
+                        f"[farm] finished carts={len(successes)} "
+                        f"instances={[s.name for s in successes]}"
+                    )
+                    if successes:
+                        print(
+                            "[farm] log in to those Chrome windows and complete "
+                            "checkout manually (cookies saved under logs/)"
+                        )
                 return
 
             if self.config.schedule_mode:

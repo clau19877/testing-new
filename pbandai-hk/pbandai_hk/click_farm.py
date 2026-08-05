@@ -1,13 +1,13 @@
-"""Click farm: N browsers click PLACE PRE-ORDER on a wall-clock schedule.
+"""Click farm: N browsers watch for PLACE PRE-ORDER on a wall-clock schedule.
 
-Guest by default. Each instance parks on the PDP and clicks at second :00 of every
-minute (or CLICK_AT_SECOND).
+Guest by default. Each instance parks on the PDP and checks at second :00 of every
+minute (or CLICK_AT_SECOND), with a fast burst right after the drop opens.
 
-On ATC success the cart is held, so that instance **stops clicking**, parks its
-Chrome window on `/{area}/cart`, and posts a Discord notification. You then log in
-in that window and complete checkout manually — Bandai refuses to create a
-checkout hold for guests, so there is nothing useful to automate past this point.
-Other instances keep racing unless STOP_ON_FIRST_CART=1.
+Default (AUTO_ATC=0): when an enabled PLACE PRE-ORDER button appears, the farm
+**stops refreshing/clicking**, leaves every Chrome window open on the PDP, and
+pings Discord so you can ATC + checkout manually.
+
+Optional AUTO_ATC=1 restores the old auto-click path (then parks on `/{area}/cart`).
 
 Optional: FARM_COOKIE_FILES points at logged-in Cookie-Editor JSON exports
 (round-robined per instance) so the window is already signed in.
@@ -174,9 +174,10 @@ class ClickFarm:
             print(f"[farm] Discord webhook ON · source={hook_src or 'config'} · {redact_webhook(webhook)}")
         else:
             print(
-                "[farm] WARNING: Discord webhook OFF — cart success will NOT ping Discord.\n"
+                "[farm] WARNING: Discord webhook OFF — button-live / cart alerts "
+                "will NOT ping Discord.\n"
                 "         Fix: set DISCORD_WEBHOOK_URL in .env  OR  put the URL alone in\n"
-                "         discord_webhook.txt (same folder as the bot). Cart details are\n"
+                "         discord_webhook.txt (same folder as the bot). Details are\n"
                 "         always saved to logs/cart_successes.log + logs/cart_<instance>.txt"
             )
         logger.info(
@@ -200,13 +201,15 @@ class ClickFarm:
             )
         uniq = "on" if bool(getattr(self.config, "unique_browser_profiles", True)) else "off"
         warm = max(0.0, float(getattr(self.config, "home_warmup_seconds", 0.0) or 0.0))
+        auto_atc = bool(getattr(self.config, "auto_atc", False))
+        mode = "AUTO-ATC" if auto_atc else "detect → stop (manual ATC)"
         print(
             f"[farm] open stagger={stagger}s (+jitter) · launch+PDP staggered · "
             f"PDP retries={self.config.open_pdp_retries} · "
             f"PDP concurrent≤{self.config.pdp_max_concurrent} · "
             f"OOS refresh~{self.config.oos_refresh_seconds:.0f}s · "
             f"idle={idle_label} · unique profiles={uniq} · home warm~{warm:.0f}s · "
-            f"no wait for other instances"
+            f"mode={mode} · no wait for other instances"
         )
         return n
 
@@ -217,10 +220,17 @@ class ClickFarm:
 
         n = len(self._plan)
         schedule = self._schedule_label()
+        auto_atc = bool(getattr(self.config, "auto_atc", False))
+        action = "auto-click" if auto_atc else "watch for"
         print(
             f"[farm] starting {n} independent worker(s) — "
-            f"PLACE PRE-ORDER {schedule}; Ctrl+C to stop"
+            f"{action} PLACE PRE-ORDER {schedule}; Ctrl+C to stop"
         )
+        if not auto_atc:
+            print(
+                "[farm] AUTO_ATC=0 — when the pre-order button appears the farm "
+                "stops and leaves Chrome open for you to check out manually"
+            )
         with ThreadPoolExecutor(max_workers=n) as pool:
             futs = [
                 pool.submit(self._instance_lifecycle, idx, name, proxy)
@@ -241,26 +251,42 @@ class ClickFarm:
         return list(self._successes)
 
     def _hold_for_manual_checkout(self) -> None:
-        """Keep the process (and carted Chrome windows) alive until Ctrl+C."""
-        with self._success_lock:
-            carted = [wb for wb in self._successes if wb.driver is not None]
-        if not carted or not bool(getattr(self.config, "keep_browser_open", True)):
+        """Keep the process (and Chrome windows) alive until Ctrl+C."""
+        if not bool(getattr(self.config, "keep_browser_open", True)):
             return
-        names = ", ".join(wb.name for wb in carted)
-        print(
-            f"\n[farm] {len(carted)} cart(s) held — Chrome left open: {names}\n"
-            "[farm] log in in those window(s) and complete checkout.\n"
-            "[farm] press Ctrl+C when done (windows stay open after exit)."
+        with self._browsers_lock:
+            open_browsers = [wb for wb in self.browsers if wb.driver is not None]
+        with self._success_lock:
+            any_hit = bool(self._successes)
+        if not open_browsers or not any_hit:
+            return
+        names = ", ".join(wb.name for wb in open_browsers)
+        button_live = any(
+            wb.checkout and wb.checkout.is_button_live for wb in self._successes
         )
+        if button_live:
+            print(
+                f"\n[farm] PRE-ORDER BUTTON LIVE — {len(open_browsers)} Chrome "
+                f"window(s) left open: {names}\n"
+                "[farm] click PLACE PRE-ORDER yourself, then log in + checkout.\n"
+                "[farm] press Ctrl+C when done (windows stay open after exit)."
+            )
+        else:
+            print(
+                f"\n[farm] {len(open_browsers)} window(s) held — Chrome left open: "
+                f"{names}\n"
+                "[farm] log in in those window(s) and complete checkout.\n"
+                "[farm] press Ctrl+C when done (windows stay open after exit)."
+            )
         logger.info("[farm] holding for manual checkout instances=%s", names)
         try:
             while True:
                 time.sleep(1.0)
         except KeyboardInterrupt:
-            print("[farm] exiting — carted Chrome windows stay open")
+            print("[farm] exiting — Chrome windows stay open")
 
     def _instance_lifecycle(self, index: int, name: str, proxy: str) -> None:
-        """Open this instance, then click forever — never waits on other instances."""
+        """Open this instance, then watch/click — never waits on other instances."""
         if self._stop.is_set():
             return
         product_url = self._product_url()
@@ -271,8 +297,8 @@ class ClickFarm:
         if wb.driver is None:
             print(f"[{name}] Chrome failed — instance exit")
             return
-        print(f"[{name}] open done ready={wb.ready} — entering click loop now")
-        logger.info("[farm] %s open done ready=%s — click loop", name, wb.ready)
+        print(f"[{name}] open done ready={wb.ready} — entering watch loop now")
+        logger.info("[farm] %s open done ready=%s — watch loop", name, wb.ready)
         self._worker_loop(wb)
 
     def close(self) -> None:
@@ -281,12 +307,13 @@ class ClickFarm:
             browsers = list(self.browsers)
             self.browsers = []
         keep_open = bool(getattr(self.config, "keep_browser_open", True))
+        any_hit = any(wb.success for wb in browsers)
         kept = 0
         for wb in browsers:
             if wb.driver is None:
                 continue
-            # A window holding a cart is the whole point — never close it.
-            if wb.success and keep_open:
+            # After button-live / cart success, leave every window open for manual ATC.
+            if keep_open and (wb.success or any_hit):
                 kept += 1
                 wb.driver = None
                 wb.ready = False
@@ -299,7 +326,7 @@ class ClickFarm:
             wb.ready = False
         if kept:
             print(f"[farm] left {kept} Chrome window(s) open for manual checkout")
-            logger.info("[farm] kept %s carted browser(s) open", kept)
+            logger.info("[farm] kept %s browser(s) open", kept)
         self._plan = []
         self._stop = threading.Event()
         self._pdp_gate = None
@@ -678,6 +705,16 @@ class ClickFarm:
                     wb.ready = True
 
                 self._ensure_hook(wb.driver)
+                auto_atc = bool(getattr(self.config, "auto_atc", False))
+                # Default: detect PLACE PRE-ORDER and stop — you click manually.
+                if not auto_atc:
+                    wb.clicks += 1
+                    if self._has_atc_button(wb.driver):
+                        self._on_button_live(wb)
+                        return
+                    self._handle_no_button(wb)
+                    continue
+
                 before = self._read_last(wb.driver)
                 clicked = _click_add_to_cart(wb.driver, timeout=3)
                 wb.clicks += 1
@@ -713,36 +750,7 @@ class ClickFarm:
                             self._stop.set()
                         return
                 else:
-                    logger.warning("[farm] %s no button (click #%s)", wb.name, wb.clicks)
-                    if self._shows_out_of_stock(wb.driver):
-                        print(
-                            f"[{wb.name}] page shows OUT OF STOCK "
-                            "(no enabled PLACE PRE-ORDER) — refresh & wait next :00"
-                        )
-                        self._hard_refresh_pdp(wb)
-                    elif self._page_looks_bad(wb.driver):
-                        print(f"[{wb.name}] no ATC button (bad PDP) — one refresh for next round")
-                        self._hard_refresh_pdp(wb)
-                    else:
-                        burst = self._drop_burst_remaining()
-                        status = self._drop_status or ""
-                        if burst > 0:
-                            print(
-                                f"[{wb.name}] drop open but button not live yet — "
-                                f"refresh + retry (~{self.config.drop_burst_interval:.1f}s, "
-                                f"{int(burst)}s left)"
-                            )
-                        elif status and status.lower() != "inprogress":
-                            print(
-                                f"[{wb.name}] no ATC button — pre-order status="
-                                f"{status} (not on sale yet); refreshing"
-                            )
-                        else:
-                            print(
-                                f"[{wb.name}] no enabled ATC button "
-                                "(not OOS text / not error page) — soft refresh"
-                            )
-                        self._hard_refresh_pdp(wb)
+                    self._handle_no_button(wb)
             except Exception as exc:  # noqa: BLE001
                 wb.last_error = str(exc)
                 log_exception(logger, f"farm worker error {wb.name}", exc)
@@ -895,8 +903,11 @@ class ClickFarm:
 
         needles = (
             "PLACE PRE-ORDER",
-            "ADD TO CART",
+            "Place Pre-Order",
             "PLACE ORDER",
+            "Place Order",
+            "ADD TO CART",
+            "Add to cart",
             "加入購物車",
             "預購",
             "立即預訂",
@@ -909,16 +920,87 @@ class ClickFarm:
                     label = (btn.text or btn.get_attribute("aria-label") or "").strip()
                     if not label:
                         continue
-                    if any(n.lower() in label.lower() for n in needles):
-                        # Explicitly reject OOS labels.
-                        if "out of stock" in label.lower() or "sorry" in label.lower():
-                            continue
+                    low = label.lower()
+                    cls = (btn.get_attribute("class") or "").lower()
+                    key = (btn.get_attribute("data-bs-text-key") or "").lower()
+                    if (
+                        "out of stock" in low
+                        or "sorry" in low
+                        or "is-noactive" in cls
+                        or "sorryoutofstock" in key
+                    ):
+                        continue
+                    if any(n.lower() in low for n in needles):
                         return True
                 except Exception:  # noqa: BLE001
                     continue
         except Exception:  # noqa: BLE001
             pass
         return False
+
+    def _handle_no_button(self, wb: FarmBrowser) -> None:
+        """Refresh / burst-retry when PLACE PRE-ORDER is not on the PDP yet."""
+        logger.warning("[farm] %s no button (check #%s)", wb.name, wb.clicks)
+        if self._shows_out_of_stock(wb.driver):
+            print(
+                f"[{wb.name}] page shows OUT OF STOCK "
+                "(no enabled PLACE PRE-ORDER) — refresh & wait next :00"
+            )
+            self._hard_refresh_pdp(wb)
+            return
+        if self._page_looks_bad(wb.driver):
+            print(f"[{wb.name}] no ATC button (bad PDP) — one refresh for next round")
+            self._hard_refresh_pdp(wb)
+            return
+        burst = self._drop_burst_remaining()
+        status = self._drop_status or ""
+        if burst > 0:
+            print(
+                f"[{wb.name}] drop open but button not live yet — "
+                f"refresh + retry (~{self.config.drop_burst_interval:.1f}s, "
+                f"{int(burst)}s left)"
+            )
+        elif status and status.lower() != "inprogress":
+            print(
+                f"[{wb.name}] no ATC button — pre-order status="
+                f"{status} (not on sale yet); refreshing"
+            )
+        else:
+            print(
+                f"[{wb.name}] no enabled ATC button "
+                "(not OOS text / not error page) — soft refresh"
+            )
+        self._hard_refresh_pdp(wb)
+
+    def _on_button_live(self, wb: FarmBrowser) -> None:
+        """PLACE PRE-ORDER is visible — stop the farm; leave Chrome for manual ATC."""
+        product_url = self._product_url()
+        stamp = time.strftime("%H:%M:%S")
+        wb.success = True
+        wb.payment_url = product_url
+        wb.checkout = CartHandoff(
+            cart_url=product_url,
+            kind="button_live",
+            notes=["button_live", "manual_checkout"],
+        )
+        with self._success_lock:
+            self._successes.append(wb)
+        print(
+            f"[{wb.name}] {stamp} PLACE PRE-ORDER LIVE (check #{wb.clicks}) — "
+            "stopping farm"
+        )
+        print(
+            f"[{wb.name}] Chrome stays open on the product page — "
+            "click PLACE PRE-ORDER yourself, then check out."
+        )
+        logger.info(
+            "[farm] button live session=%s product=%s — farm stop",
+            wb.name,
+            self.product_code,
+        )
+        self._notify_discord(wb, product_url, "button_live")
+        # Stop every instance from further refreshing / clicking.
+        self._stop.set()
 
     def _await_success(
         self,
@@ -1030,7 +1112,8 @@ class ClickFarm:
                 + "\n",
                 encoding="utf-8",
             )
-            print(f"[{wb.name}] saved cart → {log_path}")
+            label = "button-live" if checkout.is_button_live else "cart"
+            print(f"[{wb.name}] saved {label} → {log_path}")
             print(f"[{wb.name}] saved cookies → {token_path}")
         except Exception as exc:  # noqa: BLE001
             log_exception(logger, f"cart success log failed {wb.name}", exc)
@@ -1045,14 +1128,15 @@ class ClickFarm:
             instance=wb.name,
             note=note,
         )
+        page_label = "product page" if checkout.is_button_live else "cart page"
         if not webhook:
-            print(f"[farm] Discord webhook not set — cart page:\n{checkout.cart_url}")
-            logger.warning("[farm] no DISCORD_WEBHOOK_URL; cart=%s", checkout.cart_url)
+            print(f"[farm] Discord webhook not set — {page_label}:\n{checkout.cart_url}")
+            logger.warning("[farm] no DISCORD_WEBHOOK_URL; url=%s", checkout.cart_url)
             return
         if not looks_like_discord_webhook(webhook):
             print(
                 f"[farm] Discord webhook looks invalid ({redact_webhook(webhook)}) — "
-                f"cart page:\n{checkout.cart_url}"
+                f"{page_label}:\n{checkout.cart_url}"
             )
             logger.warning(
                 "[farm] invalid webhook source=%s url=%s cart=%s",

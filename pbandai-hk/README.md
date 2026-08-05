@@ -6,19 +6,21 @@ JP and HK are different platforms. This module does **not** scrape JP DOM (`#cdu
 
 ## What it does
 
-- **Click farm (default):** open N guest Chrome windows, click **PLACE PRE-ORDER** every few seconds, post payment/cart link to Discord on success
+- **Click farm (default):** open N guest Chrome windows, watch for **PLACE PRE-ORDER**, then **stop** and leave the browsers open so you can ATC + checkout manually
+- Optional `AUTO_ATC=1` to auto-click the button instead
 - Optional monitor-only mode (`ENABLE_ADD_TO_CART=0`) for stock watching
 - File + console logging (`logs/pbandai_hk.log`)
 - Optional email notify
 - Optional keyword poll via `GET /api/search` with `X-G1-Area-Code: hk`
 
-**Login is not required.** Default cart path is guest click farm (`CLICK_FARM=1`).
+**Login is not required.** Default path is guest click farm (`CLICK_FARM=1`, `AUTO_ATC=0`).
 
 ## Mode overview
 
 | Mode | When | What it does |
 |---|---|---|
-| Click farm (`CLICK_FARM=1`, `ENABLE_ADD_TO_CART=1`) | Drop / pre-order race | Opens N guest Chromes; each clicks PLACE PRE-ORDER every N seconds; Discord webhook gets payment/cart URL on success |
+| Click farm (`CLICK_FARM=1`, `AUTO_ATC=0`) | Drop / pre-order race | Opens N guest Chromes; when PLACE PRE-ORDER appears, stops refreshing and leaves windows open for manual ATC/checkout; Discord ping |
+| Auto-ATC (`CLICK_FARM=1`, `AUTO_ATC=1`) | Drop / pre-order race | Same farm, but auto-clicks PLACE PRE-ORDER then parks on cart |
 | Monitor (`ENABLE_ADD_TO_CART=0`) | Watching stock only | Poll product page; print AVAILABLE / SOLD OUT / PREORDER / NOT OPEN |
 
 ## One-click setup & launch
@@ -77,9 +79,9 @@ python web_shopping_bot_hk.py check "https://p-bandai.com/hk/item/A2866726001"
 AREA_CODE=hk
 ENABLE_ADD_TO_CART=1
 CLICK_FARM=1
+AUTO_ATC=0
 BROWSER_INSTANCES=20
 CLICK_AT_SECOND=0
-STOP_ON_FIRST_CART=0
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
 PRODUCT_LINKS=https://p-bandai.com/hk/item/A2866726001
 BACKGROUND_MODE=0
@@ -87,53 +89,49 @@ BACKGROUND_MODE=0
 
 `AREA_CODE` must match the product's region (`hk` for `p-bandai.com/hk/...`).
 A mismatch makes the sale-timing lookup 404 and the bot falls back to blind
-clicking — it warns at startup when that happens.
+checking — it warns at startup when that happens.
 
-Each instance clicks PLACE PRE-ORDER at **:00 of every minute**.
+Each instance checks for PLACE PRE-ORDER at **:00 of every minute**.
 
 ### Products that are not on sale yet
 
 The bot reads `orderStartDate` / `preOrderStatus` from Bandai's product API and adapts:
 
-- **Before the drop** it holds clicks entirely (a PDP with no PLACE PRE-ORDER button cannot be carted) and prints the sale time with a countdown, keeping the windows warm
+- **Before the drop** it holds entirely (a PDP with no PLACE PRE-ORDER button is useless) and prints the sale time with a countdown, keeping the windows warm
 - **~25s before** the drop it reloads the PDP so the button renders in time
 - **At the drop** it switches to a fast-retry burst — every ~2.5s for 2 minutes — instead of waiting for the next `:00`, because the button often appears a few seconds late and a missed minute is a missed drop
 
 ```env
-PRERELEASE_WAIT=1           # hold clicks until orderStartDate
+PRERELEASE_WAIT=1           # hold until orderStartDate
 PREDROP_REFRESH_SECONDS=25  # PDP reload before T-0
 DROP_BURST_SECONDS=120      # fast-retry window after the drop
 DROP_BURST_INTERVAL=2.5     # retry spacing inside that window
 ```
 
-### What happens on cart success
+### What happens when the pre-order button appears (default)
 
-1. The winning instance **stops clicking permanently** — it will never add another item
-2. Its Chrome window navigates to `/{area}/cart` and **stays open**
-3. Discord gets a "CART SECURED" ping with the instance name, cart details and cookies
-4. **You** switch to that window, log in, and press Proceed to checkout
+1. The farm **stops refreshing and clicking** — no auto ATC
+2. **All Chrome windows stay open** on the product page
+3. Discord gets a "PRE-ORDER BUTTON LIVE" ping
+4. **You** click PLACE PRE-ORDER in a window, log in, and check out
 
-Other instances keep racing unless `STOP_ON_FIRST_CART=1`.
+Windows are never closed by the bot once the button is live: Chrome is launched
+detached from chromedriver, `close()` keeps every open window, and the bot waits
+for Ctrl+C. Finish checkout whenever you like.
 
-Carted windows are never closed by the bot: Chrome is launched detached from
-chromedriver, `close()` skips any window holding a cart, and the bot waits for
-Ctrl+C instead of exiting while carts are open. **Your cart survives even after
-you stop the bot** — finish checkout whenever you like.
-
-The bot deliberately does not attempt checkout. Bandai only creates the checkout hold (`POST /api/cart/{cartSn}/checkout`) for **signed-in members** — guests get `500 InternalRestApiServerError`, so no automated checkout URL can exist for a guest cart. Logging in manually is the fastest reliable path.
+Set `AUTO_ATC=1` only if you want the bot to click PLACE PRE-ORDER itself (then
+it parks that window on `/{area}/cart`).
 
 ```env
-# Navigate the winning window to the cart page (default 1)
+# 0 = detect button → stop (default); 1 = auto-click PLACE PRE-ORDER
+AUTO_ATC=0
+# After ATC (AUTO_ATC=1 only), park the winning window on the cart page
 PARK_ON_CART=1
-# Stop every instance after the first cart (default 0 = only the winner stops)
-STOP_ON_FIRST_CART=0
-# Never auto-close a window holding a cart; keeps Chrome alive after exit (default 1)
+# Never auto-close windows after button-live / cart (default 1)
 KEEP_BROWSER_OPEN=1
 ```
 
-Cart details are also written to `logs/cart_<instance>.txt` (SESSION + cookies) so you can finish on another machine with Cookie-Editor.
-
-Optional: start instances already signed in, so you only have to press Proceed:
+Optional: start instances already signed in:
 
 ```env
 FARM_COOKIE_FILES=sessions/acct1.json,sessions/acct2.json
@@ -168,18 +166,20 @@ Accepted proxy formats: `host:port:user:pass`, `http://user:pass@host:port`, `so
 | `PRODUCT_LINKS` | Direct HK item URLs (comma-separated) |
 | `PRODUCT_CODES` | Bare product codes (comma-separated) |
 | `ENABLE_ADD_TO_CART` | `0` monitor only, `1` cart / click farm |
-| `CLICK_FARM` | `1` = guest N-browser click loop (default) |
+| `CLICK_FARM` | `1` = guest N-browser farm (default) |
+| `AUTO_ATC` | `0` = stop when PLACE PRE-ORDER appears, leave Chrome open (default); `1` = auto-click |
 | `BROWSER_INSTANCES` | How many Chromes to open (e.g. `20`) |
-| `CLICK_AT_SECOND` | Wall-clock second to ATC each minute (`0` = :00). `-1` = use interval |
+| `CLICK_AT_SECOND` | Wall-clock second to check each minute (`0` = :00). `-1` = use interval |
 | `CLICK_INTERVAL_SECONDS` | Only used when `CLICK_AT_SECOND=-1` |
-| `STOP_ON_FIRST_CART` | `0` = keep all instances going (default); `1` = stop after first cart |
+| `STOP_ON_FIRST_CART` | `AUTO_ATC=1` only: `0` keep racing; `1` stop after first cart |
+| `KEEP_BROWSER_OPEN` | `1` = leave Chrome open after button-live / cart (default) |
 | `OPEN_STAGGER_SECONDS` | Delay × instance index before Chrome launch + PDP (cuts PNA/WAF); jitter added |
 | `OPEN_PDP_RETRIES` | Retries when first PDP visit is 500 / PAGE NOT AVAILABLE |
 | `OPEN_PDP_RETRY_WAIT` | Base wait between PDP retries (grows + jitter per attempt) |
 | `OOS_REFRESH_SECONDS` | Hard-refresh while waiting if UI shows OOS/PNA (jittered per instance) |
 | `PDP_MAX_CONCURRENT` | Max simultaneous PDP/home navigations (default 3; cuts heal stampede) |
 | `IDLE_ACTIVITY_SECONDS` | Scroll up/down while waiting (keep session alive; never clicks) |
-| `DISCORD_WEBHOOK_URL` | Discord webhook; receives payment/cart link. Also reads `discord_webhook.txt` if .env is empty. Cart URLs always saved to `logs/cart_successes.log` |
+| `DISCORD_WEBHOOK_URL` | Discord webhook; button-live / cart alert. Also reads `discord_webhook.txt` if .env is empty. Always saved to `logs/cart_successes.log` |
 | `BACKGROUND_MODE` | `0` headed (recommended), `1` headless |
 | `PROXY_URL` / `PROXY_CSV` | Optional proxies |
 | `SEARCH_KEYWORDS` | Optional keywords for `/api/search` |
@@ -190,15 +190,15 @@ Accepted proxy formats: `host:port:user:pass`, `http://user:pass@host:port`, `so
 ## Drop notes (click farm)
 
 ### Target example: `N2890904001` (GUNDAM CARD GAME 1ST ANNIVERSARY SET)
-- Tiny stock; site sits behind F5 / Shape — **click the real button** in headed Chrome
-- Guest carts: no login. Set Discord webhook before the drop
+- Tiny stock; site sits behind F5 / Shape — **you click the real button** in headed Chrome
+- Guest mode: no login required to watch. Set Discord webhook before the drop
 - Start early so all windows are parked on the PDP
 
 Flow:
-1. Put webhook URL in `.env`
+1. Put webhook URL in `.env` (`AUTO_ATC=0`)
 2. Optional: fill `proxy.csv`
-3. Start menu `[1]` / `loop` — farm opens browsers and clicks at **:00** every minute
-4. On success: Discord gets payment/cart link; all instances **keep going**
+3. Start menu `[1]` / `loop` — farm opens browsers and checks at **:00** every minute
+4. When PLACE PRE-ORDER appears: Discord pings, farm **stops**, Chrome stays open for your manual ATC + checkout
 
 Launcher menu:
 - `[1]` Start click farm / monitor loop
@@ -239,10 +239,10 @@ pbandai-hk/
   logs/                    # created at runtime
   launcher/main.go         # launcher source
   pbandai_hk/
-    click_farm.py          # guest N-browser PLACE PRE-ORDER farm + Discord
+    click_farm.py          # guest N-browser PLACE PRE-ORDER watch/farm + Discord
     bot.py                 # scan / match / click farm loop
     config.py
-    browser_cart.py        # button click helpers
+    browser_cart.py        # button detect / click helpers
     diagnostics.py
     ...
 ```

@@ -122,7 +122,7 @@ const pickSubCart = (root) => {
 
 @dataclass
 class CartHandoff:
-    """A held cart, ready for manual login + checkout."""
+    """A held cart or button-live handoff, ready for manual checkout."""
 
     cart_url: str
     cart_id: str = ""
@@ -132,8 +132,14 @@ class CartHandoff:
     session_cookie: str = ""
     cookie_header: str = ""
     parked: bool = False
+    # "cart" = ATC succeeded; "button_live" = PLACE PRE-ORDER visible, no auto-click.
+    kind: str = "cart"
     debug: str = ""
     notes: List[str] = field(default_factory=list)
+
+    @property
+    def is_button_live(self) -> bool:
+        return self.kind == "button_live" or "button_live" in self.notes
 
     def discord_content(
         self,
@@ -144,6 +150,19 @@ class CartHandoff:
         instance: str,
         note: str,
     ) -> str:
+        if self.is_button_live:
+            lines = [
+                f"🟢 **P-Bandai {area} PRE-ORDER BUTTON LIVE** — `{instance}`",
+                f"Product: `{product_code}`",
+                f"Product URL: {product_url}",
+                "",
+                "**Bot stopped** — no more refreshing or clicking.",
+                "Chrome windows are still open on the product page.",
+                "**Click PLACE PRE-ORDER yourself**, then log in and check out.",
+            ]
+            if note:
+                lines.append(f"Note: {note}")
+            return "\n".join(lines)[:1900]
         lines = [
             f"🛒 **P-Bandai {area} CART SECURED** — `{instance}`",
             f"Product: `{product_code}`",
@@ -175,6 +194,37 @@ class CartHandoff:
         product_url: str,
         instance: str,
     ) -> Dict[str, Any]:
+        if self.is_button_live:
+            return {
+                "title": f"Pre-order button live — {product_code}",
+                "description": (
+                    "PLACE PRE-ORDER is on the page. The bot has stopped refreshing. "
+                    "Switch to a Chrome window, click the button, then check out manually."
+                )[:4096],
+                "color": 5763719,
+                "fields": [
+                    {
+                        "name": "Instance",
+                        "value": f"`{instance}` (stopped)",
+                        "inline": True,
+                    },
+                    {"name": "Area", "value": f"`{area}`", "inline": True},
+                    {
+                        "name": "Next step",
+                        "value": (
+                            "In an open Chrome window on the product page, click "
+                            "**PLACE PRE-ORDER**, sign in if needed, then "
+                            "**Proceed to checkout**."
+                        )[:1024],
+                        "inline": False,
+                    },
+                    {
+                        "name": "Product",
+                        "value": (product_url or product_code)[:1024],
+                        "inline": False,
+                    },
+                ][:25],
+            }
         fields = [
             {"name": "Instance", "value": f"`{instance}` (stopped)", "inline": True},
             {"name": "Area", "value": f"`{area}`", "inline": True},
