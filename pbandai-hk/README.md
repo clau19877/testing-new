@@ -84,7 +84,7 @@ PRODUCT_LINKS=https://p-bandai.com/us/item/N2890904001
 BACKGROUND_MODE=0
 ```
 
-Each instance clicks PLACE PRE-ORDER at **:00 of every minute**. On ATC success the cart is held — the bot calls Bandai’s cart→checkout export API (no UI), then posts a pasteable `/{area}/orderdetails?confirmationCartToken=…` link (Bandai’s real checkout route; `/checkout` 404s) to Discord and **keeps going**.
+Each instance clicks PLACE PRE-ORDER at **:00 of every minute**. On ATC success the cart is held — the bot soft-opens `/cart`, calls Bandai’s cart→checkout export API, then posts a pasteable `/{area}/orderdetails?confirmationCartToken=…` link (Bandai’s real checkout route; `/checkout` 404s) to Discord and **keeps going**. Guest carts may need SESSION cookie import (+ login) when Global-e has not issued a token yet.
 
 ### Monitor-only `.env` example
 

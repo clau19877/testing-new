@@ -2,5 +2,5 @@
 
 # Printed at startup — if you still see JSONDecodeError on bootstrap()/resp.json(),
 # you are running an OLD folder. Redownload the zip and replace pbandai_hk/.
-__version__ = "0.4.10"
-BUILD_ID = "orderdetails-export-20260805"
+__version__ = "0.4.11"
+BUILD_ID = "cart-softopen-ge-export-20260805"
