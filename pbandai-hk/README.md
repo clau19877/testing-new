@@ -84,7 +84,24 @@ PRODUCT_LINKS=https://p-bandai.com/us/item/N2890904001
 BACKGROUND_MODE=0
 ```
 
-Each instance clicks PLACE PRE-ORDER at **:00 of every minute**. On ATC success the cart is held — the bot soft-opens `/cart`, calls Bandai’s cart→checkout export API, then posts a pasteable `/{area}/orderdetails?confirmationCartToken=…` link (Bandai’s real checkout route; `/checkout` 404s) to Discord and **keeps going**. Guest carts may need SESSION cookie import (+ login) when Global-e has not issued a token yet.
+Each instance clicks PLACE PRE-ORDER at **:00 of every minute**. On ATC success the cart is held — the bot soft-opens `/cart`, calls Bandai’s cart→checkout export API, then posts the checkout link to Discord and **keeps going**.
+
+### Guest vs logged-in checkout links
+
+Bandai only creates the checkout hold (`POST /api/cart/{cartSn}/checkout`) for **signed-in members**; guests get `500 InternalRestApiServerError`, so Global-e never issues a `confirmationCartToken`.
+
+| Mode | Discord link | Claim flow |
+|---|---|---|
+| Guest (default) | `/{area}/orderdetails?countryCode=…` + SESSION/cookies | Import cookies (Cookie-Editor) → sign in → `/hk/cart` → Proceed to checkout |
+| Logged-in cookies | `/{area}/orderdetails?confirmationCartToken=…` | Paste straight into a fresh browser |
+
+For fully portable links, export cookies from a signed-in P-Bandai browser session and point the farm at them (round-robined per instance):
+
+```env
+FARM_COOKIE_FILES=sessions/acct1.json,sessions/acct2.json
+```
+
+`/checkout` is not a valid route — always use `/{area}/orderdetails`.
 
 ### Monitor-only `.env` example
 

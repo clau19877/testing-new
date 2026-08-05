@@ -74,6 +74,10 @@ class Config:
     unique_browser_profiles: bool = True
     # Seconds to linger on /{area}/ home (scroll) before first PDP open.
     home_warmup_seconds: float = 3.0
+    # Optional logged-in cookie files (Cookie-Editor JSON), one per instance,
+    # round-robined. Bandai only creates the checkout hold for signed-in members,
+    # so portable /orderdetails?confirmationCartToken links need these.
+    farm_cookie_files: List[str] = field(default_factory=list)
     discord_webhook_url: str = ""
     task_csv: str = "task.csv"
     proxy_csv: str = "proxy.csv"
@@ -155,6 +159,9 @@ class Config:
             idle_activity_seconds=float(os.getenv("IDLE_ACTIVITY_SECONDS") or "8"),
             unique_browser_profiles=_as_bool(os.getenv("UNIQUE_BROWSER_PROFILES"), True),
             home_warmup_seconds=float(os.getenv("HOME_WARMUP_SECONDS") or "3"),
+            farm_cookie_files=_split_csv(
+                os.getenv("FARM_COOKIE_FILES") or os.getenv("COOKIE_FILE")
+            ),
             discord_webhook_url=hook,
             task_csv=os.getenv("TASK_CSV") or "task.csv",
             proxy_csv=os.getenv("PROXY_CSV") or "proxy.csv",

@@ -287,7 +287,7 @@ _EXPORT_CART_JS = _JS_HELPERS + r"""
   const { country, currency, culture } = localize(cookies);
   const steps = [];
 
-  // 1) CSRF bootstrap (cart APIs need X-CSRF-TOKEN).
+  // 1) CSRF bootstrap (cart APIs need X-CSRF-TOKEN) + login detection.
   const member = await fetchJson('/api/context/member');
   if (member.ok && member.body && member.body.csrfToken) {
     try {
@@ -296,11 +296,15 @@ _EXPORT_CART_JS = _JS_HELPERS + r"""
       });
     } catch (e) {}
   }
+  // SPA: refreshData() reads body.loggedInMember; guests get csrfToken only.
+  const loggedIn = !!(member.body && member.body.loggedInMember
+    && (member.body.loggedInMember.memberNo || member.body.loggedInMember.memberId));
   steps.push({
     step: 'member',
     ok: !!member.ok,
     status: member.status,
     csrf: !!(member.body && member.body.csrfToken) || !!csrfToken(),
+    loggedIn,
   });
 
   // 2) Suffix from PRELOAD_DATA (present on /cart HTML) or HTML fetch.
@@ -388,8 +392,9 @@ _EXPORT_CART_JS = _JS_HELPERS + r"""
 
   // 5) Bandai createCheckout.
   // SPA payload (Cart-nuJ3): shippingAreaCode / defaultAreaCode are OMITTED for normal
-  // carts. HK shipping UI only appears for eventPickup and uses lowercase hk|mo —
-  // NOT country "HK". Sending defaultAreaCode:"HK" caused InternalRestApiServerError 500.
+  // carts; HK eventPickup uses lowercase hk|mo. Bandai 500s (InternalRestApiServerError)
+  // for guest sessions regardless of payload — the SPA never reaches this call unless
+  // logged in, so one attempt is enough when not signed in.
   let checkoutSn = '';
   let checkoutStatus = 0;
   let checkoutErr = '';
@@ -398,36 +403,28 @@ _EXPORT_CART_JS = _JS_HELPERS + r"""
     const variants = [];
     // Primary: match non-event-pickup SPA (omit area codes).
     variants.push({ name: 'token+items', body: { merchantCartToken, items } });
-    if (hasEventPickup || defaultShipCookie) {
-      const ship = defaultShipCookie || 'hk';
-      variants.push({
-        name: 'ship-' + ship,
-        body: { merchantCartToken, shippingAreaCode: ship, items },
-      });
-      variants.push({
-        name: 'ship+default-' + ship,
-        body: {
-          merchantCartToken,
-          shippingAreaCode: ship,
-          defaultAreaCode: ship,
-          items,
-        },
-      });
-    } else {
-      // Fallback lowercase area codes (HK shipping selector values).
-      variants.push({
-        name: 'ship-hk',
-        body: { merchantCartToken, shippingAreaCode: 'hk', items },
-      });
-      variants.push({
-        name: 'ship-hk+default',
-        body: {
-          merchantCartToken,
-          shippingAreaCode: 'hk',
-          defaultAreaCode: 'hk',
-          items,
-        },
-      });
+    if (loggedIn) {
+      if (hasEventPickup || defaultShipCookie) {
+        const ship = defaultShipCookie || 'hk';
+        variants.push({
+          name: 'ship-' + ship,
+          body: { merchantCartToken, shippingAreaCode: ship, items },
+        });
+        variants.push({
+          name: 'ship+default-' + ship,
+          body: {
+            merchantCartToken,
+            shippingAreaCode: ship,
+            defaultAreaCode: ship,
+            items,
+          },
+        });
+      } else {
+        variants.push({
+          name: 'ship-hk',
+          body: { merchantCartToken, shippingAreaCode: 'hk', items },
+        });
+      }
     }
 
     for (let vi = 0; vi < variants.length && !checkoutSn; vi++) {
@@ -521,7 +518,8 @@ _EXPORT_CART_JS = _JS_HELPERS + r"""
     steps,
     tokenAttempts: tok.attempts,
     domTokens,
-    loginRequiredHint: (!checkoutSn && checkoutStatus === 401) || (!checkoutSn && /login|auth|unauthorized/i.test(checkoutErr)),
+    loggedIn,
+    loginRequiredHint: !checkoutSn && !loggedIn,
   });
 })().catch((e) => done({ error: String(e), cookies: cookieMap(), steps: [], tokenAttempts: [] }));
 """
@@ -544,6 +542,7 @@ class PortableCheckout:
     cart_sn: str = ""
     debug: str = ""
     login_required_hint: bool = False
+    logged_in: bool = False
     notes: List[str] = field(default_factory=list)
 
     def discord_content(
@@ -568,15 +567,15 @@ class PortableCheckout:
             )
         else:
             lines.append(
-                "_⚠️ GE `confirmationCartToken` missing. "
-                "Import SESSION cookies (Cookie-Editor) on `p-bandai.com`, "
-                "then open `/orderdetails` (not `/checkout`)._"
+                "_⚠️ Guest cart held, no GE token. "
+                "Import the cookies below (Cookie-Editor) on `p-bandai.com`, "
+                "**sign in**, open `/hk/cart` → Proceed to checkout._"
             )
             if self.login_required_hint:
                 lines.append(
-                    "_Bandai `createCheckout` failed for this guest session — "
-                    "sign in (same SESSION) → Cart → Proceed to checkout → "
-                    "copy the `/orderdetails?confirmationCartToken=…` URL._"
+                    "_Bandai requires a signed-in member to create the checkout hold; "
+                    "`createCheckout` 500s for guests, so Global-e never issues a token. "
+                    "Your cart itself is safe — the SESSION import keeps it._"
                 )
         if self.ge_cart_token:
             lines.append(f"`confirmationCartToken` = `{self.ge_cart_token}`")
@@ -658,16 +657,26 @@ class PortableCheckout:
                     "inline": False,
                 }
             )
-        if self.login_required_hint and not self.portable:
+        if not self.portable:
             fields.append(
                 {
-                    "name": "Login note",
+                    "name": "Why partial",
                     "value": (
-                        "createCheckout failed (guest/area payload). "
-                        "GE token needs a checkout hold. "
-                        "Import SESSION → sign in → Cart → Proceed → "
-                        "`/orderdetails?confirmationCartToken=…`."
-                    ),
+                        (
+                            "Guest session. Bandai only creates the checkout hold for "
+                            "signed-in members (`createCheckout` → 500), so Global-e "
+                            "issues no `confirmationCartToken`.\n"
+                            "**Claim it:** import cookies → sign in → `/hk/cart` → "
+                            "Proceed to checkout.\n"
+                            "To get fully portable links automatically, run the farm "
+                            "with logged-in cookies (`FARM_COOKIE_FILES`)."
+                        )
+                        if self.login_required_hint
+                        else (
+                            "Checkout hold exists but Global-e has not issued a token "
+                            "yet. Import cookies and open the checkout link."
+                        )
+                    )[:1024],
                     "inline": False,
                 }
             )
@@ -948,6 +957,7 @@ def export_checkout_from_held_cart(
     checkout_sn = str(snap.get("checkoutSn") or "").strip()
     cart_id = str(snap.get("cartId") or "").strip()
     cart_sn = str(snap.get("cartSn") or "").strip()
+    logged_in = bool(snap.get("loggedIn"))
     login_hint = bool(snap.get("loginRequiredHint"))
 
     gem_url = str(snap.get("gemUrl") or "").strip()
@@ -985,16 +995,8 @@ def export_checkout_from_held_cart(
         )
 
     portable = bool(ge_token) and _url_has_checkout_token(payment)
-    if not portable and not checkout_sn:
-        for step in snap.get("steps") or []:
-            if isinstance(step, dict) and step.get("step") == "createCheckout":
-                status = int(step.get("status") or 0)
-                err = str(step.get("err") or "").lower()
-                if status in (401, 403, 500) or any(
-                    x in err for x in ("login", "auth", "unauthorized", "internalrestapi")
-                ):
-                    login_hint = True
-                break
+    if not portable and not checkout_sn and not logged_in:
+        login_hint = True
 
     debug = json.dumps(
         {
@@ -1021,12 +1023,14 @@ def export_checkout_from_held_cart(
         cart_sn=cart_sn,
         debug=debug,
         login_required_hint=login_hint,
+        logged_in=logged_in,
         notes=[],
     )
     logger.info(
-        "held-cart export portable=%s source=%s ge_token=%s checkoutSn=%s cartId=%s merchant=%s",
+        "held-cart export portable=%s source=%s loggedIn=%s ge_token=%s checkoutSn=%s cartId=%s merchant=%s",
         result.portable,
         result.source,
+        result.logged_in,
         "yes" if result.ge_cart_token else "no",
         result.checkout_sn or "-",
         result.cart_id or "-",

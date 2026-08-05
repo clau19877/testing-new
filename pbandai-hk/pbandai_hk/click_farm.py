@@ -1,9 +1,14 @@
-"""Guest click farm: N browsers click PLACE PRE-ORDER on a wall-clock schedule.
+"""Click farm: N browsers click PLACE PRE-ORDER on a wall-clock schedule.
 
-No login. Each instance parks on the PDP and clicks at second :00 of every minute
-(or CLICK_AT_SECOND). Instances keep running after cart success.
-On ATC success the cart is already held — export a tokenized Global-e checkout
-URL (no /cart or /checkout navigation) and post it to Discord.
+Guest by default. Each instance parks on the PDP and clicks at second :00 of every
+minute (or CLICK_AT_SECOND). Instances keep running after cart success.
+On ATC success the cart is already held — export a checkout URL and post it to
+Discord.
+
+Optional: FARM_COOKIE_FILES points at logged-in Cookie-Editor JSON exports
+(round-robined per instance). Bandai only creates the checkout hold for signed-in
+members, so a fully portable `/orderdetails?confirmationCartToken=...` link
+requires those cookies; guests get the cart hold plus SESSION for manual claim.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from .discord_util import (
 from .logging_utils import get_logger, log_exception
 from .proxy_util import redact_proxy
 from .session_login import _create_webdriver, build_browser_identity
+from .sessions import load_cookies_file
 
 if TYPE_CHECKING:
     from .config import Config
@@ -762,10 +768,16 @@ class ClickFarm:
                 wb.checkout = portable
             print(
                 f"[{wb.name}] held-cart export portable={portable.portable} "
-                f"source={portable.source} ge_token={'yes' if portable.ge_cart_token else 'no'} "
+                f"source={portable.source} loggedIn={portable.logged_in} "
+                f"ge_token={'yes' if portable.ge_cart_token else 'no'} "
                 f"checkoutSn={portable.checkout_sn or '-'} "
                 f"session={'yes' if portable.session_cookie else 'no'}"
             )
+            if portable.login_required_hint and not portable.logged_in:
+                print(
+                    f"[{wb.name}] guest cart held — Bandai needs a signed-in member "
+                    "for the checkout hold; set FARM_COOKIE_FILES for portable links"
+                )
             logger.info(
                 "[farm] %s portable=%s source=%s payment=%s",
                 wb.name,
@@ -825,6 +837,8 @@ class ClickFarm:
                         f"MerchantCartToken={checkout.merchant_cart_token}",
                         f"checkoutSn={checkout.checkout_sn}",
                         f"cartId={checkout.cart_id}",
+                        f"cartSn={checkout.cart_sn}",
+                        f"loggedIn={checkout.logged_in}",
                         f"countryCode={checkout.country_code}",
                         f"SESSION={checkout.session_cookie}",
                         f"cookies={checkout.cookie_header}",
@@ -899,6 +913,50 @@ class ClickFarm:
             )
             print(f"[{wb.name}] Discord webhook error: {detail}")
             print(f"[{wb.name}] payment link (saved to logs/):\n{checkout.payment_url}")
+
+    def _inject_login_cookies(
+        self, driver: Any, *, name: str, index: int, home: str
+    ) -> None:
+        """Load a logged-in cookie export so createCheckout can build the hold."""
+        files = [str(p).strip() for p in (self.config.farm_cookie_files or []) if str(p).strip()]
+        if not files:
+            return
+        path = Path(files[index % len(files)])
+        if not path.exists():
+            logger.warning("[farm] %s cookie file missing: %s", name, path)
+            print(f"[farm] {name} cookie file missing: {path}")
+            return
+        try:
+            cookies = load_cookies_file(path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[farm] %s cookie load failed %s: %s", name, path, exc)
+            return
+        # Cookies only stick after the domain is loaded once.
+        try:
+            driver.get(home)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[farm] %s cookie seed nav failed: %s", name, exc)
+            return
+        added = 0
+        for cookie in cookies:
+            cname = str(cookie.get("name") or "")
+            if not cname:
+                continue
+            item: Dict[str, Any] = {
+                "name": cname,
+                "value": str(cookie.get("value") or ""),
+                "path": str(cookie.get("path") or "/"),
+            }
+            domain = str(cookie.get("domain") or "")
+            if domain and "p-bandai" in domain:
+                item["domain"] = domain
+            try:
+                driver.add_cookie(item)
+                added += 1
+            except Exception:  # noqa: BLE001
+                continue
+        logger.info("[farm] %s injected %s cookies from %s", name, added, path.name)
+        print(f"[farm] {name} logged-in cookies: {added} from {path.name}")
 
     def _warm_home(self, driver: Any, *, home: str, name: str) -> None:
         """Browse /{area}/ briefly so the first PDP hit is not a cold direct open."""
@@ -1009,6 +1067,7 @@ class ClickFarm:
             time.sleep(extra)
 
             home = f"{self.config.base_url}/{self.config.area_code}/"
+            self._inject_login_cookies(driver, name=name, index=index, home=home)
             self._warm_home(driver, home=home, name=name)
 
             ok = self._load_pdp_with_retries(driver, product_url, home=home, name=name)
