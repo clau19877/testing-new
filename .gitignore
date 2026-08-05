@@ -16,3 +16,17 @@ node_modules
 # Foundry files
 /out
 /cache_forge
+# P-Bandai HK module
+pbandai-hk/.venv/
+pbandai-hk/.env
+pbandai-hk/discord_webhook.txt
+pbandai-hk/logs/
+pbandai-hk/chrome_profiles/
+pbandai-hk.zip
+pbandai-hk/sessions.json
+pbandai-hk/sessions/*.cookies.json
+pbandai-hk/task.csv
+pbandai-hk/proxy.csv
+
+__pycache__/
+*.pyc

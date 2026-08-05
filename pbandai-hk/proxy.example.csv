@@ -1,0 +1,5 @@
+proxy
+1.2.3.4:8080:username:password
+5.6.7.8:8080:username:password
+http://user:pass@9.8.7.6:8080
+socks5://10.0.0.1:1080

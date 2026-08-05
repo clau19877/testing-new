@@ -1,0 +1,1533 @@
+"""Click farm: N browsers watch for PLACE PRE-ORDER on a wall-clock schedule.
+
+Guest by default. Each instance parks on the PDP and checks at second :00 of every
+minute (or CLICK_AT_SECOND), with a fast burst right after the drop opens.
+
+Default (AUTO_ATC=0): when an enabled PLACE PRE-ORDER button appears, the farm
+**stops refreshing/clicking**, leaves every Chrome window open on the PDP, and
+pings Discord so you can ATC + checkout manually.
+
+Optional AUTO_ATC=1 restores the old auto-click path (then parks on `/{area}/cart`).
+
+Optional: FARM_COOKIE_FILES points at logged-in Cookie-Editor JSON exports
+(round-robined per instance) so the window is already signed in.
+"""
+
+from __future__ import annotations
+
+import random
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+from .browser_cart import _click_add_to_cart, _wait_for_product_ready
+from .checkout_link import CartHandoff, capture_cart_handoff
+from .discord_util import (
+    append_cart_success,
+    looks_like_discord_webhook,
+    redact_webhook,
+    resolve_discord_webhook,
+    send_discord_webhook,
+    write_webhook_sidecar,
+)
+from .logging_utils import get_logger, log_exception
+from .proxy_util import redact_proxy
+from .session_login import _create_webdriver, build_browser_identity
+from .sessions import load_cookies_file
+
+if TYPE_CHECKING:
+    from .config import Config
+
+logger = get_logger("click_farm")
+
+_HOOK_JS = """
+(() => {
+  if (window.__pbCartHooked) return true;
+  window.__pbCartHooked = true;
+  window.__pbCartLast = null;
+  const record = (status, body) => {
+    try {
+      window.__pbCartLast = {
+        status: Number(status) || 0,
+        body: String(body || '').slice(0, 4000),
+        t: Date.now(),
+      };
+    } catch (e) {}
+  };
+  const origFetch = window.fetch;
+  if (typeof origFetch === 'function') {
+    window.fetch = function(input, init) {
+      const url = String((input && input.url) || input || '');
+      const p = origFetch.apply(this, arguments);
+      if (url.indexOf('addToCart') !== -1 || url.indexOf('/api/cart/') !== -1) {
+        p.then(async (resp) => {
+          try {
+            const text = await resp.clone().text();
+            record(resp.status, text);
+          } catch (e) { record(resp.status, ''); }
+        }).catch(() => {});
+      }
+      return p;
+    };
+  }
+  const XO = XMLHttpRequest.prototype.open;
+  const XS = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function(method, url) {
+    this.__pbUrl = String(url || '');
+    return XO.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.send = function() {
+    this.addEventListener('loadend', () => {
+      try {
+        const u = this.__pbUrl || '';
+        if (u.indexOf('addToCart') !== -1 || u.indexOf('/api/cart/') !== -1) {
+          record(this.status, this.responseText || '');
+        }
+      } catch (e) {}
+    });
+    return XS.apply(this, arguments);
+  };
+  return true;
+})();
+"""
+
+
+@dataclass
+class FarmBrowser:
+    name: str
+    proxy: str = ""
+    driver: Any = None
+    ready: bool = False
+    last_error: str = ""
+    clicks: int = 0
+    success: bool = False
+    payment_url: str = ""
+    checkout: Optional[CartHandoff] = None
+    _last_oos_refresh: float = 0.0
+    _last_oos_log: float = 0.0
+    _last_idle_activity: float = 0.0
+    _last_idle_settle: float = 0.0
+    _oos_refresh_due: float = 0.0  # per-instance jittered interval
+
+
+@dataclass
+class ClickFarm:
+    config: "Config"
+    product_code: str
+    browsers: List[FarmBrowser] = field(default_factory=list)
+    _stop: threading.Event = field(default_factory=threading.Event)
+    _success_lock: threading.Lock = field(default_factory=threading.Lock)
+    _browsers_lock: threading.Lock = field(default_factory=threading.Lock)
+    _successes: List[FarmBrowser] = field(default_factory=list)
+    _plan: List[tuple[str, str]] = field(default_factory=list)  # (name, proxy)
+    _pdp_gate: Optional[threading.Semaphore] = field(default=None, repr=False)
+    # Drop timing from /api/products (orderStartDate + preOrderStatus).
+    _drop_at: Optional[float] = None  # epoch seconds, None = open / unknown
+    _drop_status: str = ""
+    _drop_checked_at: float = 0.0
+    _drop_lock: threading.Lock = field(default_factory=threading.Lock)
+    _prerelease_logged_at: float = 0.0
+    _predrop_refreshed: bool = False
+    _drop_burst_until: float = 0.0
+    _drop_warned: bool = False
+
+    def prepare(self) -> int:
+        """Plan N independent workers. Does NOT open browsers (no global wait)."""
+        self.close()
+        n = max(1, int(self.config.browser_instances))
+        proxies = self._load_proxies(n)
+        schedule = self._schedule_label()
+        self._plan = [
+            (f"inst{i + 1:02d}", proxies[i] if i < len(proxies) else "")
+            for i in range(n)
+        ]
+        self._pdp_gate = threading.Semaphore(max(1, int(self.config.pdp_max_concurrent)))
+        self._prerelease_logged_at = 0.0
+        self._predrop_refreshed = False
+        self._fetch_drop_info()
+        webhook, hook_src = self._resolve_webhook()
+        if webhook:
+            self.config.discord_webhook_url = webhook
+            # Keep a sidecar so menu [0] .env reset cannot wipe Discord again.
+            write_webhook_sidecar(webhook, Path.cwd())
+            write_webhook_sidecar(webhook, Path(__file__).resolve().parent.parent)
+        discord_label = f"yes ({hook_src or 'config'})" if webhook else "no"
+        print(
+            f"[farm] planned {n} independent instance(s) on {self.product_code} "
+            f"({schedule}; each opens + clicks on its own thread)"
+        )
+        remain = self._seconds_until_drop()
+        if remain is not None and remain > 0:
+            print(
+                f"[farm] NOT ON SALE YET — preOrderStatus="
+                f"{self._drop_status or 'NotStarted'} · sale starts "
+                f"{self._drop_label(remain)}\n"
+                "[farm] browsers stay warm on the PDP; clicking starts at the drop"
+            )
+        elif self._drop_status:
+            print(f"[farm] preOrderStatus={self._drop_status} — on sale, clicking now")
+        if webhook:
+            print(f"[farm] Discord webhook ON · source={hook_src or 'config'} · {redact_webhook(webhook)}")
+        else:
+            print(
+                "[farm] WARNING: Discord webhook OFF — button-live / cart alerts "
+                "will NOT ping Discord.\n"
+                "         Fix: set DISCORD_WEBHOOK_URL in .env  OR  put the URL alone in\n"
+                "         discord_webhook.txt (same folder as the bot). Details are\n"
+                "         always saved to logs/cart_successes.log + logs/cart_<instance>.txt"
+            )
+        logger.info(
+            "[farm] prepare planned=%s product=%s schedule=%s discord=%s "
+            "independent=yes stop_on_first=%s pdp_max_concurrent=%s",
+            n,
+            self.product_code,
+            schedule,
+            discord_label,
+            self.config.stop_on_first_cart,
+            self.config.pdp_max_concurrent,
+        )
+        stagger = max(0.0, float(self.config.open_stagger_seconds))
+        idle = float(self.config.idle_activity_seconds)
+        idle_label = f"every ~{idle:.0f}s" if idle > 0 else "off"
+        proxy_count = len({p for _, p in self._plan if p})
+        if proxy_count and proxy_count < n:
+            print(
+                f"[farm] WARNING: only {proxy_count} unique proxy(ies) for {n} instances "
+                "(shared egress increases PAGE NOT AVAILABLE / WAF)"
+            )
+        uniq = "on" if bool(getattr(self.config, "unique_browser_profiles", True)) else "off"
+        warm = max(0.0, float(getattr(self.config, "home_warmup_seconds", 0.0) or 0.0))
+        auto_atc = bool(getattr(self.config, "auto_atc", False))
+        mode = "AUTO-ATC" if auto_atc else "detect → stop (manual ATC)"
+        print(
+            f"[farm] open stagger={stagger}s (+jitter) · launch+PDP staggered · "
+            f"PDP retries={self.config.open_pdp_retries} · "
+            f"PDP concurrent≤{self.config.pdp_max_concurrent} · "
+            f"OOS refresh~{self.config.oos_refresh_seconds:.0f}s · "
+            f"idle={idle_label} · unique profiles={uniq} · home warm~{warm:.0f}s · "
+            f"mode={mode} · no wait for other instances"
+        )
+        return n
+
+    def run(self) -> List[FarmBrowser]:
+        """Each instance opens Chrome then enters the click loop independently."""
+        if not self._plan:
+            raise RuntimeError("click farm: prepare() was not called")
+
+        n = len(self._plan)
+        schedule = self._schedule_label()
+        auto_atc = bool(getattr(self.config, "auto_atc", False))
+        action = "auto-click" if auto_atc else "watch for"
+        print(
+            f"[farm] starting {n} independent worker(s) — "
+            f"{action} PLACE PRE-ORDER {schedule}; Ctrl+C to stop"
+        )
+        if not auto_atc:
+            print(
+                "[farm] AUTO_ATC=0 — when the pre-order button appears the farm "
+                "stops and leaves Chrome open for you to check out manually"
+            )
+        with ThreadPoolExecutor(max_workers=n) as pool:
+            futs = [
+                pool.submit(self._instance_lifecycle, idx, name, proxy)
+                for idx, (name, proxy) in enumerate(self._plan)
+            ]
+            try:
+                for fut in futs:
+                    fut.result()
+            except KeyboardInterrupt:
+                print("[farm] stop requested")
+                self._stop.set()
+                for fut in futs:
+                    try:
+                        fut.result(timeout=15)
+                    except Exception:  # noqa: BLE001
+                        pass
+        self._hold_for_manual_checkout()
+        return list(self._successes)
+
+    def _hold_for_manual_checkout(self) -> None:
+        """Keep the process (and Chrome windows) alive until Ctrl+C."""
+        if not bool(getattr(self.config, "keep_browser_open", True)):
+            return
+        with self._browsers_lock:
+            open_browsers = [wb for wb in self.browsers if wb.driver is not None]
+        with self._success_lock:
+            any_hit = bool(self._successes)
+        if not open_browsers or not any_hit:
+            return
+        names = ", ".join(wb.name for wb in open_browsers)
+        button_live = any(
+            wb.checkout and wb.checkout.is_button_live for wb in self._successes
+        )
+        if button_live:
+            print(
+                f"\n[farm] PRE-ORDER BUTTON LIVE — {len(open_browsers)} Chrome "
+                f"window(s) left open: {names}\n"
+                "[farm] click PLACE PRE-ORDER yourself, then log in + checkout.\n"
+                "[farm] press Ctrl+C when done (windows stay open after exit)."
+            )
+        else:
+            print(
+                f"\n[farm] {len(open_browsers)} window(s) held — Chrome left open: "
+                f"{names}\n"
+                "[farm] log in in those window(s) and complete checkout.\n"
+                "[farm] press Ctrl+C when done (windows stay open after exit)."
+            )
+        logger.info("[farm] holding for manual checkout instances=%s", names)
+        try:
+            while True:
+                time.sleep(1.0)
+        except KeyboardInterrupt:
+            print("[farm] exiting — Chrome windows stay open")
+
+    def _instance_lifecycle(self, index: int, name: str, proxy: str) -> None:
+        """Open this instance, then watch/click — never waits on other instances."""
+        if self._stop.is_set():
+            return
+        product_url = self._product_url()
+        print(f"[{name}] independent start")
+        wb = self._open_one(name, proxy, product_url, index=index)
+        with self._browsers_lock:
+            self.browsers.append(wb)
+        if wb.driver is None:
+            print(f"[{name}] Chrome failed — instance exit")
+            return
+        print(f"[{name}] open done ready={wb.ready} — entering watch loop now")
+        logger.info("[farm] %s open done ready=%s — watch loop", name, wb.ready)
+        self._worker_loop(wb)
+
+    def close(self) -> None:
+        self._stop.set()
+        with self._browsers_lock:
+            browsers = list(self.browsers)
+            self.browsers = []
+        keep_open = bool(getattr(self.config, "keep_browser_open", True))
+        any_hit = any(wb.success for wb in browsers)
+        kept = 0
+        for wb in browsers:
+            if wb.driver is None:
+                continue
+            # After button-live / cart success, leave every window open for manual ATC.
+            if keep_open and (wb.success or any_hit):
+                kept += 1
+                wb.driver = None
+                wb.ready = False
+                continue
+            try:
+                wb.driver.quit()
+            except Exception as exc:  # noqa: BLE001
+                log_exception(logger, f"farm quit failed {wb.name}", exc)
+            wb.driver = None
+            wb.ready = False
+        if kept:
+            print(f"[farm] left {kept} Chrome window(s) open for manual checkout")
+            logger.info("[farm] kept %s browser(s) open", kept)
+        self._plan = []
+        self._stop = threading.Event()
+        self._pdp_gate = None
+
+    def _fetch_drop_info(self) -> None:
+        """Read orderStartDate / preOrderStatus from /api/products (no browser)."""
+        if not bool(getattr(self.config, "prerelease_wait", True)):
+            return
+        url = f"{self.config.base_url.rstrip('/')}/api/products/{self.product_code}"
+        try:
+            import requests
+
+            resp = requests.get(
+                url,
+                headers={
+                    "Accept": "application/json",
+                    "Accept-Language": self.config.accept_language or "en",
+                    "X-G1-Area-Code": (self.config.area_code or "hk").lower(),
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+                    ),
+                },
+                timeout=15,
+            )
+            detail = resp.json() if resp.ok else {}
+            if not resp.ok:
+                self._warn_drop_unavailable(
+                    f"HTTP {resp.status_code} for {self.product_code} "
+                    f"in area={(self.config.area_code or 'hk').lower()}"
+                )
+                return
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[farm] drop info fetch failed: %s", exc)
+            self._warn_drop_unavailable(str(exc))
+            return
+
+        order = ((detail.get("infoSection") or {}).get("orderInfo") or {})
+        if not order:
+            self._warn_drop_unavailable("product API had no orderInfo")
+            return
+        status = str(order.get("preOrderStatus") or "")
+        start_raw = str(order.get("orderStartDate") or "")
+        start_ts: Optional[float] = None
+        text = start_raw.strip()
+        if text:
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            try:
+                parsed = datetime.fromisoformat(text)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                start_ts = parsed.timestamp()
+            except ValueError:
+                start_ts = None
+
+        with self._drop_lock:
+            self._drop_status = status
+            # Only treat as pre-release while the start is genuinely in the future.
+            self._drop_at = start_ts if (start_ts and start_ts > time.time()) else None
+            self._drop_checked_at = time.time()
+
+    def _warn_drop_unavailable(self, reason: str) -> None:
+        """Tell the user drop timing is unknown, so clicking falls back to blind."""
+        if self._drop_warned:
+            return
+        self._drop_warned = True
+        print(
+            f"[farm] WARNING: could not read sale timing ({reason}).\n"
+            "         Falling back to clicking on schedule. Check AREA_CODE matches "
+            "the product's region."
+        )
+        logger.warning("[farm] drop timing unavailable: %s", reason)
+
+    def _seconds_until_drop(self) -> Optional[float]:
+        """Seconds until orderStartDate, or None when open / unknown."""
+        with self._drop_lock:
+            drop_at = self._drop_at
+            checked = self._drop_checked_at
+        if drop_at is None:
+            # Re-check occasionally in case the listing gains a future start date.
+            if checked and time.time() - checked > 300:
+                self._fetch_drop_info()
+            return None
+        remain = drop_at - time.time()
+        if remain <= 0:
+            self._open_drop_burst(drop_at)
+            return None
+        # Refresh timing as the drop approaches (Bandai can shift the start).
+        age = time.time() - checked
+        if (remain > 600 and age > 120) or (remain <= 600 and age > 30):
+            self._fetch_drop_info()
+            with self._drop_lock:
+                drop_at = self._drop_at
+            if drop_at is None:
+                return None
+            remain = drop_at - time.time()
+            if remain <= 0:
+                self._open_drop_burst(drop_at)
+                return None
+        return remain
+
+    def _open_drop_burst(self, drop_at: float) -> None:
+        """Drop just opened: clear the gate and start the fast-retry window."""
+        burst = max(0.0, float(getattr(self.config, "drop_burst_seconds", 120)))
+        with self._drop_lock:
+            if self._drop_at is None:
+                return
+            self._drop_at = None
+            self._drop_burst_until = drop_at + burst if burst else 0.0
+        if burst:
+            print(
+                f"[farm] DROP OPEN — fast retry every "
+                f"~{float(self.config.drop_burst_interval):.1f}s for {int(burst)}s"
+            )
+            logger.info("[farm] drop open; burst=%ss product=%s", int(burst), self.product_code)
+
+    def _drop_label(self, remain: float) -> str:
+        with self._drop_lock:
+            drop_at = self._drop_at
+        when = ""
+        if drop_at:
+            when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(drop_at))
+        hrs, rem = divmod(int(max(0, remain)), 3600)
+        mins, secs = divmod(rem, 60)
+        if hrs:
+            eta = f"{hrs}h {mins}m"
+        elif mins:
+            eta = f"{mins}m {secs}s"
+        else:
+            eta = f"{secs}s"
+        return f"{when} (in {eta})" if when else f"in {eta}"
+
+    def _handle_prerelease(self, wb: FarmBrowser, remain: float) -> None:
+        """Hold fire until the drop, keeping the window warm and the page fresh."""
+        now = time.time()
+        if now - self._prerelease_logged_at >= 60.0:
+            self._prerelease_logged_at = now
+            status = self._drop_status or "NotStarted"
+            print(
+                f"[farm] pre-order not open ({status}) — sale starts "
+                f"{self._drop_label(remain)}; holding clicks until then"
+            )
+            logger.info(
+                "[farm] prerelease status=%s remain=%.0fs product=%s",
+                status,
+                remain,
+                self.product_code,
+            )
+
+        lead = max(5.0, float(self.config.predrop_refresh_seconds))
+        # One fresh PDP load just before T-0 so the button renders in time.
+        if remain <= lead and not self._predrop_refreshed:
+            self._predrop_refreshed = True
+            print(f"[{wb.name}] pre-drop refresh (T-{int(remain)}s)")
+            logger.info("[farm] %s pre-drop refresh remain=%.0fs", wb.name, remain)
+            self._hard_refresh_pdp(wb)
+            return
+
+        # Sleep toward the drop in short chunks: wake at ~T-lead, then at T-0.
+        if remain > lead:
+            chunk = min(remain - lead, 20.0)
+        else:
+            chunk = min(remain, 0.5)
+        end = time.time() + max(0.1, chunk)
+        while time.time() < end and not self._stop.is_set():
+            if remain > lead:
+                self._maybe_human_idle(wb, seconds_until_click=remain)
+            time.sleep(max(0.0, min(0.2, end - time.time())))
+
+    def _acquire_pdp_slot(self, name: str) -> bool:
+        """Block until a PDP navigation slot is free (limits origin stampede)."""
+        gate = self._pdp_gate
+        if gate is None:
+            return True
+        while not self._stop.is_set():
+            if gate.acquire(blocking=True, timeout=0.25):
+                return True
+        return False
+
+    def _release_pdp_slot(self) -> None:
+        gate = self._pdp_gate
+        if gate is None:
+            return
+        try:
+            gate.release()
+        except ValueError:
+            pass
+
+    def _oos_interval_for(self, wb: FarmBrowser) -> float:
+        """Per-instance jittered refresh interval so heals don't lockstep."""
+        base = float(self.config.oos_refresh_seconds)
+        if base <= 0:
+            return 0.0
+        due = float(getattr(wb, "_oos_refresh_due", 0.0) or 0.0)
+        if due <= 0:
+            # Spread 0.7x..1.6x of base across instances.
+            due = base * random.uniform(0.7, 1.6) + random.uniform(0.0, 4.0)
+            wb._oos_refresh_due = due
+        return due
+
+    def _schedule_label(self) -> str:
+        at = int(self.config.click_at_second)
+        if at >= 0:
+            return f"at :{at:02d} every minute"
+        return f"every {self.config.click_interval_seconds}s"
+
+    def _drop_burst_remaining(self) -> float:
+        """Seconds left in the fast-retry window that follows a drop opening."""
+        with self._drop_lock:
+            until = self._drop_burst_until
+        return max(0.0, until - time.time()) if until else 0.0
+
+    def _wait_for_next_click(self, wb: Optional[FarmBrowser] = None) -> None:
+        """Block until the next scheduled ATC time; idle + OOS refresh while waiting."""
+        # Just after a drop opens, retry every few seconds instead of waiting for
+        # the next :00 — the button can take a moment to appear and a missed
+        # minute usually means a missed drop.
+        burst = self._drop_burst_remaining()
+        if burst > 0:
+            interval = max(0.5, float(self.config.drop_burst_interval))
+            end = time.time() + interval * random.uniform(0.85, 1.2)
+            while time.time() < end and not self._stop.is_set():
+                time.sleep(max(0.0, min(0.15, end - time.time())))
+            return
+        at = int(self.config.click_at_second)
+        if at < 0:
+            interval = max(0.5, float(self.config.click_interval_seconds))
+            end = time.time() + interval
+            while time.time() < end and not self._stop.is_set():
+                if wb is not None:
+                    self._maybe_refresh_oos_while_waiting(wb)
+                    self._maybe_human_idle(wb, seconds_until_click=end - time.time())
+                time.sleep(max(0.0, min(0.2, end - time.time())))
+            return
+
+        # Wall-clock: fire when local second == CLICK_AT_SECOND (default :00).
+        while not self._stop.is_set():
+            now = time.time()
+            minute_start = now - (now % 60)
+            target = minute_start + at
+            if target <= now + 0.02:
+                target += 60.0
+            while time.time() < target and not self._stop.is_set():
+                if wb is not None:
+                    remaining = target - time.time()
+                    self._maybe_refresh_oos_while_waiting(wb)
+                    self._maybe_human_idle(wb, seconds_until_click=remaining)
+                remaining = target - time.time()
+                time.sleep(max(0.0, min(0.25, remaining)))
+            return
+
+    def _maybe_human_idle(self, wb: FarmBrowser, *, seconds_until_click: float) -> None:
+        """Scroll up/down to keep the browser session looking active."""
+        interval = float(self.config.idle_activity_seconds)
+        if interval <= 0 or wb.driver is None:
+            return
+        # Settle near top in the last few seconds so ATC stays on-screen.
+        if 2.0 <= seconds_until_click < 4.5:
+            last_settle = float(getattr(wb, "_last_idle_settle", 0.0) or 0.0)
+            if time.time() - last_settle > 30.0:
+                wb._last_idle_settle = time.time()
+                try:
+                    wb.driver.execute_script(
+                        "window.scrollTo({top: 0, left: 0, behavior: 'smooth'});"
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+        # Don't fidget in the last ~2s before ATC.
+        if seconds_until_click < 2.0:
+            return
+        now = time.time()
+        last = float(getattr(wb, "_last_idle_activity", 0.0) or 0.0)
+        # Jitter so 20 instances don't all scroll in lockstep.
+        due = interval + random.uniform(-1.5, 2.5)
+        if now - last < max(3.0, due):
+            return
+        wb._last_idle_activity = now
+        try:
+            self._do_human_idle(wb.driver)
+            logger.info("[farm] %s idle activity (scroll only)", wb.name)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[farm] %s idle activity soft-fail: %s", wb.name, exc)
+
+    def _do_human_idle(self, driver: Any) -> None:
+        """Keep the session warm with scrolling only — never synthetic clicks.
+
+        Idle clicks used to land on real links: Selenium measures
+        move_to_element_with_offset from the element's *centre*, so a small
+        offset into `main` hit mid-page content and navigated off the PDP.
+        Scrolling alone keeps the session active with no risk of misclicks.
+        """
+        # Scroll down, then back up by the same amount so PLACE PRE-ORDER stays
+        # exactly where the click routine expects it.
+        delta = random.choice([160, 280, 420, 560])
+        driver.execute_script(
+            "window.scrollBy({top: arguments[0], left: 0, behavior: 'smooth'});",
+            delta,
+        )
+        time.sleep(random.uniform(0.25, 0.6))
+        driver.execute_script(
+            "window.scrollBy({top: arguments[0], left: 0, behavior: 'smooth'});",
+            -delta,
+        )
+        time.sleep(random.uniform(0.15, 0.4))
+
+    def _maybe_refresh_oos_while_waiting(self, wb: FarmBrowser) -> None:
+        """Soft OOS / PNA: hard-refresh PDP on a jittered interval while parked."""
+        interval = self._oos_interval_for(wb)
+        if interval <= 0 or wb.driver is None:
+            return
+        last = float(getattr(wb, "_last_oos_refresh", 0.0) or 0.0)
+        now = time.time()
+        if now - last < interval:
+            return
+        try:
+            if self._shows_out_of_stock(wb.driver) or self._page_looks_bad(wb.driver):
+                wb._last_oos_refresh = now
+                # Resample interval so the next heal doesn't stay phase-locked.
+                wb._oos_refresh_due = 0.0
+                last_log = float(getattr(wb, "_last_oos_log", 0.0) or 0.0)
+                if now - last_log >= 60.0:
+                    wb._last_oos_log = now
+                    print(
+                        f"[{wb.name}] still OOS/bad — refreshing ~every "
+                        f"{float(self.config.oos_refresh_seconds):.0f}s "
+                        f"(jittered, max {self.config.pdp_max_concurrent} concurrent)"
+                    )
+                logger.info("[farm] %s OOS refresh while waiting", wb.name)
+                self._hard_refresh_pdp(wb)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[farm] %s OOS wait-refresh failed: %s", wb.name, exc)
+
+    def _worker_loop(self, wb: FarmBrowser) -> None:
+        assert wb.driver is not None
+        # After open PNA, one gated multi-retry recover (staggered) — not every :00.
+        if not wb.ready and not self._stop.is_set():
+            # Extra jitter so recoveries don't align when many open failures finish together.
+            time.sleep(random.uniform(0.5, 4.0))
+            print(f"[{wb.name}] recovering PDP after open failure…")
+            if self._recover_pdp(wb):
+                print(f"[{wb.name}] PDP recovered")
+            else:
+                print(f"[{wb.name}] PDP still bad — will heal on jittered interval")
+        while not self._stop.is_set():
+            # Pre-order not open yet: clicking cannot work, so don't hammer the
+            # PDP or spam "no ATC button". Handled before the :00 scheduler so we
+            # can wake exactly at the drop instead of on the minute.
+            remain = self._seconds_until_drop()
+            if remain is not None and remain > 0.4:
+                self._handle_prerelease(wb, remain)
+                continue
+            self._wait_for_next_click(wb)
+            if self._stop.is_set():
+                return
+            try:
+                # Soft OOS/500 is already refreshed on a jittered interval while
+                # waiting. At :00 do at most ONE hard refresh (not multi-retry),
+                # then click or skip — avoids a 20× recover stampede on the minute.
+                if (
+                    self._page_looks_bad(wb.driver)
+                    or self._shows_out_of_stock(wb.driver)
+                    or not wb.ready
+                ):
+                    last = float(getattr(wb, "_last_oos_refresh", 0.0) or 0.0)
+                    # If we refreshed recently while waiting, don't hit origin again at :00.
+                    if time.time() - last < 8.0 and not self._page_looks_bad(wb.driver):
+                        if self._shows_out_of_stock(wb.driver):
+                            print(f"[{wb.name}] still OOS after recent refresh — skip this minute")
+                            continue
+                    print(f"[{wb.name}] PDP OOS/bad at click time — one hard refresh")
+                    if not self._hard_refresh_pdp(wb):
+                        print(f"[{wb.name}] still OOS/unavailable — skip this minute")
+                        continue
+                    wb.ready = True
+
+                self._ensure_hook(wb.driver)
+                auto_atc = bool(getattr(self.config, "auto_atc", False))
+                # Default: detect PLACE PRE-ORDER and stop — you click manually.
+                if not auto_atc:
+                    wb.clicks += 1
+                    if self._has_atc_button(wb.driver):
+                        self._on_button_live(wb)
+                        return
+                    self._handle_no_button(wb)
+                    continue
+
+                before = self._read_last(wb.driver)
+                clicked = _click_add_to_cart(wb.driver, timeout=3)
+                wb.clicks += 1
+                if clicked:
+                    stamp = time.strftime("%H:%M:%S")
+                    print(f"[{wb.name}] {stamp} click #{wb.clicks} PLACE PRE-ORDER")
+                    logger.info("[farm] %s click #%s at %s", wb.name, wb.clicks, stamp)
+                    ok, note, payment = self._await_success(wb, before_ts=(before or {}).get("t") or 0)
+                    if ok:
+                        wb.success = True
+                        wb.payment_url = payment
+                        if wb.checkout is None and payment:
+                            wb.checkout = CartHandoff(cart_url=payment)
+                        with self._success_lock:
+                            self._successes.append(wb)
+                        print(f"[{wb.name}] CART SUCCESS → {payment}")
+                        logger.info(
+                            "[farm] success session=%s cart=%s note=%s loggedIn=%s",
+                            wb.name,
+                            payment,
+                            note,
+                            bool(wb.checkout.logged_in) if wb.checkout else False,
+                        )
+                        self._notify_discord(wb, payment, note)
+                        # Cart is held: this instance is done for good. No further
+                        # clicks, no refreshes — the window is yours to check out in.
+                        print(
+                            f"[{wb.name}] TASK COMPLETE — no more add-to-cart from this "
+                            "instance. Chrome stays open for manual login + checkout."
+                        )
+                        logger.info("[farm] %s stopped clicking after cart success", wb.name)
+                        if self.config.stop_on_first_cart:
+                            self._stop.set()
+                        return
+                else:
+                    self._handle_no_button(wb)
+            except Exception as exc:  # noqa: BLE001
+                wb.last_error = str(exc)
+                log_exception(logger, f"farm worker error {wb.name}", exc)
+                print(f"[{wb.name}] error: {exc}")
+                try:
+                    self._hard_refresh_pdp(wb)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _hard_refresh_pdp(self, wb: FarmBrowser) -> bool:
+        driver = wb.driver
+        if driver is None:
+            return False
+        product_url = self._product_url()
+        home = f"{self.config.base_url}/{self.config.area_code}/"
+        if not self._acquire_pdp_slot(wb.name):
+            return False
+        try:
+            # Bypass HTTP cache where possible.
+            try:
+                driver.execute_cdp_cmd("Network.setCacheDisabled", {"cacheDisabled": True})
+            except Exception:  # noqa: BLE001
+                pass
+            # Bust SPA/CDN soft-cache with a no-op query once, then clean URL.
+            bust = f"{product_url}?_={int(time.time() * 1000)}"
+            driver.get(bust)
+            _wait_for_product_ready(driver, timeout=25)
+            if self._shows_out_of_stock(driver) or self._page_looks_bad(driver):
+                driver.get(home)
+                time.sleep(random.uniform(0.4, 1.0))
+                driver.get(product_url)
+                _wait_for_product_ready(driver, timeout=25)
+            self._ensure_hook(driver)
+            wb._last_oos_refresh = time.time()
+            ok = not self._page_looks_bad(driver)
+            # OOS is not a hard page error — page can still be "ok" HTML with disabled CTA.
+            if ok and self._shows_out_of_stock(driver):
+                return False
+            if ok:
+                wb.ready = True
+                wb.last_error = ""
+            return ok
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[farm] %s hard refresh failed: %s", wb.name, exc)
+            return False
+        finally:
+            self._release_pdp_slot()
+
+    def _shows_out_of_stock(self, driver: Any) -> bool:
+        """True when UI shows SORRY/OUT OF STOCK or soft purchase-limit block."""
+        # Soft quota / soft-error: PLACE PRE-ORDER can still look enabled in DOM.
+        soft_markers = (
+            "purchase limit has been reached",
+            "the purchase limit has been reached",
+            "we can't perform the requested operation",
+            "cannot perform the requested operation",
+        )
+        hard_markers = (
+            "sorry, out of stock",
+            "sorry out of stock",
+            "out of stock",
+            "sold out",
+            "currently unavailable",
+            "pre-order closed",
+            "preorder closed",
+            "pre-orders closed",
+            "msg.sorryoutofstock",
+            "暫無存貨",
+            "暂时缺货",
+            "暫時缺貨",
+            "售罄",
+            "缺貨",
+            "売り切れ",
+            "在庫なし",
+        )
+        # Prefer live DOM (sidebar can sit past a huge KV image block in page_source).
+        if self._dom_shows_unavailable(driver):
+            return True
+        try:
+            # Do NOT truncate — KV thumbs alone often exceed 20KB before the CTA.
+            low = (driver.page_source or "").lower()
+        except Exception:  # noqa: BLE001
+            return False
+        if any(m in low for m in soft_markers):
+            return True
+        # Hard OOS only when there is no enabled PLACE PRE-ORDER CTA.
+        if self._has_atc_button(driver):
+            return False
+        return any(m in low for m in hard_markers)
+
+    def _dom_shows_unavailable(self, driver: Any) -> bool:
+        """Detect OOS / soft-block from sidebar DOM (not truncated HTML dump)."""
+        from selenium.webdriver.common.by import By
+
+        try:
+            # True OOS CTA: class is-noActive + SORRY OUT OF STOCK / data-bs-text-key.
+            for btn in driver.find_elements(
+                By.CSS_SELECTOR,
+                "button.p-button, button.is-noActive, button[data-bs-text-key]",
+            ):
+                try:
+                    if not btn.is_displayed():
+                        continue
+                    cls = (btn.get_attribute("class") or "").lower()
+                    key = (btn.get_attribute("data-bs-text-key") or "").lower()
+                    label = (btn.text or "").strip().lower()
+                    if "msg.sorryoutofstock" in key or "sorryoutofstock" in key:
+                        return True
+                    if "is-noactive" in cls and (
+                        "out of stock" in label or "sorry" in label
+                    ):
+                        return True
+                    if "sorry, out of stock" in label or label == "sorry out of stock":
+                        return True
+                except Exception:  # noqa: BLE001
+                    continue
+            # Flag row on PDP sidebar.
+            for flag in driver.find_elements(By.CSS_SELECTOR, ".p-flag__item, .o-items__sidebar-flag li"):
+                try:
+                    if not flag.is_displayed():
+                        continue
+                    text = (flag.text or "").strip().lower()
+                    if text in ("out of stock", "sold out") or text.startswith("out of stock"):
+                        return True
+                except Exception:  # noqa: BLE001
+                    continue
+            # Soft purchase-limit copy near quantity / form.
+            for el in driver.find_elements(
+                By.CSS_SELECTOR,
+                ".o-items__sidebar p, .o-items__sidebar span, .o-items__sidebar .p-lead, form p",
+            ):
+                try:
+                    t = (el.text or "").strip().lower()
+                    if not t:
+                        continue
+                    if "purchase limit has been reached" in t:
+                        return True
+                    if "can't perform the requested operation" in t:
+                        return True
+                    if "cannot perform the requested operation" in t:
+                        return True
+                except Exception:  # noqa: BLE001
+                    continue
+        except Exception:  # noqa: BLE001
+            return False
+        return False
+
+    def _has_atc_button(self, driver: Any) -> bool:
+        from selenium.webdriver.common.by import By
+
+        needles = (
+            "PLACE PRE-ORDER",
+            "Place Pre-Order",
+            "PLACE ORDER",
+            "Place Order",
+            "ADD TO CART",
+            "Add to cart",
+            "加入購物車",
+            "預購",
+            "立即預訂",
+        )
+        try:
+            for btn in driver.find_elements(By.TAG_NAME, "button"):
+                try:
+                    if not btn.is_displayed() or not btn.is_enabled():
+                        continue
+                    label = (btn.text or btn.get_attribute("aria-label") or "").strip()
+                    if not label:
+                        continue
+                    low = label.lower()
+                    cls = (btn.get_attribute("class") or "").lower()
+                    key = (btn.get_attribute("data-bs-text-key") or "").lower()
+                    if (
+                        "out of stock" in low
+                        or "sorry" in low
+                        or "is-noactive" in cls
+                        or "sorryoutofstock" in key
+                    ):
+                        continue
+                    if any(n.lower() in low for n in needles):
+                        return True
+                except Exception:  # noqa: BLE001
+                    continue
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+    def _handle_no_button(self, wb: FarmBrowser) -> None:
+        """Refresh / burst-retry when PLACE PRE-ORDER is not on the PDP yet."""
+        logger.warning("[farm] %s no button (check #%s)", wb.name, wb.clicks)
+        if self._shows_out_of_stock(wb.driver):
+            print(
+                f"[{wb.name}] page shows OUT OF STOCK "
+                "(no enabled PLACE PRE-ORDER) — refresh & wait next :00"
+            )
+            self._hard_refresh_pdp(wb)
+            return
+        if self._page_looks_bad(wb.driver):
+            print(f"[{wb.name}] no ATC button (bad PDP) — one refresh for next round")
+            self._hard_refresh_pdp(wb)
+            return
+        burst = self._drop_burst_remaining()
+        status = self._drop_status or ""
+        if burst > 0:
+            print(
+                f"[{wb.name}] drop open but button not live yet — "
+                f"refresh + retry (~{self.config.drop_burst_interval:.1f}s, "
+                f"{int(burst)}s left)"
+            )
+        elif status and status.lower() != "inprogress":
+            print(
+                f"[{wb.name}] no ATC button — pre-order status="
+                f"{status} (not on sale yet); refreshing"
+            )
+        else:
+            print(
+                f"[{wb.name}] no enabled ATC button "
+                "(not OOS text / not error page) — soft refresh"
+            )
+        self._hard_refresh_pdp(wb)
+
+    def _on_button_live(self, wb: FarmBrowser) -> None:
+        """PLACE PRE-ORDER is visible — stop the farm; leave Chrome for manual ATC."""
+        product_url = self._product_url()
+        stamp = time.strftime("%H:%M:%S")
+        wb.success = True
+        wb.payment_url = product_url
+        wb.checkout = CartHandoff(
+            cart_url=product_url,
+            kind="button_live",
+            notes=["button_live", "manual_checkout"],
+        )
+        with self._success_lock:
+            self._successes.append(wb)
+        print(
+            f"[{wb.name}] {stamp} PLACE PRE-ORDER LIVE (check #{wb.clicks}) — "
+            "stopping farm"
+        )
+        print(
+            f"[{wb.name}] Chrome stays open on the product page — "
+            "click PLACE PRE-ORDER yourself, then check out."
+        )
+        logger.info(
+            "[farm] button live session=%s product=%s — farm stop",
+            wb.name,
+            self.product_code,
+        )
+        self._notify_discord(wb, product_url, "button_live")
+        # Stop every instance from further refreshing / clicking.
+        self._stop.set()
+
+    def _await_success(
+        self,
+        wb: FarmBrowser,
+        *,
+        before_ts: float,
+    ) -> tuple[bool, str, str]:
+        """Poll hooked addToCart response, then snapshot the held cart."""
+        driver = wb.driver
+        assert driver is not None
+        deadline = time.time() + 8.0
+        last: Dict[str, Any] = {}
+        while time.time() < deadline:
+            last = self._read_last(driver) or {}
+            ts = float(last.get("t") or 0)
+            status = int(last.get("status") or 0)
+            if ts > before_ts and status:
+                body = str(last.get("body") or "")
+                if 200 <= status < 300:
+                    cart_url = self._capture_cart(wb)
+                    return True, f"addToCart status={status}", cart_url
+                if status == 409 or "preallocation" in body.lower() or "outofstock" in body.lower():
+                    return False, f"stock hold status={status}", ""
+                # 500/501/502 — not success; keep looping outer click interval
+                return False, f"addToCart status={status}: {body[:120]}", ""
+            time.sleep(0.25)
+
+        # No XHR capture — the cart may still hold the item; check before giving up.
+        cart_url = self._capture_cart(wb)
+        if wb.checkout and (wb.checkout.item_count > 0 or wb.checkout.cart_id):
+            return True, "cart held (no XHR capture)", cart_url
+        return False, "no addToCart response", ""
+
+    def _capture_cart(self, wb: FarmBrowser) -> str:
+        """Snapshot the held cart and park the window for manual checkout."""
+        driver = wb.driver
+        assert driver is not None
+        area = (self.config.area_code or "hk").strip().lower()
+        cart_url = f"{self.config.base_url.rstrip('/')}/{area}/cart"
+        try:
+            # Small settle so SESSION / cart hold is committed after ATC.
+            time.sleep(0.8)
+            handoff = capture_cart_handoff(
+                driver,
+                base_url=self.config.base_url,
+                area_code=self.config.area_code,
+                park_on_cart=bool(getattr(self.config, "park_on_cart", True)),
+            )
+            wb.checkout = handoff
+            print(
+                f"[{wb.name}] cart held items={handoff.item_count} "
+                f"cartId={handoff.cart_id or '-'} "
+                f"loggedIn={handoff.logged_in} parked={handoff.parked}"
+            )
+            return handoff.cart_url or cart_url
+        except Exception as exc:  # noqa: BLE001
+            log_exception(logger, f"cart capture failed {wb.name}", exc)
+            return cart_url
+
+    def _resolve_webhook(self) -> tuple[str, str]:
+        """Re-read webhook at runtime (env / .env value / discord_webhook.txt)."""
+        return resolve_discord_webhook(
+            config_value=getattr(self.config, "discord_webhook_url", "") or "",
+            search_dirs=[
+                Path.cwd(),
+                Path(__file__).resolve().parent.parent,
+            ],
+            reload_env=True,
+        )
+
+    def _notify_discord(self, wb: FarmBrowser, payment_url: str, note: str) -> None:
+        product_url = self._product_url()
+        area = (getattr(self.config, "area_code", "") or "hk").upper()
+        checkout = wb.checkout or CartHandoff(cart_url=payment_url)
+        if payment_url and not checkout.cart_url:
+            checkout.cart_url = payment_url
+        # Always persist locally first — never lose a cart.
+        try:
+            log_path = append_cart_success(
+                folder=Path.cwd() / "logs",
+                instance=wb.name,
+                product_code=self.product_code,
+                payment_url=checkout.cart_url or payment_url,
+                note=note,
+                product_url=product_url,
+                extra={
+                    "logged_in": checkout.logged_in,
+                    "cart_id": checkout.cart_id,
+                    "cookie_header": checkout.cookie_header,
+                },
+            )
+            # Dedicated dump for manual recovery on another machine.
+            token_path = Path.cwd() / "logs" / f"cart_{wb.name}.txt"
+            token_path.write_text(
+                "\n".join(
+                    [
+                        checkout.cart_url or payment_url,
+                        f"instance={wb.name}",
+                        f"loggedIn={checkout.logged_in}",
+                        f"items={checkout.item_count}",
+                        f"cartId={checkout.cart_id}",
+                        f"cartSn={checkout.cart_sn}",
+                        f"SESSION={checkout.session_cookie}",
+                        f"cookies={checkout.cookie_header}",
+                        f"product={self.product_code}",
+                        f"note={note}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            label = "button-live" if checkout.is_button_live else "cart"
+            print(f"[{wb.name}] saved {label} → {log_path}")
+            print(f"[{wb.name}] saved cookies → {token_path}")
+        except Exception as exc:  # noqa: BLE001
+            log_exception(logger, f"cart success log failed {wb.name}", exc)
+
+        webhook, hook_src = self._resolve_webhook()
+        if webhook:
+            self.config.discord_webhook_url = webhook
+        content = checkout.discord_content(
+            area=area,
+            product_code=self.product_code,
+            product_url=product_url,
+            instance=wb.name,
+            note=note,
+        )
+        page_label = "product page" if checkout.is_button_live else "cart page"
+        if not webhook:
+            print(f"[farm] Discord webhook not set — {page_label}:\n{checkout.cart_url}")
+            logger.warning("[farm] no DISCORD_WEBHOOK_URL; url=%s", checkout.cart_url)
+            return
+        if not looks_like_discord_webhook(webhook):
+            print(
+                f"[farm] Discord webhook looks invalid ({redact_webhook(webhook)}) — "
+                f"{page_label}:\n{checkout.cart_url}"
+            )
+            logger.warning(
+                "[farm] invalid webhook source=%s url=%s cart=%s",
+                hook_src,
+                redact_webhook(webhook),
+                checkout.cart_url,
+            )
+            return
+        embeds = [
+            checkout.discord_embed(
+                area=area,
+                product_code=self.product_code,
+                product_url=product_url,
+                instance=wb.name,
+            )
+        ]
+        ok, detail = send_discord_webhook(
+            webhook,
+            content=content,
+            embeds=embeds,
+            retries=3,
+        )
+        if ok:
+            logger.info(
+                "[farm] discord ok instance=%s source=%s detail=%s loggedIn=%s",
+                wb.name,
+                hook_src or "config",
+                detail,
+                checkout.logged_in,
+            )
+            print(f"[{wb.name}] Discord notified ({detail})")
+        else:
+            logger.error(
+                "[farm] discord FAILED instance=%s source=%s detail=%s cart=%s",
+                wb.name,
+                hook_src or "config",
+                detail,
+                checkout.cart_url,
+            )
+            print(f"[{wb.name}] Discord webhook error: {detail}")
+            print(f"[{wb.name}] cart page (saved to logs/):\n{checkout.cart_url}")
+
+    def _inject_login_cookies(
+        self, driver: Any, *, name: str, index: int, home: str
+    ) -> None:
+        """Load a logged-in cookie export so createCheckout can build the hold."""
+        files = [str(p).strip() for p in (self.config.farm_cookie_files or []) if str(p).strip()]
+        if not files:
+            return
+        path = Path(files[index % len(files)])
+        if not path.exists():
+            logger.warning("[farm] %s cookie file missing: %s", name, path)
+            print(f"[farm] {name} cookie file missing: {path}")
+            return
+        try:
+            cookies = load_cookies_file(path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[farm] %s cookie load failed %s: %s", name, path, exc)
+            return
+        # Cookies only stick after the domain is loaded once.
+        try:
+            driver.get(home)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[farm] %s cookie seed nav failed: %s", name, exc)
+            return
+        added = 0
+        for cookie in cookies:
+            cname = str(cookie.get("name") or "")
+            if not cname:
+                continue
+            item: Dict[str, Any] = {
+                "name": cname,
+                "value": str(cookie.get("value") or ""),
+                "path": str(cookie.get("path") or "/"),
+            }
+            domain = str(cookie.get("domain") or "")
+            if domain and "p-bandai" in domain:
+                item["domain"] = domain
+            try:
+                driver.add_cookie(item)
+                added += 1
+            except Exception:  # noqa: BLE001
+                continue
+        logger.info("[farm] %s injected %s cookies from %s", name, added, path.name)
+        print(f"[farm] {name} logged-in cookies: {added} from {path.name}")
+
+    def _warm_home(self, driver: Any, *, home: str, name: str) -> None:
+        """Browse /{area}/ briefly so the first PDP hit is not a cold direct open."""
+        warm = max(0.0, float(getattr(self.config, "home_warmup_seconds", 0.0) or 0.0))
+        if warm <= 0:
+            return
+        acquired = self._acquire_pdp_slot(name)
+        try:
+            print(f"[farm] {name} home warm-up ~{warm:.1f}s")
+            logger.info("[farm] %s home warm-up seconds=%.1f", name, warm)
+            driver.get(home)
+            # Linger + light scroll so cookies/session look less bot-cold.
+            end = time.time() + warm + random.uniform(0.2, 1.2)
+            scrolled = False
+            while time.time() < end and not self._stop.is_set():
+                if not scrolled and time.time() + 0.6 < end:
+                    try:
+                        driver.execute_script(
+                            "window.scrollBy({top: arguments[0], left: 0, behavior: 'smooth'});",
+                            random.randint(120, 420),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    scrolled = True
+                time.sleep(0.25)
+            if scrolled:
+                try:
+                    driver.execute_script(
+                        "window.scrollBy({top: arguments[0], left: 0, behavior: 'smooth'});",
+                        -random.randint(40, 180),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[farm] %s home warm soft-fail: %s", name, exc)
+        finally:
+            if acquired:
+                self._release_pdp_slot()
+
+    def _open_stagger_delay(self, index: int) -> float:
+        """Seconds to wait before Chrome launch / PDP for this instance (jittered)."""
+        base = max(0.0, float(self.config.open_stagger_seconds))
+        if base <= 0:
+            return 0.0
+        # Spread launches: index * base + random jitter so retries don't re-lockstep.
+        return base * max(0, index) + random.uniform(0.0, max(0.2, base * 0.6))
+
+    def _open_one(
+        self,
+        name: str,
+        proxy: str,
+        product_url: str,
+        *,
+        index: int = 0,
+    ) -> FarmBrowser:
+        wb = FarmBrowser(name=name, proxy=proxy)
+        driver = None
+        try:
+            print(f"[farm] start {name} proxy={redact_proxy(proxy) or '-'}")
+            # Stagger Chrome launch itself (not only PDP nav) — all 20 Chromes
+            # starting at T0 was a major PAGE NOT AVAILABLE driver.
+            launch_wait = self._open_stagger_delay(index)
+            if launch_wait > 0:
+                print(f"[farm] {name} wait {launch_wait:.1f}s before Chrome launch")
+                end = time.time() + launch_wait
+                while time.time() < end and not self._stop.is_set():
+                    time.sleep(max(0.0, min(0.25, end - time.time())))
+                if self._stop.is_set():
+                    return wb
+
+            # Headless hits PNA/WAF far more often — force headed for the farm.
+            prev_bg = bool(self.config.background_mode)
+            if prev_bg:
+                logger.warning(
+                    "[farm] %s BACKGROUND_MODE ignored for click farm (headed required)",
+                    name,
+                )
+                self.config.background_mode = False
+            try:
+                identity = build_browser_identity(
+                    index=index,
+                    name=name,
+                    config=self.config,
+                    enable_profile=True,
+                )
+                print(
+                    f"[farm] {name} identity size={identity.width}x{identity.height} "
+                    f"tz={identity.timezone_id} lang={identity.accept_language.split(',')[0]} "
+                    f"profile={'yes' if identity.profile_dir else 'no'}"
+                )
+                driver = _create_webdriver(
+                    self.config,
+                    proxy=proxy or "",
+                    identity=identity,
+                )
+            finally:
+                self.config.background_mode = prev_bg
+            try:
+                driver.execute_cdp_cmd(
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    {"source": _HOOK_JS},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+            # Small extra jitter before home/PDP so origin hits stay spread.
+            extra = random.uniform(0.15, 0.9)
+            time.sleep(extra)
+
+            home = f"{self.config.base_url}/{self.config.area_code}/"
+            self._inject_login_cookies(driver, name=name, index=index, home=home)
+            self._warm_home(driver, home=home, name=name)
+
+            ok = self._load_pdp_with_retries(driver, product_url, home=home, name=name)
+            self._ensure_hook(driver)
+            wb.driver = driver
+            wb.ready = ok
+            if not wb.ready:
+                wb.last_error = "PDP page not available after retries"
+                print(
+                    f"[farm] {name} PDP still unavailable after retries — "
+                    "keeping browser; will heal before clicks"
+                )
+                # Keep driver alive on home so worker can heal later.
+                try:
+                    driver.get(home)
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                print(f"[farm] ready {name}")
+        except Exception as exc:  # noqa: BLE001
+            wb.ready = False
+            wb.last_error = str(exc)
+            log_exception(logger, f"farm open failed {name}", exc)
+            print(f"[farm] failed {name}: {exc}")
+            if driver is not None:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+            wb.driver = None
+        return wb
+
+    def _load_pdp_with_retries(
+        self,
+        driver: Any,
+        product_url: str,
+        *,
+        home: str,
+        name: str,
+        require_atc: bool = False,
+    ) -> bool:
+        retries = max(1, int(self.config.open_pdp_retries))
+        base_wait = max(0.0, float(self.config.open_pdp_retry_wait))
+        for attempt in range(1, retries + 1):
+            if self._stop.is_set():
+                return False
+            if not self._acquire_pdp_slot(name):
+                return False
+            try:
+                # Cache-bust on retries after the first.
+                url = product_url if attempt == 1 else f"{product_url}?_={int(time.time() * 1000)}"
+                driver.get(url)
+                _wait_for_product_ready(driver, timeout=45)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[farm] %s PDP get attempt %s error: %s", name, attempt, exc)
+            finally:
+                self._release_pdp_slot()
+
+            bad = self._page_looks_bad(driver)
+            oos = self._shows_out_of_stock(driver) if require_atc else False
+            if not bad and not oos:
+                if require_atc and not self._has_atc_button(driver):
+                    # Page loaded but still no PLACE PRE-ORDER — treat as soft fail.
+                    oos = True
+                else:
+                    if attempt > 1:
+                        print(f"[farm] {name} PDP OK on attempt {attempt}/{retries}")
+                    return True
+
+            reason = self._page_bad_reason(driver) if bad else (
+                "OUT OF STOCK / no ATC button" if oos else "unknown"
+            )
+            print(f"[farm] {name} PDP bad attempt {attempt}/{retries}: {reason}")
+            logger.warning("[farm] %s PDP bad attempt=%s/%s reason=%s", name, attempt, retries, reason)
+            if attempt >= retries:
+                break
+            # Home bounce also gated so we don't stampede between retries.
+            if self._acquire_pdp_slot(name):
+                try:
+                    driver.get(home)
+                    time.sleep(random.uniform(0.6, 1.2))
+                except Exception:  # noqa: BLE001
+                    pass
+                finally:
+                    self._release_pdp_slot()
+            # Exponential-ish backoff + jitter so 20 instances don't retry in lockstep.
+            wait = (base_wait * attempt) + random.uniform(0.5, 2.0)
+            end = time.time() + wait
+            while time.time() < end and not self._stop.is_set():
+                time.sleep(max(0.0, min(0.2, end - time.time())))
+        return False
+
+    def _recover_pdp(self, wb: FarmBrowser, *, force_even_if_oos: bool = False) -> bool:
+        driver = wb.driver
+        if driver is None:
+            return False
+        product_url = self._product_url()
+        home = f"{self.config.base_url}/{self.config.area_code}/"
+        ok = self._load_pdp_with_retries(
+            driver,
+            product_url,
+            home=home,
+            name=wb.name,
+            require_atc=force_even_if_oos,
+        )
+        if ok:
+            self._ensure_hook(driver)
+            wb.ready = True
+            wb.last_error = ""
+        return ok
+
+    def _page_looks_bad(self, driver: Any) -> bool:
+        return bool(self._page_bad_reason(driver))
+
+    def _page_bad_reason(self, driver: Any) -> str:
+        """Return short reason if PDP/error page looks unhealthy; else ''."""
+        try:
+            title = (driver.title or "").strip()
+        except Exception:  # noqa: BLE001
+            return "title unreadable"
+        low_title = title.lower()
+        if "page not available" in low_title:
+            return f"title={title[:80]}"
+        if any(x in low_title for x in ("500", "502", "503", "error", "unavailable")):
+            return f"title={title[:80]}"
+        try:
+            source = (driver.page_source or "")[:12000].lower()
+        except Exception:  # noqa: BLE001
+            return "page_source unreadable"
+        markers = (
+            "page not available",
+            "http error 500",
+            "http error 502",
+            "http error 503",
+            "internal server error",
+            "bad gateway",
+            "service unavailable",
+            "something went wrong",
+        )
+        for m in markers:
+            if m in source:
+                return m
+        # Healthy PDP usually has cart CTA or qty control once SPA hydrates.
+        healthy = (
+            "place pre-order" in source
+            or "add to cart" in source
+            or "加入購物車" in source
+            or "c-input-quantity" in source
+            or "/item/" in (getattr(driver, "current_url", "") or "").lower()
+        )
+        # If still on item URL but no CTA yet, treat as soft-bad only when title empty
+        # or body tiny (blank SPA shell after 500).
+        if "/item/" in (getattr(driver, "current_url", "") or "").lower():
+            if healthy:
+                return ""
+            if len(source) < 800:
+                return "empty/short page body"
+            # SPA mid-load — not necessarily bad; allow click attempt.
+            return ""
+        if not healthy and "p-bandai.com" in source:
+            return "not on healthy PDP"
+        return ""
+
+    def _product_url(self) -> str:
+        return f"{self.config.base_url}/{self.config.area_code}/item/{self.product_code}"
+
+    def _ensure_hook(self, driver: Any) -> None:
+        try:
+            driver.execute_script(_HOOK_JS)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _read_last(self, driver: Any) -> Optional[Dict[str, Any]]:
+        try:
+            val = driver.execute_script("return window.__pbCartLast || null;")
+            return val if isinstance(val, dict) else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _load_proxies(self, n: int) -> List[str]:
+        proxies: List[str] = []
+        path = Path(self.config.proxy_csv)
+        if path.exists():
+            try:
+                from .csv_tasks import load_proxies_csv
+
+                proxies = load_proxies_csv(path)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[farm] proxy.csv load failed: %s", exc)
+        if not proxies and self.config.proxy_url:
+            proxies = [self.config.proxy_url]
+        if not proxies:
+            return [""] * n
+        # Round-robin fill to n
+        out: List[str] = []
+        for i in range(n):
+            out.append(proxies[i % len(proxies)])
+        return out

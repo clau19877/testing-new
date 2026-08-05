@@ -1,0 +1,6 @@
+requests==2.32.3
+python-dotenv==1.0.1
+schedule==1.2.1
+selenium==4.34.2
+webdriver-manager==4.0.2
+PySocks==1.7.1
