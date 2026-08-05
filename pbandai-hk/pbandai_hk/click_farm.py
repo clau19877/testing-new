@@ -2,8 +2,8 @@
 
 No login. Each instance parks on the PDP and clicks at second :00 of every minute
 (or CLICK_AT_SECOND). Instances keep running after cart success.
-On cart success, navigates to cart/checkout and posts the payment (or cart) URL
-to Discord webhook, then returns to the PDP for the next minute mark.
+On ATC success the cart is already held — export a tokenized Global-e checkout
+URL (no /cart or /checkout navigation) and post it to Discord.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from .browser_cart import _click_add_to_cart, _wait_for_product_ready
-from .checkout_link import PortableCheckout, extract_portable_checkout
+from .checkout_link import PortableCheckout, export_checkout_from_held_cart
 from .discord_util import (
     append_cart_success,
     looks_like_discord_webhook,
@@ -44,7 +44,7 @@ _HOOK_JS = """
     try {
       window.__pbCartLast = {
         status: Number(status) || 0,
-        body: String(body || '').slice(0, 800),
+        body: String(body || '').slice(0, 4000),
         t: Date.now(),
       };
     } catch (e) {}
@@ -704,7 +704,7 @@ class ClickFarm:
         *,
         before_ts: float,
     ) -> tuple[bool, str, str]:
-        """Poll hooked addToCart response, then confirm via cart page."""
+        """Poll hooked addToCart response, then export checkout link from held cart."""
         driver = wb.driver
         assert driver is not None
         deadline = time.time() + 8.0
@@ -716,7 +716,7 @@ class ClickFarm:
             if ts > before_ts and status:
                 body = str(last.get("body") or "")
                 if 200 <= status < 300:
-                    payment = self._extract_payment_link(wb)
+                    payment = self._export_checkout_link(wb, add_to_cart_body=body)
                     return True, f"addToCart status={status}", payment
                 if status == 409 or "preallocation" in body.lower() or "outofstock" in body.lower():
                     return False, f"stock hold status={status}", ""
@@ -724,72 +724,41 @@ class ClickFarm:
                 return False, f"addToCart status={status}: {body[:120]}", ""
             time.sleep(0.25)
 
-        # No network capture — check cart page for items as soft success.
-        payment = self._extract_payment_link(wb, require_items=True)
-        if payment:
-            return True, "cart page has items (no XHR capture)", payment
+        # No XHR capture — still try held-cart export from SESSION on PDP.
+        payment = self._export_checkout_link(wb, add_to_cart_body="")
+        if payment and wb.checkout and (wb.checkout.portable or wb.checkout.session_cookie):
+            return True, "held-cart export (no XHR capture)", payment
         return False, "no addToCart response", ""
 
-    def _extract_payment_link(self, wb: FarmBrowser, *, require_items: bool = False) -> str:
+    def _export_checkout_link(self, wb: FarmBrowser, *, add_to_cart_body: str = "") -> str:
+        """Export tokenized checkout URL from held cart. Stays on PDP (no checkout step)."""
         driver = wb.driver
         assert driver is not None
-        cart_url = f"{self.config.base_url}/{self.config.area_code}/cart"
-        checkout_url = f"{self.config.base_url}/{self.config.area_code}/checkout"
+        fallback = f"{self.config.base_url}/{self.config.area_code}/checkout"
         try:
-            try:
-                driver.set_script_timeout(20)
-            except Exception:  # noqa: BLE001
-                pass
-            driver.get(cart_url)
-            time.sleep(2.0)
-            source = (driver.page_source or "").lower()
-            if require_items:
-                # Empty cart heuristics
-                empty_markers = (
-                    "your cart is empty",
-                    "cart is empty",
-                    "購物車內沒有商品",
-                    "購物車是空",
-                    "no items",
-                )
-                has_empty = any(m in source for m in empty_markers)
-                # If clearly empty, fail
-                if has_empty:
-                    # Return to PDP for next clicks
-                    try:
-                        driver.get(self._product_url())
-                        _wait_for_product_ready(driver, timeout=15)
-                        self._ensure_hook(driver)
-                    except Exception:  # noqa: BLE001
-                        pass
-                    return ""
-
-            # Try checkout CTA (Global-e rewrites buttons / issues GE_CART_TOKEN).
-            clicked_checkout = self._click_checkout(driver)
-            if clicked_checkout:
-                time.sleep(2.0)
-            url = (driver.current_url or "").strip()
-            if url.rstrip("/").endswith("/cart") or "checkout" not in (url or "").lower():
-                try:
-                    driver.get(checkout_url)
-                    time.sleep(1.5)
-                except Exception:  # noqa: BLE001
-                    pass
-            # Second checkout click if still on cart/checkout landing (GE hydrate).
-            self._click_checkout(driver)
-            time.sleep(1.0)
-
-            portable = extract_portable_checkout(
+            # Small settle so SESSION / cart hold is committed after ATC.
+            time.sleep(0.8)
+            portable = export_checkout_from_held_cart(
                 driver,
                 base_url=self.config.base_url,
                 area_code=self.config.area_code,
-                wait_seconds=14.0,
+                add_to_cart_body=add_to_cart_body,
             )
             wb.checkout = portable
-            payment = portable.payment_url or (driver.current_url or "").strip() or cart_url
+            payment = portable.payment_url or fallback
+            # Guard against ever posting asset URLs again.
+            low = payment.lower()
+            if any(x in low for x in ("/includes/css/", "/includes/js/", ".css", ".js")):
+                logger.error("[farm] %s rejected bad export url=%s", wb.name, payment[:160])
+                payment = fallback
+                portable.payment_url = payment
+                portable.portable = False
+                portable.source = "rejected-asset-url"
+                wb.checkout = portable
             print(
-                f"[{wb.name}] checkout link portable={portable.portable} "
-                f"source={portable.source} ge_token={'yes' if portable.ge_cart_token else 'no'}"
+                f"[{wb.name}] held-cart export portable={portable.portable} "
+                f"source={portable.source} ge_token={'yes' if portable.ge_cart_token else 'no'} "
+                f"session={'yes' if portable.session_cookie else 'no'}"
             )
             logger.info(
                 "[farm] %s portable=%s source=%s payment=%s",
@@ -798,53 +767,10 @@ class ClickFarm:
                 portable.source,
                 payment[:200],
             )
-
-            # Park back on PDP for continued farm (unless stopping)
-            if not self.config.stop_on_first_cart:
-                try:
-                    driver.get(self._product_url())
-                    _wait_for_product_ready(driver, timeout=15)
-                    self._ensure_hook(driver)
-                except Exception:  # noqa: BLE001
-                    pass
-            return payment or cart_url
+            return payment
         except Exception as exc:  # noqa: BLE001
-            log_exception(logger, f"payment link extract failed {wb.name}", exc)
-            return cart_url
-
-    def _click_checkout(self, driver: Any) -> bool:
-        from selenium.webdriver.common.by import By
-
-        needles = [
-            "CHECKOUT",
-            "Checkout",
-            "PROCEED TO CHECKOUT",
-            "Proceed to checkout",
-            "PLACE ORDER",
-            "結帳",
-            "去結帳",
-            "前往結帳",
-            "付款",
-        ]
-        try:
-            buttons = driver.find_elements(By.TAG_NAME, "button")
-            buttons += driver.find_elements(By.TAG_NAME, "a")
-            for el in buttons:
-                try:
-                    if not el.is_displayed():
-                        continue
-                    label = (el.text or el.get_attribute("aria-label") or "").strip()
-                    if not label:
-                        continue
-                    if any(n.lower() in label.lower() for n in needles):
-                        driver.execute_script("arguments[0].click();", el)
-                        logger.info("clicked checkout control text=%r", label[:80])
-                        return True
-                except Exception:  # noqa: BLE001
-                    continue
-        except Exception:  # noqa: BLE001
-            pass
-        return False
+            log_exception(logger, f"held-cart export failed {wb.name}", exc)
+            return fallback
 
     def _resolve_webhook(self) -> tuple[str, str]:
         """Re-read webhook at runtime (env / .env value / discord_webhook.txt)."""
