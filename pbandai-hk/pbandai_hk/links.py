@@ -9,6 +9,7 @@ _ITEM_PATH_RE = re.compile(
     r"(?:/(?:[a-z]{2})/)?item/([A-Za-z][A-Za-z0-9]+)(?:[/?#]|$)",
     re.IGNORECASE,
 )
+_AREA_PATH_RE = re.compile(r"/([a-z]{2})/item/", re.IGNORECASE)
 _CODE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*\d[A-Za-z0-9]*$")
 
 
@@ -31,6 +32,26 @@ def extract_product_code(value: str) -> Optional[str]:
     if segment and _CODE_RE.fullmatch(segment):
         return segment
     return None
+
+
+def extract_area_code(value: str) -> Optional[str]:
+    """Extract the store area (e.g. `hk`) from a direct item URL."""
+    text = (value or "").strip()
+    if not text:
+        return None
+    parsed = urlparse(text)
+    path = parsed.path if (parsed.scheme or parsed.netloc) else text
+    match = _AREA_PATH_RE.search(path)
+    return match.group(1).lower() if match else None
+
+
+def extract_area_codes(values: Iterable[str]) -> List[str]:
+    areas: List[str] = []
+    for value in values:
+        area = extract_area_code(value)
+        if area and area not in areas:
+            areas.append(area)
+    return areas
 
 
 def extract_product_codes(values: Iterable[str]) -> List[str]:

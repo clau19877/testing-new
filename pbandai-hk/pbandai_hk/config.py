@@ -5,7 +5,7 @@ from typing import List
 from dotenv import load_dotenv
 
 from .discord_util import normalize_webhook, resolve_discord_webhook
-from .links import extract_product_codes
+from .links import extract_area_codes, extract_product_codes
 
 
 def _split_csv(value: str | None) -> List[str]:
@@ -124,6 +124,16 @@ class Config:
         product_links = _split_csv(os.getenv("PRODUCT_LINKS"))
         explicit_codes = _split_csv(os.getenv("PRODUCT_CODES"))
         product_codes = extract_product_codes([*product_links, *explicit_codes])
+        # The area in the product URL is authoritative: a mismatched AREA_CODE
+        # makes every API lookup 404 (wrong store), so follow the link instead.
+        area_code = (os.getenv("AREA_CODE") or "hk").lower()
+        link_areas = extract_area_codes(product_links)
+        if link_areas and area_code not in link_areas:
+            print(
+                f"[config] AREA_CODE={area_code} does not match PRODUCT_LINKS "
+                f"({'/'.join(link_areas)}) — using {link_areas[0]}"
+            )
+            area_code = link_areas[0]
         # Prefer .env value; fall back to discord_webhook.txt / aliases.
         env_hook = normalize_webhook(
             os.getenv("DISCORD_WEBHOOK_URL")
@@ -139,7 +149,7 @@ class Config:
         else:
             os.environ.pop("DISCORD_WEBHOOK_SOURCE", None)
         return cls(
-            area_code=(os.getenv("AREA_CODE") or "hk").lower(),
+            area_code=area_code,
             base_url=(os.getenv("BASE_URL") or "https://p-bandai.com").rstrip("/"),
             accept_language=os.getenv("ACCEPT_LANGUAGE") or "en",
             search_keywords=_split_csv(os.getenv("SEARCH_KEYWORDS")),

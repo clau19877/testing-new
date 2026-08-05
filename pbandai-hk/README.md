@@ -68,21 +68,26 @@ python web_shopping_bot_hk.py loop
 python web_shopping_bot_hk.py once
 
 # check one product URL/code
-python web_shopping_bot_hk.py check "https://p-bandai.com/us/item/N2890904001"
+python web_shopping_bot_hk.py check "https://p-bandai.com/hk/item/A2866726001"
 ```
 
 ### Click farm `.env` (recommended)
 
 ```env
+AREA_CODE=hk
 ENABLE_ADD_TO_CART=1
 CLICK_FARM=1
 BROWSER_INSTANCES=20
 CLICK_AT_SECOND=0
 STOP_ON_FIRST_CART=0
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
-PRODUCT_LINKS=https://p-bandai.com/us/item/N2890904001
+PRODUCT_LINKS=https://p-bandai.com/hk/item/A2866726001
 BACKGROUND_MODE=0
 ```
+
+`AREA_CODE` must match the product's region (`hk` for `p-bandai.com/hk/...`).
+A mismatch makes the sale-timing lookup 404 and the bot falls back to blind
+clicking — it warns at startup when that happens.
 
 Each instance clicks PLACE PRE-ORDER at **:00 of every minute**.
 
