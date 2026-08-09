@@ -48,6 +48,20 @@ Prefer Option A/B. The launcher prints `script folder:` and `using CSV:` so you 
 1. Safari → Settings → Advanced → Show Develop menu  
 2. Develop → Allow JavaScript from Apple Events  
 
+## Cloudflare / warm-up (BUILD 2026-08-09m+)
+
+If Safari shows **Just a moment…** / Cloudflare:
+
+1. Stop the batch. In Safari, open `https://www.apple.com` then `https://account.riotgames.com` and wait until pages load normally (solve any CF prompt once as yourself).
+2. Re-run with a longer gap between accounts:
+   ```bash
+   SAFARI_BATCH_DELAY=40 ./run_safari_mac.sh
+   ```
+3. Prefer `./run_safari_mac.sh` / `RUN_ME.command` over hammering Script Editor.
+4. The script now warms Safari on apple.com, uses jittered delays, waits for the real Riot **hostname** (not the docs.qq `?url=` embed), and backs off when CF is detected.
+
+Do **not** set `SAFARI_BATCH_DELAY` below ~15 when CF has already fired on your IP.
+
 ## CSV format
 
 ```csv

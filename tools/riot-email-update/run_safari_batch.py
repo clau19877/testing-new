@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import random
 import subprocess
 import sys
 import time
@@ -246,6 +247,8 @@ def run_one(
         "Confirm modal",
         "Timed out",
         "Allow JavaScript",
+        "Cloudflare",
+        "cloudflare",
     ):
         if marker.lower() in out.lower():
             reason = marker.replace(" ", "_")[:80]
@@ -277,8 +280,8 @@ def main() -> int:
     ap.add_argument(
         "--delay",
         type=float,
-        default=float(os.getenv("SAFARI_BATCH_DELAY") or "3"),
-        help="Seconds between accounts",
+        default=float(os.getenv("SAFARI_BATCH_DELAY") or "25"),
+        help="Base seconds between accounts (jitter added; default 25 to reduce Cloudflare)",
     )
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -349,7 +352,10 @@ def main() -> int:
             if log_path:
                 print(f"  investigation log → {log_path}", flush=True)
         if i < len(tasks) and args.delay > 0:
-            time.sleep(args.delay)
+            # Jitter between accounts — steady 3s cadence is a CF trigger.
+            pause = max(5.0, float(args.delay) + random.uniform(3.0, 12.0))
+            print(f"Cool-down {pause:.0f}s before next account…", flush=True)
+            time.sleep(pause)
 
     print(f"\nBatch done: {ok_n} success, {fail_n} failed (of {len(tasks)})")
     print(f"Investigation logs: {ROOT / 'debug' / 'logs'}")

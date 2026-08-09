@@ -1,4 +1,4 @@
-BUILD 2026-08-09l
-Logout: click log-out-everywhere-button, then Confirm (modal_close-btn).
-Includes iCloud IMAP verify-link fix from 09k.
+BUILD 2026-08-09m
+Cloudflare avoid: Safari warm-up, hostname-safe waits, jitter, CF probe/backoff.
+Default SAFARI_BATCH_DELAY=25 (+jitter). Logout Confirm + iCloud IMAP fixes kept.
 Zip does not include data/tasks.csv.

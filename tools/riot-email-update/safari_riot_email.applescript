@@ -89,38 +89,70 @@ on run argv
 
 	logLine("Account: " & riotUser & " -> " & newEmail)
 	try
+		-- Warm Safari with a normal page before hitting Riot via docs.qq (helps avoid Cloudflare).
+		logStep("warmup")
+		warmupSafari()
+
 		logStep("open_entry")
 		logLine("Opening Safari → docs.qq.com entry…")
-
 		tell application "Safari"
 			activate
-			try
-				close every window
-			end try
-			make new document with properties {URL:entryURL}
+			set URL of document 1 to entryURL
 		end tell
-		delay 2.5
+		humanDelay(2.5, 4.5)
+		assertNoCloudflare("after_entry")
+		waitForContinueReady(20)
 
-		-- Click Continue on the Tencent Docs interstitial
+		-- Click Continue on the Tencent Docs interstitial (prefer real click; hard-jump is last resort).
 		logStep("click_continue")
 		logLine("Clicking Continue on interstitial…")
-		safariJS(jsClickContinue())
-		delay 3.5
-		waitForRiotLogin(45)
+		set continueResult to ""
+		set continueAttempt to 0
+		repeat while continueAttempt < 3
+			set continueAttempt to continueAttempt + 1
+			set continueResult to safariJS(jsClickContinue(false))
+			logLine("Continue attempt " & continueAttempt & ": " & continueResult)
+			if continueResult starts with "clicked:" or continueResult starts with "goto:" then exit repeat
+			humanDelay(1.0, 2.0)
+		end repeat
+		if continueResult does not start with "clicked:" and continueResult does not start with "goto:" then
+			logLine("Continue click missed — hard-jump fallback once…")
+			set continueResult to safariJS(jsClickContinue(true))
+			logLine("Continue fallback: " & continueResult)
+		end if
+		humanDelay(2.5, 4.5)
+		assertNoCloudflare("after_continue")
+		waitForRiotLogin(60)
 
 		logStep("fill_login")
+		logLine("Waiting for Riot login form…")
+		set formReady to waitForLoginForm(45)
+		logLine("Login form ready: " & formReady)
+		if formReady is not "ready" then error "Riot login form not ready after docs.qq Continue (phase/form timeout)."
+		assertNoCloudflare("before_fill_login")
+		humanDelay(0.8, 1.8)
 		logLine("Filling Riot login form…")
 		set fillResult to safariJS(jsFillLogin(riotUser, riotPass))
 		logLine("Fill result: " & fillResult)
-		delay 0.6
+		humanDelay(0.7, 1.6)
 
 		logStep("click_sign_in")
 		logLine("Clicking Sign in…")
 		safariJS(jsClickSignIn())
 
-		-- Wait for MFA, captcha, account, or error
-		set phase to waitForPostLogin(90)
+		-- Wait for MFA, captcha, Cloudflare, account, or error
+		set phase to waitForPostLogin(120)
 		logLine("Post-login phase: " & phase)
+
+		if phase is "cloudflare" then
+			logLine("Cloudflare challenge detected — waiting up to 90s for Safari to pass…")
+			set phase to waitForCloudflareClear(90)
+			logLine("After Cloudflare wait phase: " & phase)
+			if phase is "cloudflare" then
+				dumpDebug("cloudflare")
+				error "Cloudflare challenge blocked login. Warm Safari manually (browse apple.com / riotgames.com), wait, then re-run. Increase SAFARI_BATCH_DELAY."
+			end if
+		end if
 
 		if phase is "captcha" then
 			if batchMode then error "hCaptcha appeared (batch mode will not wait for manual solve)"
@@ -345,7 +377,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-09l")
+	logLine("BUILD 2026-08-09m")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -467,7 +499,37 @@ end safariJS
 -- JS builders: keep double-quotes out of AppleScript string literals.
 -- Use only single quotes in the JS source text below.
 
-on jsClickContinue()
+on jsClickContinue(allowHardJump)
+	-- Prefer a real Continue / Riot link click. Hard location.href jump is last resort
+	-- (drops referrer and looks more bot-like to Cloudflare / Riot).
+	set bs to backslashChar()
+	set jumpFlag to "false"
+	if allowHardJump then set jumpFlag to "true"
+	return "(function (allowJump) {" & ¬
+		"  try { window.scrollBy(0, 120 + Math.floor(Math.random() * 180)); } catch (e0) {}" & ¬
+		"  const candidates = Array.from(document.querySelectorAll('a,button'));" & ¬
+		"  for (const el of candidates) {" & ¬
+		"    const t = (el.textContent || '').trim();" & ¬
+		"    const href = (el.getAttribute('href') || '');" & ¬
+		"    if (/account" & bs & ".riotgames" & bs & ".com|authenticate" & bs & ".riotgames" & bs & ".com/i.test(href)" & ¬
+		"        || /^Continue/i.test(t) || t.indexOf('Continue') === 0) {" & ¬
+		"      try { el.scrollIntoView({ block: 'center' }); } catch (e1) {}" & ¬
+		"      el.click();" & ¬
+		"      return 'clicked:' + (t || href).slice(0, 80);" & ¬
+		"    }" & ¬
+		"  }" & ¬
+		"  if (allowJump) {" & ¬
+		"    try {" & ¬
+		"      const u = new URL(location.href);" & ¬
+		"      const target = u.searchParams.get('url');" & ¬
+		"      if (target) { location.href = target; return 'goto:' + target; }" & ¬
+		"    } catch (e2) {}" & ¬
+		"  }" & ¬
+		"  return 'no-continue';" & ¬
+		"})(" & jumpFlag & ");"
+end jsClickContinue
+
+on jsProbeContinueReady()
 	set bs to backslashChar()
 	return "(function () {" & ¬
 		"  const candidates = Array.from(document.querySelectorAll('a,button'));" & ¬
@@ -475,19 +537,58 @@ on jsClickContinue()
 		"    const t = (el.textContent || '').trim();" & ¬
 		"    const href = (el.getAttribute('href') || '');" & ¬
 		"    if (/account" & bs & ".riotgames" & bs & ".com|authenticate" & bs & ".riotgames" & bs & ".com/i.test(href)" & ¬
-		"        || /^Continue/i.test(t) || t.indexOf('Continue') === 0) {" & ¬
-		"      el.click();" & ¬
-		"      return 'clicked:' + (t || href).slice(0, 80);" & ¬
-		"    }" & ¬
+		"        || /^Continue/i.test(t) || t.indexOf('Continue') === 0) return 'ready';" & ¬
 		"  }" & ¬
 		"  try {" & ¬
 		"    const u = new URL(location.href);" & ¬
-		"    const target = u.searchParams.get('url');" & ¬
-		"    if (target) { location.href = target; return 'goto:' + target; }" & ¬
+		"    if (u.searchParams.get('url')) return 'ready';" & ¬
 		"  } catch (e) {}" & ¬
-		"  return 'no-continue';" & ¬
+		"  return 'missing';" & ¬
 		"})();"
-end jsClickContinue
+end jsProbeContinueReady
+
+on jsProbeLoginForm()
+	return "(function () {" & ¬
+		"  var host = (location.hostname || '').toLowerCase();" & ¬
+		"  if (host.indexOf('riotgames.com') < 0 && host.indexOf('riot.com') < 0) return 'wrong-host';" & ¬
+		"  var userEl = document.querySelector('input[name=username], input[autocomplete=username], input[type=text]');" & ¬
+		"  var passEl = document.querySelector('input[name=password], input[type=password]');" & ¬
+		"  if (userEl && passEl) return 'ready';" & ¬
+		"  return 'missing';" & ¬
+		"})();"
+end jsProbeLoginForm
+
+on jsProbeHostname()
+	return "(function () {" & ¬
+		"  return (location.hostname || '').toLowerCase();" & ¬
+		"})();"
+end jsProbeHostname
+
+on jsProbeChallenge()
+	-- Cloudflare / managed bot interstitial signals.
+	return "(function () {" & ¬
+		"  var title = (document.title || '').toLowerCase();" & ¬
+		"  var body = ((document.body && document.body.innerText) || '').toLowerCase();" & ¬
+		"  var blob = title + ' ' + body;" & ¬
+		"  if (document.querySelector('#challenge-form, .cf-browser-verification, .cf-challenge, iframe[src*=challenges.cloudflare.com], iframe[src*=turnstile], #cf-challenge-running, .challenge-platform'))" & ¬
+		"    return 'cloudflare';" & ¬
+		"  if (blob.indexOf('just a moment') >= 0) return 'cloudflare';" & ¬
+		"  if (blob.indexOf('checking your browser') >= 0) return 'cloudflare';" & ¬
+		"  if (blob.indexOf('attention required') >= 0) return 'cloudflare';" & ¬
+		"  if (blob.indexOf('cf-browser-verification') >= 0) return 'cloudflare';" & ¬
+		"  if (blob.indexOf('enable javascript and cookies') >= 0 && blob.indexOf('cloudflare') >= 0) return 'cloudflare';" & ¬
+		"  return 'ok';" & ¬
+		"})();"
+end jsProbeChallenge
+
+on jsWarmScroll()
+	return "(function () {" & ¬
+		"  try {" & ¬
+		"    window.scrollBy(0, 80 + Math.floor(Math.random() * 220));" & ¬
+		"    return 'scrolled';" & ¬
+		"  } catch (e) { return 'no-scroll'; }" & ¬
+		"})();"
+end jsWarmScroll
 
 on jsFillLogin(userName, passText)
 	return "(function (user, pass) {" & ¬
@@ -538,6 +639,12 @@ on jsProbePhase()
 		"    return false;" & ¬
 		"  }" & ¬
 		"  	if (badCredsVisible()) return 'bad_creds';" & ¬
+		"  var title = (document.title || '').toLowerCase();" & ¬
+		"  var blob = title + ' ' + body;" & ¬
+		"  if (document.querySelector('#challenge-form, .cf-browser-verification, .cf-challenge, iframe[src*=challenges.cloudflare.com], iframe[src*=turnstile], #cf-challenge-running')" & ¬
+		"      || blob.indexOf('just a moment') >= 0 || blob.indexOf('checking your browser') >= 0" & ¬
+		"      || (blob.indexOf('attention required') >= 0 && blob.indexOf('cloudflare') >= 0))" & ¬
+		"    return 'cloudflare';" & ¬
 		"  if (document.querySelector('input[data-testid=personal-information-card__emailAddress]'))" & ¬
 		"    return 'account';" & ¬
 		"  var frames = Array.from(document.querySelectorAll('iframe[src*=hcaptcha.com]'));" & ¬
@@ -865,23 +972,142 @@ on waitForEmailField(timeoutSec)
 	return "timeout"
 end waitForEmailField
 
-on waitForRiotLogin(timeoutSec)
+on humanDelay(minSec, maxSec)
+	-- Jittered pause so pacing is less robotic.
+	set lo to minSec as real
+	set hi to maxSec as real
+	if hi < lo then set hi to lo
+	set span to hi - lo
+	set pick to lo + (span * (random number from 0 to 1000) / 1000.0)
+	delay pick
+end humanDelay
+
+on warmupSafari()
+	-- Prime a normal Safari document before docs.qq / Riot (reduces cold-start CF hits).
+	logLine("Warming up Safari with a normal page…")
+	tell application "Safari"
+		activate
+		try
+			if (count of documents) is 0 then
+				make new document with properties {URL:"https://www.apple.com/"}
+			else
+				set URL of document 1 to "https://www.apple.com/"
+			end if
+		on error
+			make new document with properties {URL:"https://www.apple.com/"}
+		end try
+	end tell
+	humanDelay(3.0, 6.0)
+	try
+		logLine(safariJS(jsWarmScroll()))
+	end try
+	humanDelay(1.2, 2.8)
+	assertNoCloudflare("warmup")
+	logLine("Warm-up complete")
+end warmupSafari
+
+on assertNoCloudflare(whereLabel)
+	set challengeState to "ok"
+	try
+		set challengeState to safariJS(jsProbeChallenge())
+	end try
+	if challengeState is "cloudflare" then
+		logLine("Cloudflare signal at " & whereLabel & " — waiting briefly…")
+		set cleared to waitForCloudflareClear(45)
+		if cleared is "cloudflare" then
+			dumpDebug("cloudflare_" & whereLabel)
+			error "Cloudflare challenge at " & whereLabel & ". Browse manually in Safari until the page loads, then re-run. Use longer SAFARI_BATCH_DELAY."
+		end if
+	end if
+end assertNoCloudflare
+
+on waitForContinueReady(timeoutSec)
 	set deadline to (current date) + timeoutSec
 	repeat while (current date) < deadline
-		tell application "Safari" to set cur to URL of document 1
-		if cur contains "riotgames.com" then
-			delay 1
-			return
-		end if
+		set continueState to "missing"
+		try
+			set continueState to safariJS(jsProbeContinueReady()) as text
+		end try
+		if continueState is "ready" then return "ready"
+		try
+			if safariJS(jsProbeChallenge()) is "cloudflare" then
+				if waitForCloudflareClear(20) is "cloudflare" then error "Cloudflare on docs.qq interstitial before Continue."
+			end if
+		end try
 		delay 0.5
 	end repeat
-	error "Timed out waiting for Riot login after docs.qq.com Continue. URL still not riotgames.com."
+	return "timeout"
+end waitForContinueReady
+
+on waitForLoginForm(timeoutSec)
+	set deadline to (current date) + timeoutSec
+	repeat while (current date) < deadline
+		set formState to "missing"
+		try
+			set formState to safariJS(jsProbeLoginForm()) as text
+		end try
+		if formState is "ready" then return "ready"
+		try
+			if safariJS(jsProbeChallenge()) is "cloudflare" then
+				if waitForCloudflareClear(30) is "cloudflare" then return "cloudflare"
+			end if
+		end try
+		delay 0.6
+	end repeat
+	return "timeout"
+end waitForLoginForm
+
+on waitForRiotLogin(timeoutSec)
+	-- IMPORTANT: match location.hostname only. The docs.qq entry URL embeds
+	-- account.riotgames.com in ?url= and must NOT count as landed.
+	set deadline to (current date) + timeoutSec
+	repeat while (current date) < deadline
+		set hostName to ""
+		try
+			set hostName to safariJS(jsProbeHostname()) as text
+		end try
+		if hostName ends with "riotgames.com" or hostName ends with "riot.com" then
+			humanDelay(0.8, 1.6)
+			return
+		end if
+		try
+			if safariJS(jsProbeChallenge()) is "cloudflare" then
+				logLine("Cloudflare while waiting for Riot host…")
+				if waitForCloudflareClear(30) is "cloudflare" then
+					error "Cloudflare challenge while opening Riot login from docs.qq."
+				end if
+			end if
+		end try
+		delay 0.6
+	end repeat
+	error "Timed out waiting for Riot login host after docs.qq Continue (still not on *.riotgames.com)."
 end waitForRiotLogin
+
+on waitForCloudflareClear(timeoutSec)
+	set deadline to (current date) + timeoutSec
+	repeat while (current date) < deadline
+		set challengeState to "ok"
+		try
+			set challengeState to safariJS(jsProbeChallenge()) as text
+		end try
+		if challengeState is not "cloudflare" then
+			-- Also accept a non-challenge phase from the main probe.
+			set loginPhase to "unknown"
+			try
+				set loginPhase to safariJS(jsProbePhase()) as text
+			end try
+			if loginPhase is not "cloudflare" then return loginPhase
+		end if
+		delay 1.2
+	end repeat
+	return "cloudflare"
+end waitForCloudflareClear
 
 on waitForPostLogin(timeoutSec)
 	set deadline to (current date) + timeoutSec
 	set loginPhase to "unknown"
 	set badCredHits to 0
+	set cfHits to 0
 	repeat while (current date) < deadline
 		try
 			set loginPhase to safariJS(jsProbePhase()) as text
@@ -894,6 +1120,12 @@ on waitForPostLogin(timeoutSec)
 			if badCredHits >= 3 then return "bad_creds"
 		else
 			set badCredHits to 0
+		end if
+		if loginPhase is "cloudflare" then
+			set cfHits to cfHits + 1
+			if cfHits >= 2 then return "cloudflare"
+		else
+			set cfHits to 0
 		end if
 		if loginPhase is "captcha" then return "captcha"
 		if loginPhase is "mfa" then return "mfa"
@@ -1039,9 +1271,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-09l" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-09m" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-09l" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-09m" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -1062,7 +1294,7 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-09l" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-09m" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
 
 	set py to "/usr/bin/python3"
 	try
