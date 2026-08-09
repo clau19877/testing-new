@@ -125,6 +125,9 @@ replace your existing `data/tasks.csv`.
 ## Stop the batch immediately
 
 - Terminal: press **Ctrl+C**
-- Or double-click **STOP_BATCH.command** (kills the current Safari task and skips remaining accounts)
+- Or double-click **STOP_BATCH.command**
 
-The batch no longer continues through the rest of `tasks.csv` after stop.
+**BUILD 2026-08-09s+** hard-kills the whole tree: `run_safari_batch.py`,
+`osascript` / `safari_riot_email.applescript`, and IMAP helpers
+(`fetch_riot_verify_link.py`). Remaining CSV rows do not start. If anything
+still looks stuck, run STOP again or quit the Terminal / Script Editor window.
