@@ -264,10 +264,10 @@ on run argv
 			set pwSaveResult to safariJS(jsClickPasswordSave())
 			logLine(pwSaveResult)
 			if pwSaveResult does not contain "clicked-password-save" then error "Could not click password-card__submit-btn (" & pwSaveResult & ")."
-			humanDelay(1.5, 2.5)
+			humanDelay(2.0, 3.5)
 
 			-- Password change may ask for MFA; reuse IMAP when needed.
-			set pwPhase to waitForPostLogin(25)
+			set pwPhase to waitForPostLogin(20)
 			logLine("Post-password-change phase: " & pwPhase)
 			if pwPhase is "mfa" then
 				set pwMfa to fetchImapCode("IMAP")
@@ -281,12 +281,12 @@ on run argv
 					humanDelay(2.0, 3.0)
 				end if
 			end if
-			-- Keep using the new password for the rest of this session / logging.
+			-- Riot typically invalidates the session after a password change.
+			-- Switch to the new password and re-login if Safari lands on authenticate.*.
 			set riotPass to newPass
-			logLine("Password change submitted; continuing to email update…")
-			-- Refresh account page so email card is ready.
-			tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
-			humanDelay(0.8, 1.5)
+			logLine("Password change submitted; restoring account session with new password if needed…")
+			ensureAccountSession(riotUser, riotPass, batchMode)
+			logLine("Account session ready after password change — continuing to email update…")
 		else
 			logLine("Skipping password change.")
 		end if
@@ -300,6 +300,8 @@ on run argv
 		end if
 
 		logStep("wait_email_field")
+		-- Re-check session before email edit (password change / redirect can drop it).
+		ensureAccountSession(riotUser, riotPass, batchMode)
 		logLine("Waiting for personal-information-card__emailAddress…")
 		set emailReady to waitForEmailField(20)
 		logLine("Email field ready: " & emailReady)
@@ -387,8 +389,8 @@ on run argv
 		-- Log out everywhere, then move on to the next account.
 		logStep("logout_everywhere")
 		logLine("Returning to account page to log out everywhere…")
-		tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
-		delay 3
+		-- Session may have expired during the IMAP wait — re-login with current password if needed.
+		ensureAccountSession(riotUser, riotPass, batchMode)
 		set logoutReady to waitForLogoutButton(20)
 		logLine("Logout button ready: " & logoutReady)
 		if logoutReady is not "ready" then error "Could not find log-out-everywhere-button after verification."
@@ -465,7 +467,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-09p")
+	logLine("BUILD 2026-08-09q")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -636,11 +638,21 @@ on jsProbeContinueReady()
 end jsProbeContinueReady
 
 on jsProbeLoginForm()
+	-- Must NOT treat account password-card / email fields as the Riot sign-in form.
 	return "(function () {" & ¬
 		"  var host = (location.hostname || '').toLowerCase();" & ¬
 		"  if (host.indexOf('riotgames.com') < 0 && host.indexOf('riot.com') < 0) return 'wrong-host';" & ¬
-		"  var userEl = document.querySelector('input[name=username], input[autocomplete=username], input[type=text]');" & ¬
-		"  var passEl = document.querySelector('input[name=password], input[type=password]');" & ¬
+		"  if (document.querySelector('input[data-testid=personal-information-card__emailAddress]')) return 'account-page';" & ¬
+		"  if (document.querySelector('input[data-testid=password-card__currentPassword]')) return 'account-page';" & ¬
+		"  var userEl = document.querySelector('input[name=username], input[autocomplete=username]');" & ¬
+		"  if (!userEl) return 'missing';" & ¬
+		"  var passEl = document.querySelector('input[name=password]');" & ¬
+		"  if (!passEl) {" & ¬
+		"    passEl = Array.from(document.querySelectorAll('input[type=password]')).find(function (el) {" & ¬
+		"      var id = (el.getAttribute('data-testid') || '');" & ¬
+		"      return id.indexOf('password-card') < 0;" & ¬
+		"    }) || null;" & ¬
+		"  }" & ¬
 		"  if (userEl && passEl) return 'ready';" & ¬
 		"  return 'missing';" & ¬
 		"})();"
@@ -679,6 +691,7 @@ on jsWarmScroll()
 end jsWarmScroll
 
 on jsFillLogin(userName, passText)
+	-- Only touch Riot sign-in fields — never password-card / personal-information inputs.
 	return "(function (user, pass) {" & ¬
 		"  function setNative(el, value) {" & ¬
 		"    if (!el) return false;" & ¬
@@ -690,8 +703,16 @@ on jsFillLogin(userName, passText)
 		"    el.dispatchEvent(new Event('change', { bubbles: true }));" & ¬
 		"    return true;" & ¬
 		"  }" & ¬
-		"  const userEl = document.querySelector('input[name=username], input[type=text], input[autocomplete=username]');" & ¬
-		"  const passEl = document.querySelector('input[name=password], input[type=password]');" & ¬
+		"  if (document.querySelector('input[data-testid=password-card__currentPassword], input[data-testid=personal-information-card__emailAddress]'))" & ¬
+		"    return JSON.stringify({ user: false, pass: false, skipped: 'account-page', href: location.href });" & ¬
+		"  const userEl = document.querySelector('input[name=username], input[autocomplete=username]');" & ¬
+		"  let passEl = document.querySelector('input[name=password]');" & ¬
+		"  if (!passEl) {" & ¬
+		"    passEl = Array.from(document.querySelectorAll('input[type=password]')).find(function (el) {" & ¬
+		"      var id = (el.getAttribute('data-testid') || '');" & ¬
+		"      return id.indexOf('password-card') < 0;" & ¬
+		"    }) || null;" & ¬
+		"  }" & ¬
 		"  const okUser = setNative(userEl, user);" & ¬
 		"  const okPass = setNative(passEl, pass);" & ¬
 		"  const cookie = document.querySelector('button.osano-cm-dialog__close, button[aria-label*=Close]');" & ¬
@@ -713,10 +734,16 @@ end jsClickSignIn
 on jsProbePhase()
 	set bs to backslashChar()
 	-- bad_creds: only exact Riot reject phrase / error UI (not generic 'try again' on login pages).
+	-- onLogin must ignore password-card fields on account.riotgames.com (those are type=password too).
 	return "(function () {" & ¬
 		"  const href = location.href || '';" & ¬
 		"  const body = (document.body && document.body.innerText || '').toLowerCase();" & ¬
-		"  const onLogin = !!document.querySelector('input[name=password], input[type=password]');" & ¬
+		"  const onAccountWidgets = !!(document.querySelector('input[data-testid=personal-information-card__emailAddress], input[data-testid=password-card__currentPassword], button[data-testid=log-out-everywhere-button]'));" & ¬
+		"  const hasLoginUser = !!document.querySelector('input[name=username], input[autocomplete=username]');" & ¬
+		"  const hasLoginPass = !!document.querySelector('input[name=password]') || Array.from(document.querySelectorAll('input[type=password]')).some(function (el) {" & ¬
+		"    return ((el.getAttribute('data-testid') || '').indexOf('password-card') < 0);" & ¬
+		"  });" & ¬
+		"  const onLogin = !onAccountWidgets && hasLoginUser && hasLoginPass;" & ¬
 		"  function badCredsVisible() {" & ¬
 		"    const nodes = Array.from(document.querySelectorAll('[role=alert], [data-testid*=error], [data-testid*=Error], .error-message, [class*=error-message], [class*=ErrorMessage]'));" & ¬
 		"    for (const el of nodes) {" & ¬
@@ -735,6 +762,7 @@ on jsProbePhase()
 		"    return 'cloudflare';" & ¬
 		"  if (document.querySelector('input[data-testid=personal-information-card__emailAddress]'))" & ¬
 		"    return 'account';" & ¬
+		"  if (onAccountWidgets) return 'account';" & ¬
 		"  var frames = Array.from(document.querySelectorAll('iframe[src*=hcaptcha.com]'));" & ¬
 		"  for (var fi = 0; fi < frames.length; fi++) {" & ¬
 		"    var fr = frames[fi];" & ¬
@@ -747,11 +775,12 @@ on jsProbePhase()
 		"    return 'mfa';" & ¬
 		"  var host = (location.hostname || '').toLowerCase();" & ¬
 		"  var onRiot = host.indexOf('riotgames.com') >= 0 || host.indexOf('riot.com') >= 0;" & ¬
-		"  if (onRiot && /account" & bs & ".riotgames" & bs & ".com/.test(host) && href.indexOf('log-in') < 0 && href.indexOf('login') < 0 && href.indexOf('oauth2') < 0 && !onLogin)" & ¬
+		"  if (onLogin) return 'login';" & ¬
+		"  if (onRiot && /account" & bs & ".riotgames" & bs & ".com/.test(host) && href.indexOf('log-in') < 0 && href.indexOf('login') < 0 && href.indexOf('oauth2') < 0)" & ¬
 		"    return 'account';" & ¬
-		"  if (onRiot && !onLogin && (host.indexOf('account.') === 0 || host.indexOf('authenticate.') === 0 || host.indexOf('auth.') === 0))" & ¬
+		"  if (onRiot && !onLogin && host.indexOf('account.') === 0)" & ¬
 		"    return 'logged_in';" & ¬
-		"  if (onLogin || document.querySelector('input[name=username]'))" & ¬
+		"  if (hasLoginUser || (onRiot && (host.indexOf('authenticate.') === 0 || host.indexOf('auth.') === 0) && hasLoginPass))" & ¬
 		"    return 'login';" & ¬
 		"  if (onRiot && !onLogin) return 'logged_in';" & ¬
 		"  return 'unknown';" & ¬
@@ -1289,6 +1318,7 @@ on waitForPostLogin(timeoutSec)
 	set loginPhase to "unknown"
 	set badCredHits to 0
 	set cfHits to 0
+	set loginHits to 0
 	repeat while (current date) < deadline
 		-- Fast success: email field means we can enter the new address immediately.
 		try
@@ -1316,10 +1346,123 @@ on waitForPostLogin(timeoutSec)
 		if loginPhase is "mfa" then return "mfa"
 		if loginPhase is "account" then return "account"
 		if loginPhase is "logged_in" then return "logged_in"
+		-- "login" only after it sticks — right after Sign in the form is still briefly visible.
+		if loginPhase is "login" then
+			set loginHits to loginHits + 1
+			if loginHits >= 8 then return "login"
+		else
+			set loginHits to 0
+		end if
 		delay 0.35
 	end repeat
 	return "timeout"
 end waitForPostLogin
+
+on ensureAccountSession(riotUser, riotPass, batchMode)
+	-- After a password change Riot often invalidates cookies and redirects to
+	-- authenticate.riotgames.com. Re-login with the (new) password until the
+	-- account email field is visible again.
+	set attempt to 0
+	repeat while attempt < 3
+		set attempt to attempt + 1
+		try
+			if safariJS(jsProbeEmailField()) is "ready" then
+				logLine("ensureAccountSession: already on account page")
+				return "ok"
+			end if
+		end try
+
+		set phaseNow to "unknown"
+		set formNow to "missing"
+		try
+			set phaseNow to safariJS(jsProbePhase()) as text
+		end try
+		try
+			set formNow to safariJS(jsProbeLoginForm()) as text
+		end try
+		logLine("ensureAccountSession attempt " & attempt & " phase=" & phaseNow & " form=" & formNow)
+
+		if phaseNow is "cloudflare" then
+			set phaseNow to waitForCloudflareClear(45)
+			logLine("ensureAccountSession after CF: " & phaseNow)
+		end if
+
+		if formNow is "ready" or phaseNow is "login" then
+			logLine("Session dropped — signing in again…")
+			set formReady to waitForLoginForm(30)
+			logLine("Re-login form: " & formReady)
+			if formReady is not "ready" then
+				tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
+				humanDelay(1.5, 2.5)
+				set formReady to waitForLoginForm(30)
+			end if
+			if formReady is not "ready" then error "Session dropped after password change but login form never appeared."
+
+			set fillResult to safariJS(jsFillLogin(riotUser, riotPass))
+			logLine("Re-login fill: " & fillResult)
+			if fillResult contains "account-page" then
+				-- Race: account widgets came back while we probed login.
+				humanDelay(0.8, 1.2)
+			else
+				humanDelay(0.5, 1.0)
+				safariJS(jsClickSignIn())
+				set phaseNow to waitForPostLogin(45)
+				logLine("Re-login post phase: " & phaseNow)
+				if phaseNow is "bad_creds" then error "Re-login failed after password change (bad password?). Check new_password in tasks.csv."
+				if phaseNow is "captcha" then
+					if batchMode then error "hCaptcha during re-login after password change"
+					display dialog "hCaptcha during re-login. Solve it in Safari, then click OK." buttons {"OK"} default button 1
+					set phaseNow to waitForPostLogin(60)
+				end if
+				if phaseNow is "mfa" then
+					set mfaCode to fetchImapCode("IMAP")
+					if mfaCode is "" then
+						if batchMode then error "MFA required during re-login after password change"
+						set mfaCode to text returned of (display dialog "Enter Riot MFA code (re-login):" default answer "")
+					end if
+					if mfaCode is not "" then
+						safariJS(jsSubmitCode(mfaCode, "mfa"))
+						humanDelay(2.0, 3.0)
+						set phaseNow to waitForPostLogin(45)
+						logLine("Re-login after MFA phase: " & phaseNow)
+					end if
+				end if
+			end if
+		else
+			logLine("Opening account.riotgames.com to restore session…")
+			tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
+			humanDelay(1.2, 2.2)
+			set phaseNow to waitForPostLogin(25)
+			logLine("ensureAccountSession navigate phase: " & phaseNow)
+			if phaseNow is "mfa" then
+				set mfaCode to fetchImapCode("IMAP")
+				if mfaCode is not "" then
+					safariJS(jsSubmitCode(mfaCode, "mfa"))
+					humanDelay(2.0, 3.0)
+				end if
+			end if
+		end if
+
+		try
+			if safariJS(jsProbeEmailField()) is "ready" then
+				logLine("ensureAccountSession: email field ready")
+				return "ok"
+			end if
+		end try
+		-- Brief settle; next loop will re-login if authenticate form is up.
+		humanDelay(1.0, 1.8)
+	end repeat
+
+	-- Final forced open + short wait for diagnostics.
+	try
+		tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
+	end try
+	humanDelay(1.5, 2.5)
+	try
+		if safariJS(jsProbeEmailField()) is "ready" then return "ok"
+	end try
+	error "Could not restore account session after password change (still not on account email form)."
+end ensureAccountSession
 
 on waitForEmailField(timeoutSec)
 	set deadline to (current date) + timeoutSec
@@ -1469,9 +1612,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-09p" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-09q" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-09p" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-09q" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -1492,7 +1635,7 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-09p" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-09q" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
 
 	set py to "/usr/bin/python3"
 	try

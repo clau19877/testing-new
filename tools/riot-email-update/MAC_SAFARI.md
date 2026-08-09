@@ -99,7 +99,7 @@ IMAP_HOST=imap.mail.me.com IMAP_USER='you@icloud.com' IMAP_PASSWORD='app-passwor
 ```
 
 If Script Editor reports an error about setting `line` / `st` / `key`, update to
-the latest zip (**BUILD 2026-08-09p** or newer) — those names are reserved in
+the latest zip (**BUILD 2026-08-09q** or newer) — those names are reserved in
 AppleScript.
 
 ## Account flow
@@ -109,12 +109,15 @@ For each CSV row, the runner:
 1. Logs in and waits for `https://account.riotgames.com/`
 2. Changes password: `password-card__currentPassword` / `newPassword` /
    `confirmNewPassword` → `password-card__submit-btn`
-3. Fills `personal-information-card__emailAddress`
-4. Clicks `personal-information-card__saveChanges-btn` (**SAVE AND VERIFY**)
-5. Waits via IMAP for a **Verify Your Email** message and opens its
+3. If Riot invalidates the session (redirect to `authenticate.riotgames.com`),
+   re-logs in with `new_password`, then continues
+4. Fills `personal-information-card__emailAddress`
+5. Clicks `personal-information-card__saveChanges-btn` (**SAVE AND VERIFY**)
+6. Waits via IMAP for a **Verify Your Email** message and opens its
    **Verify Email** link
-6. Returns to the account page, clicks `log-out-everywhere-button`, then Confirm (`modal_close-btn`)
-7. Records the result, then starts the next CSV row
+7. Returns to the account page (re-login again if the IMAP wait dropped the
+   session), clicks `log-out-everywhere-button`, then Confirm (`modal_close-btn`)
+8. Records the result, then starts the next CSV row
 
 The zip contains only `data/tasks.csv.example`; updating the scripts will not
 replace your existing `data/tasks.csv`.

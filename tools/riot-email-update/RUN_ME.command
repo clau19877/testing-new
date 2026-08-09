@@ -5,7 +5,7 @@
 cd "$(dirname "$0")" || exit 1
 chmod +x run_safari_mac.sh run_safari_batch.sh fetch_riot_imap_code.py RUN_ME.command 2>/dev/null || true
 
-echo "BUILD 2026-08-09p"
+echo "BUILD 2026-08-09q"
 echo "Working folder: $(pwd)"
 echo "Looking for data/tasks.csv ..."
 if [[ ! -f data/tasks.csv && ! -f tasks.csv ]]; then

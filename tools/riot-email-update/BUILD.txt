@@ -1,8 +1,7 @@
-BUILD 2026-08-09p
-Password change after login, before email:
-  password-card__currentPassword / newPassword / confirmNewPassword
-  → password-card__submit-btn
-CSV requires new_password (or SKIP_PASSWORD_CHANGE=1).
-success.txt stores the NEW password.
-Hard-stop: Ctrl+C or STOP_BATCH.command.
+BUILD 2026-08-09q
+Session restore after password change:
+  Riot often invalidates cookies → authenticate.riotgames.com
+  Script re-logins with new_password, then continues email update.
+Also: do not treat password-card fields as the login form.
+Password change before email (09p) kept.
 Zip does not include data/tasks.csv.
