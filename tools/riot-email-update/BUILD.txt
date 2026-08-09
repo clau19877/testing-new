@@ -1,4 +1,4 @@
-BUILD 2026-08-09n
-Faster post-login → email fill (no 120s wait; skip reload if field visible).
-Keeps Cloudflare warm-up from 09m.
+BUILD 2026-08-09o
+Hard-stop batch: Ctrl+C or STOP_BATCH.command (kills current task, skips rest).
+Faster post-login email fill (09n) + Cloudflare warm-up (09m) kept.
 Zip does not include data/tasks.csv.

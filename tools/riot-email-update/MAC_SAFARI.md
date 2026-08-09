@@ -115,3 +115,10 @@ For each CSV row, the runner:
 
 The zip contains only `data/tasks.csv.example`; updating the scripts will not
 replace your existing `data/tasks.csv`.
+
+## Stop the batch immediately
+
+- Terminal: press **Ctrl+C**
+- Or double-click **STOP_BATCH.command** (kills the current Safari task and skips remaining accounts)
+
+The batch no longer continues through the rest of `tasks.csv` after stop.

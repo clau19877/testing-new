@@ -2,5 +2,8 @@ debug/
 success.txt
 failed.txt
 .safari_current_task
+.safari_batch_stop
+.safari_batch.pid
+.safari_batch_console.log
 *.pyc
 __pycache__/
