@@ -1,17 +1,15 @@
-BUILD 2026-08-09h
+BUILD 2026-08-09i
 
 This zip DOES NOT contain data/tasks.csv. Keep your existing file.
 
-Exact flow per account:
-  login -> account.riotgames.com
-  -> fill personal-information-card__emailAddress
-  -> click personal-information-card__saveChanges-btn
-  -> IMAP: find subject "Verify Your Email" and open Verify Email link
-  -> click log-out-everywhere-button
-  -> next CSV account
+IMPORTANT:
+  Prefer ./run_safari_mac.sh or RUN_ME.command from this folder.
+  Do not double-click an older ~/Desktop/riotemail copy of the scripts.
 
-Investigation logs (share these when something fails):
-  debug/logs/safari_YYYYMMDD_HHMMSS_<username>.log
+If every account fails with bad_creds:
+  1) Confirm BUILD 2026-08-09i in the log
+  2) Verify riot_password in data/tasks.csv (wrong password = real reject)
+  3) Share debug/logs/safari_*.log
 
 Update and run:
   cd ~/Desktop/"riot-email-update-safari-mac 3"

@@ -39,9 +39,9 @@ chmod +x run_safari_mac.sh run_safari_batch.sh fetch_riot_imap_code.py RUN_ME.co
 ```
 
 **Option C — open the AppleScript:**  
-If you open `safari_riot_email.applescript` directly, it now looks for `data/tasks.csv` beside itself and offers to run the whole batch.
+If you open `safari_riot_email.applescript` directly, it looks for `tasks.csv` and runs the batch using **this** toolkit’s scripts (not an older `~/Desktop/riotemail` copy).
 
-The launcher prints `script folder:` and `using CSV:` so you can confirm the path.
+Prefer Option A/B. The launcher prints `script folder:` and `using CSV:` so you can confirm the path.
 
 ## One-time Safari setup
 

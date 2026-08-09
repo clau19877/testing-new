@@ -45,36 +45,27 @@ find_tasks_csv() {
     return 1
   fi
 
-  # Search common places relative to this script folder
+  # Prefer CSV beside THIS toolkit, then shared helper (skips older riotemail scripts).
+  if [[ -x "$ROOT/find_tasks_csv.sh" ]] || [[ -f "$ROOT/find_tasks_csv.sh" ]]; then
+    local found=""
+    found="$(/bin/bash "$ROOT/find_tasks_csv.sh" "$ROOT" 2>/dev/null || true)"
+    if [[ -n "$found" && -f "$found" ]] && csv_has_rows "$found"; then
+      echo "$found"
+      return 0
+    fi
+  fi
+
   for c in \
     "$ROOT/data/tasks.csv" \
     "$ROOT/tasks.csv" \
     "$ROOT/../data/tasks.csv" \
-    "$ROOT/../tasks.csv" \
-    "$HOME/Desktop/riotemail/data/tasks.csv" \
-    "$HOME/Desktop/riotemail/tasks.csv"
+    "$ROOT/../tasks.csv"
   do
     if [[ -f "$c" ]] && csv_has_rows "$c"; then
       echo "$c"
       return 0
     fi
   done
-
-  # Desktop unzip folders: "riot-email-update-safari-mac", "… 2", "… 3", etc.
-  # Prefer the last match alphabetically so " 3" wins over older copies.
-  local best=""
-  while IFS= read -r c; do
-    [[ -z "$c" ]] && continue
-    local root
-    root="$(dirname "$(dirname "$c")")"
-    [[ -f "$root/run_safari_batch.py" ]] || continue
-    csv_has_rows "$c" || continue
-    best="$c"
-  done < <(find "$HOME/Desktop" "$HOME/Downloads" -type f -name 'tasks.csv' 2>/dev/null | sort)
-  if [[ -n "$best" ]]; then
-    echo "$best"
-    return 0
-  fi
   return 1
 }
 

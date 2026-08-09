@@ -1,5 +1,5 @@
-BUILD 2026-08-09h
-Fix AppleScript reserved name "line" in logLine (launch error).
-Investigation logs: debug/logs/safari_*.log (steps + failure page probe).
-Exact Riot flow: emailAddress -> SAVE AND VERIFY -> IMAP Verify Email -> LOG OUT EVERYWHERE.
+BUILD 2026-08-09i
+Fix: do not run old ~/Desktop/riotemail scripts when CSV is found there.
+Tighten bad_creds probe (avoid false "try again" on login page).
+Investigation logs: debug/logs/safari_*.log
 Zip does not include data/tasks.csv.

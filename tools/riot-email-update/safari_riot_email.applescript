@@ -130,7 +130,8 @@ on run argv
 		end if
 
 		if phase is "bad_creds" then
-			error "Riot rejected username/password (Check your details and try again)."
+			dumpDebug("bad_creds")
+			error "Riot rejected username/password (Check your details and try again). Verify riot_password in tasks.csv."
 		end if
 
 		if phase is "mfa" then
@@ -319,7 +320,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-09h")
+	logLine("BUILD 2026-08-09i")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -480,21 +481,31 @@ end jsClickSignIn
 
 on jsProbePhase()
 	set bs to backslashChar()
+	-- bad_creds: only exact Riot reject phrase / error UI (not generic 'try again' on login pages).
 	return "(function () {" & ¬
 		"  const href = location.href || '';" & ¬
 		"  const body = (document.body && document.body.innerText || '').toLowerCase();" & ¬
-		"  if (/incorrect|check your details|try again/.test(body) && /password|username|sign in/.test(body))" & ¬
-		"    return 'bad_creds';" & ¬
+		"  const onLogin = !!document.querySelector('input[name=password], input[type=password]');" & ¬
+		"  function badCredsVisible() {" & ¬
+		"    const nodes = Array.from(document.querySelectorAll('[role=alert], [data-testid*=error], [data-testid*=Error], .error-message, [class*=error-message], [class*=ErrorMessage]'));" & ¬
+		"    for (const el of nodes) {" & ¬
+		"      const t = ((el.innerText || el.textContent || '') + '').toLowerCase();" & ¬
+		"      if (/check your details and try again|incorrect username|incorrect password|invalid (username|password|credentials)|wrong password/.test(t)) return true;" & ¬
+		"    }" & ¬
+		"    if (onLogin && /check your details and try again/.test(body)) return true;" & ¬
+		"    return false;" & ¬
+		"  }" & ¬
+		"  if (badCredsVisible()) return 'bad_creds';" & ¬
 		"  if (document.querySelector('iframe[src*=hcaptcha.com]'))" & ¬
 		"    return 'captcha';" & ¬
 		"  if (/code|verification|authenticate|two-factor|2fa|email you/.test(body)" & ¬
 		"      && document.querySelector('input[name=code], input[autocomplete=one-time-code], input[inputmode=numeric]'))" & ¬
 		"    return 'mfa';" & ¬
-		"  if (/account" & bs & ".riotgames" & bs & ".com/.test(href) && href.indexOf('log-in') < 0 && href.indexOf('login') < 0 && href.indexOf('oauth2') < 0)" & ¬
+		"  if (/account" & bs & ".riotgames" & bs & ".com/.test(href) && href.indexOf('log-in') < 0 && href.indexOf('login') < 0 && href.indexOf('oauth2') < 0 && !onLogin)" & ¬
 		"    return 'account';" & ¬
-		"  if (/account" & bs & ".riotgames" & bs & ".com/.test(href))" & ¬
+		"  if ((/account" & bs & ".riotgames" & bs & ".com/.test(href) || /authenticate" & bs & ".riotgames" & bs & ".com/.test(href)) && !onLogin)" & ¬
 		"    return 'logged_in';" & ¬
-		"  if (document.querySelector('input[name=username], input[type=password]'))" & ¬
+		"  if (onLogin || document.querySelector('input[name=username]'))" & ¬
 		"    return 'login';" & ¬
 		"  return 'unknown';" & ¬
 		"})();"
@@ -786,13 +797,20 @@ end waitForRiotLogin
 on waitForPostLogin(timeoutSec)
 	set deadline to (current date) + timeoutSec
 	set loginPhase to "unknown"
+	set badCredHits to 0
 	repeat while (current date) < deadline
 		try
 			set loginPhase to safariJS(jsProbePhase()) as text
 		on error
 			set loginPhase to "unknown"
 		end try
-		if loginPhase is "bad_creds" then return "bad_creds"
+		-- Require the reject message to stick (avoid one-frame false positives).
+		if loginPhase is "bad_creds" then
+			set badCredHits to badCredHits + 1
+			if badCredHits >= 3 then return "bad_creds"
+		else
+			set badCredHits to 0
+		end if
 		if loginPhase is "captcha" then return "captcha"
 		if loginPhase is "mfa" then return "mfa"
 		if loginPhase is "account" then return "account"
@@ -863,13 +881,20 @@ on taskFileValue(taskFilePath, keyName)
 	end try
 end taskFileValue
 
-on scriptDir()
+on resolveToolkitDir()
+	-- Locate the modern toolkit folder (has run_safari_batch.py).
+	-- Prefer TOOL_DIR / path-to-me, then Desktop *safari-mac* via find_tasks_csv.sh.
 	try
 		set envDir to ""
 		try
 			set envDir to system attribute "TOOL_DIR"
 		end try
-		if envDir is not "" then return envDir
+		if envDir is not "" then
+			try
+				do shell script "test -f " & quoted form of (envDir & "/run_safari_batch.py")
+				return envDir
+			end try
+		end if
 
 		-- path to me is Script Editor for .applescript text — only trust if batch runner is there.
 		set p to POSIX path of (path to me)
@@ -879,12 +904,22 @@ on scriptDir()
 			return d
 		end try
 
-		set found to findTasksCsvPath()
-		if found is not "" then return toolkitRootFromCsv(found)
-		return d
+		-- Bootstrap: ask any Desktop find_tasks_csv.sh for the modern toolkit root.
+		set bootstrap to do shell script "find " & quoted form of (POSIX path of (path to desktop folder)) & " " & quoted form of ((POSIX path of (path to home folder)) & "Downloads") & " -type f -name find_tasks_csv.sh 2>/dev/null | sort | tail -n1"
+		if bootstrap is "" then return d
+		try
+			do shell script "chmod +x " & quoted form of bootstrap
+		end try
+		set discovered to do shell script "/bin/bash " & quoted form of bootstrap & " --toolkit-root"
+		if discovered is not "" then return discovered
+		return do shell script "dirname " & quoted form of bootstrap
 	on error
 		return do shell script "pwd"
 	end try
+end resolveToolkitDir
+
+on scriptDir()
+	return resolveToolkitDir()
 end scriptDir
 
 on toolkitRootFromCsv(csvPath)
@@ -897,27 +932,19 @@ on toolkitRootFromCsv(csvPath)
 end toolkitRootFromCsv
 
 on findTasksCsvPath()
-	-- Desktop downloads often look like:
-	--   ~/Desktop/riot-email-update-safari-mac 3/data/tasks.csv
-	-- Prefer the last match alphabetically so " 3" wins over older copies.
-	-- Uses find_tasks_csv.sh (no backslash escapes inside AppleScript strings).
+	-- Prefer CSV beside the running toolkit, then Desktop *safari-mac* CSVs.
 	try
-		set dir to ""
-		try
-			set envDir to system attribute "TOOL_DIR"
-			if envDir is not "" then set dir to envDir
-		end try
-		if dir is "" then
-			set p to POSIX path of (path to me)
-			set dir to do shell script "dirname " & quoted form of p
-		end if
+		set dir to resolveToolkitDir()
 		set helper to dir & "/find_tasks_csv.sh"
 		try
-			do shell script "test -x " & quoted form of helper
+			do shell script "test -f " & quoted form of helper
 		on error
+			return ""
+		end try
+		try
 			do shell script "chmod +x " & quoted form of helper
 		end try
-		set found to do shell script "/bin/bash " & quoted form of helper
+		set found to do shell script "/bin/bash " & quoted form of helper & " " & quoted form of dir
 		return found
 	on error
 		return ""
@@ -927,10 +954,10 @@ end findTasksCsvPath
 on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
-		set rootDir to toolkitRootFromCsv(found)
-		return "BUILD 2026-08-09h" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder."
+		set rootDir to scriptDir()
+		return "BUILD 2026-08-09i" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-09h" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-09i" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -943,9 +970,15 @@ on runBatchFromCsv()
 	end try
 	if rowCount is 0 then return false
 
-	set dir to toolkitRootFromCsv(csvPath)
+	-- Always run the NEW toolkit scripts (scriptDir), even if CSV lives elsewhere.
+	set dir to scriptDir()
+	try
+		do shell script "test -f " & quoted form of (dir & "/run_safari_batch.py")
+	on error
+		set dir to toolkitRootFromCsv(csvPath)
+	end try
 
-	display dialog "BUILD 2026-08-09h" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-09i" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
 
 	set py to "/usr/bin/python3"
 	try
@@ -953,6 +986,7 @@ on runBatchFromCsv()
 	end try
 
 	logLine("Launching batch for " & rowCount & " account(s) from " & csvPath)
+	logLine("Using toolkit scripts: " & dir)
 	set batchCmd to "cd " & quoted form of dir & " && TOOL_DIR=" & quoted form of dir & " " & quoted form of py & " " & quoted form of (dir & "/run_safari_batch.py") & " " & quoted form of csvPath & " 2>&1"
 	try
 		set batchOut to do shell script batchCmd
