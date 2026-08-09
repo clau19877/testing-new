@@ -392,23 +392,30 @@ def run_one(
         return True, "ok", str(log_path)
 
     reason = "osascript_failed"
+    # Prefer specific terminal errors over earlier step names that also appear in logs
+    # (e.g. "password-card" / "SAVE AND VERIFY" show up even when IMAP verify fails).
     for marker in (
+        "No Verify Your Email link",
+        "Could not restore account session",
+        "Re-login failed after password change",
         "bad_creds",
         "rejected username/password",
         "hCaptcha",
         "MFA required",
-        "SAVE AND VERIFY",
-        "password-card",
-        "new_password",
-        "No Verify Your Email link",
+        "Could not find personal-information-card__emailAddress",
+        "Could not find password-card",
+        "password-card__submit-btn",
+        "Allow JavaScript",
+        "Cloudflare",
+        "cloudflare",
         "log-out-everywhere-button",
         "LOG OUT EVERYWHERE",
         "modal_close-btn",
         "Confirm modal",
         "Timed out",
-        "Allow JavaScript",
-        "Cloudflare",
-        "cloudflare",
+        "SAVE AND VERIFY",
+        "password-card",
+        "new_password",
     ):
         if marker.lower() in out.lower():
             reason = marker.replace(" ", "_")[:80]

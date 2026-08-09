@@ -8,6 +8,7 @@ import imaplib
 import re
 import time
 from dataclasses import dataclass
+from datetime import timezone
 from email.header import decode_header
 from email.message import Message
 from typing import Iterable
@@ -84,6 +85,7 @@ class RiotMail:
     code: str | None
     verify_link: str | None
     received_epoch: float
+    recipients: str = ""
 
 
 def _decode_mime(value: str | None) -> str:
@@ -136,6 +138,33 @@ def _extract_verify_link(text: str) -> str | None:
         url = match.group(1) if match.lastindex else match.group(0)
         return html.unescape(url).rstrip(").,]}>\"'")
     return None
+
+
+def _recipient_blob(msg: Message, body: str) -> str:
+    parts: list[str] = []
+    for header in (
+        "To",
+        "Cc",
+        "Delivered-To",
+        "X-Original-To",
+        "X-Forwarded-To",
+        "Envelope-To",
+    ):
+        parts.append(_decode_mime(msg.get(header)))
+    # Body often names the address being verified.
+    parts.append(body[:8000])
+    return "\n".join(parts).casefold()
+
+
+def _message_received_epoch(msg: Message) -> float:
+    raw_date = msg.get("Date") or ""
+    try:
+        date_tuple = email.utils.parsedate_to_datetime(raw_date)
+        if date_tuple.tzinfo is None:
+            date_tuple = date_tuple.replace(tzinfo=timezone.utc)
+        return date_tuple.timestamp()
+    except Exception:
+        return time.time()
 
 
 def _is_riot_sender(sender: str) -> bool:
@@ -198,31 +227,57 @@ class ImapInbox:
                 pass
 
     def _search_uids(self, client: imaplib.IMAP4, since_epoch: float) -> list[bytes]:
-        # Merge several provider-specific searches; iCloud often misses FROM riotgames.com
-        # because it rewrites the sender to @icloud.com.
-        queries = [
+        # Prefer subject matches. Never let a broad FROM search push Verify UIDs
+        # out of the candidate window (old bug: merged[-60:] dropped them).
+        subject_queries = [
             '(SUBJECT "Verify Your Email")',
+            '(SUBJECT "Verify Email")',
             '(SUBJECT "Verify")',
-            '(FROM "riotgames.com")',
-            '(FROM "riot")',
-            '(FROM "riotgames")',
         ]
-        merged: list[bytes] = []
+        broad_queries = [
+            '(FROM "riotgames.com")',
+            '(FROM "riotgames")',
+            '(FROM "riot")',
+        ]
+        subject_uids: list[bytes] = []
+        broad_uids: list[bytes] = []
         seen: set[bytes] = set()
-        for query in queries:
+
+        def _add(target: list[bytes], query: str) -> None:
             typ, data = client.uid("search", None, query)
             if typ != "OK" or not data or not data[0]:
-                continue
+                return
             for uid in data[0].split():
-                if uid not in seen:
-                    seen.add(uid)
-                    merged.append(uid)
-        if not merged:
-            typ, data = client.uid("search", None, "ALL")
-            if typ == "OK" and data and data[0]:
-                merged = data[0].split()
-        # Keep the newest ~60 candidates (verify mail may not be the absolute newest).
-        return merged[-60:]
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                target.append(uid)
+
+        for query in subject_queries:
+            _add(subject_uids, query)
+        for query in broad_queries:
+            _add(broad_uids, query)
+
+        def _newest(uids: list[bytes], limit: int) -> list[bytes]:
+            if not uids:
+                return []
+            try:
+                return sorted(uids, key=lambda u: int(u))[-limit:]
+            except Exception:
+                return uids[-limit:]
+
+        # Keep all recent subject hits, plus newest broad hits as backup.
+        preferred = _newest(subject_uids, 80)
+        if len(preferred) >= 10:
+            return preferred
+        backup = _newest(broad_uids, 40)
+        merged = preferred + [u for u in backup if u not in set(preferred)]
+        if merged:
+            return _newest(merged, 100)
+        typ, data = client.uid("search", None, "ALL")
+        if typ == "OK" and data and data[0]:
+            return _newest(data[0].split(), 40)
+        return []
 
     def _fetch_message_bytes(self, client: imaplib.IMAP4, uid: bytes) -> bytes | None:
         # iCloud frequently returns an empty stub for UID FETCH RFC822; BODY.PEEK[] works.
@@ -238,43 +293,65 @@ class ImapInbox:
                 return raw
         return None
 
+    def _iter_folders(self) -> list[str]:
+        # iCloud sometimes files Riot mail into Junk.
+        primary = self.config.folder or "INBOX"
+        extras = ["Junk", "Junk Folder", "Spam", "Bulk Mail"]
+        out = [primary]
+        for name in extras:
+            if name.casefold() != primary.casefold():
+                out.append(name)
+        return out
+
     def fetch_recent_riot_mail(self, *, since_epoch: float) -> list[RiotMail]:
-        client = self._connect()
         found: list[RiotMail] = []
-        try:
-            for uid in self._search_uids(client, since_epoch):
-                raw = self._fetch_message_bytes(client, uid)
-                if not raw:
-                    continue
-                msg = email.message_from_bytes(raw)
-                sender = _decode_mime(msg.get("From"))
-                subject = _decode_mime(msg.get("Subject"))
-                if not _is_riot_mail(sender, subject):
-                    continue
-                date_tuple = email.utils.parsedate_to_datetime(msg.get("Date") or "")
-                try:
-                    received = date_tuple.timestamp()
-                except Exception:
-                    received = time.time()
-                if received + 5 < since_epoch:
-                    continue
-                body = _body_text(msg)
-                blob = f"{subject}\n{body}"
-                found.append(
-                    RiotMail(
-                        uid=uid.decode() if isinstance(uid, bytes) else str(uid),
-                        subject=subject,
-                        sender=sender,
-                        code=_extract_code(blob),
-                        verify_link=_extract_verify_link(blob),
-                        received_epoch=received,
-                    )
-                )
-        finally:
+        seen_uids: set[str] = set()
+        # Allow modest clock skew between Mac and IMAP Date headers.
+        min_received = since_epoch - 120
+        for folder in self._iter_folders():
             try:
-                client.logout()
+                client = self._connect()
             except Exception:
-                pass
+                break
+            try:
+                typ, _ = client.select(folder)
+                if typ != "OK":
+                    continue
+                for uid in self._search_uids(client, since_epoch):
+                    raw = self._fetch_message_bytes(client, uid)
+                    if not raw:
+                        continue
+                    msg = email.message_from_bytes(raw)
+                    sender = _decode_mime(msg.get("From"))
+                    subject = _decode_mime(msg.get("Subject"))
+                    if not _is_riot_mail(sender, subject):
+                        continue
+                    received = _message_received_epoch(msg)
+                    if received < min_received:
+                        continue
+                    body = _body_text(msg)
+                    blob = f"{subject}\n{body}"
+                    uid_s = uid.decode() if isinstance(uid, bytes) else str(uid)
+                    key = f"{folder}:{uid_s}"
+                    if key in seen_uids:
+                        continue
+                    seen_uids.add(key)
+                    found.append(
+                        RiotMail(
+                            uid=uid_s,
+                            subject=subject,
+                            sender=sender,
+                            code=_extract_code(blob),
+                            verify_link=_extract_verify_link(blob),
+                            received_epoch=received,
+                            recipients=_recipient_blob(msg, body),
+                        )
+                    )
+            finally:
+                try:
+                    client.logout()
+                except Exception:
+                    pass
         found.sort(key=lambda m: m.received_epoch, reverse=True)
         return found
 

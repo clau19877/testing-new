@@ -1,7 +1,6 @@
-BUILD 2026-08-09q
-Session restore after password change:
-  Riot often invalidates cookies → authenticate.riotgames.com
-  Script re-logins with new_password, then continues email update.
-Also: do not treat password-card fields as the login form.
-Password change before email (09p) kept.
+BUILD 2026-08-09r
+IMAP verify reliability:
+  - Prefer SUBJECT "Verify Your Email" UIDs (fix merge window bug)
+  - Also search Junk; match recipient=new_email; 240s timeout
+Session restore after password change (09q) kept.
 Zip does not include data/tasks.csv.
