@@ -474,14 +474,23 @@ on jsClickSubmitEmail()
 		"})();"
 end jsClickSubmitEmail
 
+on jsProbeEmailField()
+	-- Keep JS in a handler; avoid short var names like "st" (Script Editor rejects them).
+	return "(function () {" & ¬
+		"  var el = document.querySelector('input[data-testid=personal-information-card__emailAddress]');" & ¬
+		"  if (el) return 'ready';" & ¬
+		"  return 'missing';" & ¬
+		"})();"
+end jsProbeEmailField
+
 on waitForEmailField(timeoutSec)
 	set deadline to (current date) + timeoutSec
 	repeat while (current date) < deadline
-		set st to "missing"
+		set emailFieldState to "missing"
 		try
-			set st to safariJS("(function () { return document.querySelector('input[data-testid=personal-information-card__emailAddress]') ? 'ready' : 'missing'; })();") as text
+			set emailFieldState to safariJS(jsProbeEmailField()) as text
 		end try
-		if st is "ready" then return "ready"
+		if emailFieldState is "ready" then return "ready"
 		delay 0.5
 	end repeat
 	return "timeout"
@@ -645,9 +654,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to toolkitRootFromCsv(found)
-		return "BUILD 2026-08-09d" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder."
+		return "BUILD 2026-08-09e" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder."
 	end if
-	return "BUILD 2026-08-09d" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-09e" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -662,7 +671,7 @@ on runBatchFromCsv()
 
 	set dir to toolkitRootFromCsv(csvPath)
 
-	display dialog "BUILD 2026-08-09d" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-09e" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
 
 	set py to "/usr/bin/python3"
 	try
