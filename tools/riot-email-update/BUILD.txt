@@ -1,4 +1,5 @@
-BUILD 2026-08-09u
-Fix AppleScript syntax: no ";" between do shell script lines.
-Auto-prune tasks.csv + CSV failed.txt (09t) kept.
+BUILD 2026-08-09v
+Fix Script Editor "unknown token": moved batch launch shell into
+launch_safari_batch.sh (no backslash-quotes in AppleScript).
+Prefer RUN_ME.command / ./run_safari_mac.sh over Script Editor.
 Zip does not include data/tasks.csv.

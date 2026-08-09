@@ -482,7 +482,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-09t")
+	logLine("BUILD 2026-08-09v")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -1627,9 +1627,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-09t" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-09v" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-09t" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-09v" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -1650,24 +1650,16 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-09t" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
-
-	set py to "/usr/bin/python3"
-	try
-		set py to do shell script "if [ -x " & quoted form of (dir & "/.venv/bin/python") & " ]; then echo " & quoted form of (dir & "/.venv/bin/python") & "; else command -v python3; fi"
-	end try
+	display dialog "BUILD 2026-08-09v" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
 
 	logLine("Launching batch for " & rowCount & " account(s) from " & csvPath)
 	logLine("Using toolkit scripts: " & dir)
-	-- Clear any previous stop flag; write PID so STOP_BATCH.command / Script Editor Stop can kill it.
+	-- Launch via shell helper (avoid backslash-quote inside AppleScript string literals).
 	try
-		do shell script "rm -f " & quoted form of (dir & "/.safari_batch_stop")
-		do shell script "chmod +x " & quoted form of (dir & "/stop_safari_batch.sh") & " " & quoted form of (dir & "/STOP_BATCH.command") & " 2>/dev/null || true"
+		do shell script "chmod +x " & quoted form of (dir & "/launch_safari_batch.sh") & " " & quoted form of (dir & "/stop_safari_batch.sh") & " " & quoted form of (dir & "/STOP_BATCH.command")
 	end try
-	-- Background the batch; poll until it exits OR stop flag appears (Script Editor Stop / STOP_BATCH).
-	set batchCmd to "cd " & quoted form of dir & " && rm -f .safari_batch_stop && TOOL_DIR=" & quoted form of dir & " " & quoted form of py & " " & quoted form of (dir & "/run_safari_batch.py") & " " & quoted form of csvPath & " > " & quoted form of (dir & "/.safari_batch_console.log") & " 2>&1 & echo $! > " & quoted form of (dir & "/.safari_batch.pid") & "; pid=$(cat " & quoted form of (dir & "/.safari_batch.pid") & "); while kill -0 \"$pid\" 2>/dev/null; do if [ -f " & quoted form of (dir & "/.safari_batch_stop") & " ]; then /bin/bash " & quoted form of (dir & "/stop_safari_batch.sh") & " >/dev/null 2>&1; break; fi; sleep 0.5; done; wait \"$pid\" 2>/dev/null; exit 0"
 	try
-		do shell script batchCmd
+		do shell script "/bin/bash " & quoted form of (dir & "/launch_safari_batch.sh") & " " & quoted form of csvPath
 		set batchOut to do shell script "tail -n 80 " & quoted form of (dir & "/.safari_batch_console.log") & " 2>/dev/null || true"
 	on error errMsg number errNum
 		-- Stop button in Script Editor (-128) or other failure: kill the batch immediately.
