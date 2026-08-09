@@ -20,8 +20,7 @@ Desktop/
 
 Wrong:
 - `Desktop/tasks.csv`
-- `Desktop/riotemail/tasks.csv` only (ok too if present, but prefer `data/tasks.csv`)
-- Double-clicking `safari_riot_email.applescript`
+- Prefer `Desktop/riotemail/data/tasks.csv` (also accepts `Desktop/riotemail/tasks.csv`)
 
 ## Run
 
@@ -35,9 +34,12 @@ cd ~/Desktop/riotemail
 # if you unzipped into a subfolder:
 # cd ~/Desktop/riotemail/riot-email-update-safari-mac
 
-chmod +x *.sh *.command fetch_riot_imap_code.py
+chmod +x run_safari_mac.sh run_safari_batch.sh fetch_riot_imap_code.py RUN_ME.command
 ./run_safari_mac.sh
 ```
+
+**Option C — open the AppleScript:**  
+If you open `safari_riot_email.applescript` directly, it now looks for `data/tasks.csv` beside itself and offers to run the whole batch.
 
 The launcher prints `script folder:` and `using CSV:` so you can confirm the path.
 

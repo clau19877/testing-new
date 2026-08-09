@@ -59,17 +59,24 @@ on run argv
 		set batchMode to true
 	end if
 
+	-- Opened directly (Script Editor / double-click) with no account supplied:
+	-- auto-find data/tasks.csv beside this script and run the whole batch.
+	if riotUser is "" and taskFile is "" and (not batchMode) then
+		set didBatch to runBatchFromCsv()
+		if didBatch then return "batch_done"
+	end if
+
 	if riotUser is "" then
 		if batchMode then error "batch mode: no riot_username (check tasks.csv / task file)"
-		error "No Riot username. Do not open this script directly. Run:" & return & "./run_safari_mac.sh data/tasks.csv"
+		error "No account found. Put rows in data/tasks.csv next to this script, then run RUN_ME.command (or ./run_safari_mac.sh)."
 	end if
 	if riotPass is "" then
 		if batchMode then error "batch mode: no riot_password (check tasks.csv)"
-		error "No Riot password. Run: ./run_safari_mac.sh data/tasks.csv"
+		error "No Riot password. Add riot_password to data/tasks.csv, then run RUN_ME.command."
 	end if
 	if (not skipEmail) and newEmail is "" then
 		if batchMode then error "batch mode: no new_email (check tasks.csv)"
-		error "No new email. Run: ./run_safari_mac.sh data/tasks.csv"
+		error "No new email. Add new_email to data/tasks.csv, then run RUN_ME.command."
 	end if
 
 	logLine("Account: " & riotUser & " -> " & newEmail)
@@ -495,6 +502,58 @@ on scriptDir()
 		return do shell script "pwd"
 	end try
 end scriptDir
+
+on runBatchFromCsv()
+	-- When the script is opened directly, locate data/tasks.csv beside it and
+	-- run the tested Python batch runner (which drives Safari per row).
+	set dir to scriptDir()
+	set csvPath to dir & "/data/tasks.csv"
+	set hasCsv to false
+	try
+		do shell script "test -f " & quoted form of csvPath
+		set hasCsv to true
+	end try
+	if not hasCsv then
+		-- also accept tasks.csv directly in the folder
+		set csvPath to dir & "/tasks.csv"
+		try
+			do shell script "test -f " & quoted form of csvPath
+			set hasCsv to true
+		end try
+	end if
+	if not hasCsv then return false
+
+	-- Confirm there is at least one data row
+	set rowCount to 0
+	try
+		set rowCount to (do shell script "awk 'NR>1 && $0 !~ /^[[:space:]]*$/ && $0 !~ /^#/ {n++} END{print n+0}' " & quoted form of csvPath) as integer
+	end try
+	if rowCount is 0 then return false
+
+	display dialog "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
+
+	set py to "/usr/bin/python3"
+	try
+		set py to do shell script "if [ -x " & quoted form of (dir & "/.venv/bin/python") & " ]; then echo " & quoted form of (dir & "/.venv/bin/python") & "; else command -v python3; fi"
+	end try
+
+	logLine("Launching batch for " & rowCount & " account(s)…")
+	set batchCmd to "cd " & quoted form of dir & " && TOOL_DIR=" & quoted form of dir & " " & quoted form of py & " " & quoted form of (dir & "/run_safari_batch.py") & " " & quoted form of csvPath & " 2>&1"
+	try
+		set batchOut to do shell script batchCmd
+	on error errMsg
+		set batchOut to errMsg
+	end try
+	logLine(batchOut)
+
+	set summary to "Batch finished. See success.txt / failed.txt in:" & return & dir
+	try
+		set tailOut to do shell script "tail -n 6 " & quoted form of (dir & "/failed.txt") & " 2>/dev/null || true"
+		if tailOut is not "" then set summary to summary & return & return & "Recent failures:" & return & tailOut
+	end try
+	display dialog summary buttons {"OK"} default button "OK"
+	return true
+end runBatchFromCsv
 
 on fetchImapCode(prefix)
 	-- Uses fetch_riot_imap_code.py + .env IMAP_* / NEW_IMAP_* when available.
