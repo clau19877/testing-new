@@ -1,4 +1,4 @@
-BUILD 2026-08-09j
-Fix AppleScript -2763 after SAVE (Safari JS empty during navigation).
-Safer dumpDebug; treat account page / email field as logged-in.
+BUILD 2026-08-09k
+Fix IMAP verify-link discovery on iCloud (BODY.PEEK + mangled Riot From).
+Verified live: finds "Verify Your Email" → ap.account.riotgames.com link.
 Zip does not include data/tasks.csv.

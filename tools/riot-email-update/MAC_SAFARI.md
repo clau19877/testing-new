@@ -71,6 +71,18 @@ body snippet). Failures in `failed.txt` append the log path as a third field.
 
 Share that `.log` file when asking for help with an error.
 
+## IMAP verify mail (iCloud)
+
+Riot’s “Verify Your Email” messages often arrive with an iCloud-rewritten
+From address (`…riotgames_com…@icloud.com`). BUILD **2026-08-09k+** fetches
+with `BODY.PEEK[]` and accepts those senders. Quick check on the Mac:
+
+```bash
+cd ~/Desktop/"riot-email-update-safari-mac 3"
+IMAP_HOST=imap.mail.me.com IMAP_USER='you@icloud.com' IMAP_PASSWORD='app-password' \
+  python3 fetch_riot_verify_link.py --timeout 30 --since-seconds 86400
+```
+
 If Script Editor reports an error about setting `line` / `st` / `key`, update to
 the latest zip (**BUILD 2026-08-09h** or newer) — those names are reserved in
 AppleScript.

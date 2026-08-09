@@ -18,6 +18,11 @@ RIOT_FROM_HINTS = (
     "email.accounts.riotgames.com",
     "noreply@riotgames.com",
     "leagueoflegends@",
+    # iCloud often rewrites Riot's From into a Hide-My-Email style address:
+    #   Riot Games <noreply_at_umail_accounts_riotgames_com_…@icloud.com>
+    "riotgames_com",
+    "umail_accounts_riotgames",
+    "riot games",
 )
 
 CODE_PATTERNS = (
@@ -135,7 +140,35 @@ def _extract_verify_link(text: str) -> str | None:
 
 def _is_riot_sender(sender: str) -> bool:
     lower = sender.lower()
-    return any(hint in lower for hint in RIOT_FROM_HINTS)
+    if any(hint in lower for hint in RIOT_FROM_HINTS):
+        return True
+    # Broad fallback: mangled local-parts still contain "riotgames".
+    return "riotgames" in lower
+
+
+def _is_riot_mail(sender: str, subject: str) -> bool:
+    subj = (subject or "").lower()
+    if _is_riot_sender(sender):
+        return True
+    if "riot" in subj:
+        return True
+    # Email-change messages are titled exactly this; iCloud may rewrite From.
+    if "verify your email" in subj or "verify email" in subj:
+        return True
+    return False
+
+
+def _raw_from_fetch(data) -> bytes | None:
+    """Extract message bytes from imaplib uid fetch response tuples."""
+    if not data:
+        return None
+    for item in data:
+        if not isinstance(item, tuple):
+            continue
+        for part in item:
+            if isinstance(part, (bytes, bytearray)) and len(part) > 200:
+                return bytes(part)
+    return None
 
 
 class ImapInbox:
@@ -165,36 +198,58 @@ class ImapInbox:
                 pass
 
     def _search_uids(self, client: imaplib.IMAP4, since_epoch: float) -> list[bytes]:
-        # Broad search, filter locally by date/sender for provider quirks.
+        # Merge several provider-specific searches; iCloud often misses FROM riotgames.com
+        # because it rewrites the sender to @icloud.com.
         queries = [
+            '(SUBJECT "Verify Your Email")',
+            '(SUBJECT "Verify")',
             '(FROM "riotgames.com")',
             '(FROM "riot")',
-            "ALL",
+            '(FROM "riotgames")',
         ]
-        uids: list[bytes] = []
+        merged: list[bytes] = []
+        seen: set[bytes] = set()
         for query in queries:
             typ, data = client.uid("search", None, query)
+            if typ != "OK" or not data or not data[0]:
+                continue
+            for uid in data[0].split():
+                if uid not in seen:
+                    seen.add(uid)
+                    merged.append(uid)
+        if not merged:
+            typ, data = client.uid("search", None, "ALL")
             if typ == "OK" and data and data[0]:
-                uids = data[0].split()
-                break
-        # Keep the newest ~40 candidates
-        return uids[-40:]
+                merged = data[0].split()
+        # Keep the newest ~60 candidates (verify mail may not be the absolute newest).
+        return merged[-60:]
+
+    def _fetch_message_bytes(self, client: imaplib.IMAP4, uid: bytes) -> bytes | None:
+        # iCloud frequently returns an empty stub for UID FETCH RFC822; BODY.PEEK[] works.
+        for spec in ("(BODY.PEEK[])", "(RFC822)", "(BODY[])"):
+            try:
+                typ, data = client.uid("fetch", uid, spec)
+            except Exception:
+                continue
+            if typ != "OK":
+                continue
+            raw = _raw_from_fetch(data)
+            if raw:
+                return raw
+        return None
 
     def fetch_recent_riot_mail(self, *, since_epoch: float) -> list[RiotMail]:
         client = self._connect()
         found: list[RiotMail] = []
         try:
             for uid in self._search_uids(client, since_epoch):
-                typ, data = client.uid("fetch", uid, "(RFC822)")
-                if typ != "OK" or not data or not data[0]:
-                    continue
-                raw = data[0][1]
-                if not isinstance(raw, (bytes, bytearray)):
+                raw = self._fetch_message_bytes(client, uid)
+                if not raw:
                     continue
                 msg = email.message_from_bytes(raw)
                 sender = _decode_mime(msg.get("From"))
                 subject = _decode_mime(msg.get("Subject"))
-                if not _is_riot_sender(sender) and "riot" not in subject.lower():
+                if not _is_riot_mail(sender, subject):
                     continue
                 date_tuple = email.utils.parsedate_to_datetime(msg.get("Date") or "")
                 try:

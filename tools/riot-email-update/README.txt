@@ -1,14 +1,14 @@
-BUILD 2026-08-09j
+BUILD 2026-08-09k
 
 This zip DOES NOT contain data/tasks.csv. Keep your existing file.
 
-Flow:
-  login -> fill emailAddress -> SAVE AND VERIFY
-  -> IMAP "Verify Your Email" link -> LOG OUT EVERYWHERE
+IMAP fix: iCloud rewrites Riot's From address and rejects RFC822 fetches.
+The toolkit now uses BODY.PEEK[] and recognizes mangled Riot senders, so
+"Verify Your Email" links are found.
 
-Update and run (prefer this over Script Editor / old riotemail folder):
+Update and run:
   cd ~/Desktop/"riot-email-update-safari-mac 3"
   chmod +x *.sh *.command fetch_riot_imap_code.py fetch_riot_verify_link.py
   ./run_safari_mac.sh
 
-Confirm BUILD 2026-08-09j in debug/logs/safari_*.log
+Confirm BUILD 2026-08-09k in debug/logs/safari_*.log
