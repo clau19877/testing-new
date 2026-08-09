@@ -35,15 +35,20 @@ VERIFY_LINK_PATTERNS = (
     # Prefer a link whose URL itself clearly identifies the verification action.
     re.compile(
         r"https?://[^\s\"'<>]*(?:riotgames\.com|riotgames\.com\.cn)"
-        r"[^\s\"'<>]*(?:verify|confirm|email)[^\s\"'<>]*",
+        r"[^\s\"'<>]*(?:verify|confirm|email-verification|email)[^\s\"'<>]*",
         re.I,
     ),
     # Riot email templates may use a tracking URL; select the href around
     # the visible "Verify Email" call-to-action.
     re.compile(
         r'href\s*=\s*["\'](https?://[^"\']+)["\'][^>]*>'
-        r"(?:(?!</a>).){0,500}?(?:verify\s+(?:your\s+)?email|confirm\s+email)",
+        r"(?:(?!</a>).){0,800}?(?:verify\s+(?:your\s+)?email|confirm\s+email)",
         re.I | re.S,
+    ),
+    # Tracking links (links.riotgames.com) near a Verify CTA.
+    re.compile(
+        r'href\s*=\s*["\'](https?://links\.riotgames\.com/[^"\']+)["\']',
+        re.I,
     ),
 )
 
@@ -200,19 +205,32 @@ def _raw_from_fetch(data) -> bytes | None:
     return None
 
 
+def _imap_quote_mailbox(name: str) -> str:
+    """Quote mailbox names safely for SELECT (spaces / specials)."""
+    cleaned = (name or "INBOX").replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{cleaned}"'
+
+
 class ImapInbox:
     def __init__(self, config: ImapConfig):
         self.config = config
 
-    def _connect(self) -> imaplib.IMAP4:
+    def _login(self) -> imaplib.IMAP4:
         if self.config.use_ssl:
             client: imaplib.IMAP4 = imaplib.IMAP4_SSL(self.config.host, self.config.port)
         else:
             client = imaplib.IMAP4(self.config.host, self.config.port)
         client.login(self.config.user, self.config.password)
-        typ, _ = client.select(self.config.folder)
+        return client
+
+    def _connect(self) -> imaplib.IMAP4:
+        client = self._login()
+        typ, _ = client.select(_imap_quote_mailbox(self.config.folder))
         if typ != "OK":
-            client.logout()
+            try:
+                client.logout()
+            except Exception:
+                pass
             raise RuntimeError(f"Cannot select folder {self.config.folder!r}")
         return client
 
@@ -293,14 +311,57 @@ class ImapInbox:
                 return raw
         return None
 
-    def _iter_folders(self) -> list[str]:
-        # iCloud sometimes files Riot mail into Junk.
+    def _list_mailbox_names(self, client: imaplib.IMAP4) -> list[str]:
+        """Return mailbox names from LIST (unquoted)."""
+        names: list[str] = []
+        try:
+            typ, data = client.list()
+        except Exception:
+            return names
+        if typ != "OK" or not data:
+            return names
+        for item in data:
+            if not isinstance(item, (bytes, bytearray, str)):
+                continue
+            line = item.decode() if isinstance(item, (bytes, bytearray)) else item
+            # Typical: (\Junk) "/" "Junk"  or  () "/" INBOX
+            match = re.search(r' "((?:\\.|[^"\\])*)"$', line)
+            if match:
+                raw_name = match.group(1).replace('\\"', '"').replace("\\\\", "\\")
+            else:
+                match = re.search(r" (\S+)$", line)
+                if not match:
+                    continue
+                raw_name = match.group(1)
+            if raw_name:
+                names.append(raw_name)
+        return names
+
+    def _iter_folders(self, client: imaplib.IMAP4 | None = None) -> list[str]:
+        # iCloud sometimes files Riot mail into Junk. Prefer LIST-discovered
+        # folders so we never SELECT a non-existent "Junk Folder" (unquoted
+        # names with spaces cause BAD Parse Error and used to abort the fetch).
         primary = self.config.folder or "INBOX"
-        extras = ["Junk", "Junk Folder", "Spam", "Bulk Mail"]
-        out = [primary]
-        for name in extras:
-            if name.casefold() != primary.casefold():
-                out.append(name)
+        out: list[str] = [primary]
+        seen = {primary.casefold()}
+        listed: list[str] = []
+        if client is not None:
+            listed = self._list_mailbox_names(client)
+        junk_like = []
+        for name in listed:
+            lower = name.casefold()
+            if lower in seen:
+                continue
+            if any(token in lower for token in ("junk", "spam", "bulk")):
+                junk_like.append(name)
+                seen.add(lower)
+        # Fallbacks only when LIST did not expose a junk/spam mailbox.
+        if not junk_like:
+            for name in ("Junk", "Spam", "Bulk Mail", "Junk Folder"):
+                if name.casefold() not in seen:
+                    junk_like.append(name)
+                    seen.add(name.casefold())
+        out.extend(junk_like)
         return out
 
     def fetch_recent_riot_mail(self, *, since_epoch: float) -> list[RiotMail]:
@@ -308,13 +369,38 @@ class ImapInbox:
         seen_uids: set[str] = set()
         # Allow modest clock skew between Mac and IMAP Date headers.
         min_received = since_epoch - 120
-        for folder in self._iter_folders():
+        login_error: Exception | None = None
+
+        # One login to discover folders, then per-folder sessions.
+        folders: list[str] = [self.config.folder or "INBOX"]
+        discover = None
+        try:
+            discover = self._login()
+            folders = self._iter_folders(discover)
+        except Exception as exc:
+            login_error = exc
+        finally:
+            if discover is not None:
+                try:
+                    discover.logout()
+                except Exception:
+                    pass
+        if login_error is not None:
+            raise login_error
+
+        for folder in folders:
+            client = None
             try:
-                client = self._connect()
-            except Exception:
+                client = self._login()
+            except Exception as exc:
+                login_error = exc
                 break
             try:
-                typ, _ = client.select(folder)
+                # Important: quote mailbox; bad / missing folders must not abort.
+                try:
+                    typ, _ = client.select(_imap_quote_mailbox(folder))
+                except Exception:
+                    continue
                 if typ != "OK":
                     continue
                 for uid in self._search_uids(client, since_epoch):
@@ -348,10 +434,13 @@ class ImapInbox:
                         )
                     )
             finally:
-                try:
-                    client.logout()
-                except Exception:
-                    pass
+                if client is not None:
+                    try:
+                        client.logout()
+                    except Exception:
+                        pass
+        if login_error is not None and not found:
+            raise login_error
         found.sort(key=lambda m: m.received_epoch, reverse=True)
         return found
 

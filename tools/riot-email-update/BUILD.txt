@@ -1,5 +1,6 @@
-BUILD 2026-08-09v
-Fix Script Editor "unknown token": moved batch launch shell into
-launch_safari_batch.sh (no backslash-quotes in AppleScript).
-Prefer RUN_ME.command / ./run_safari_mac.sh over Script Editor.
+BUILD 2026-08-09w
+Fix IMAP verify timeouts: unquoted "Junk Folder" SELECT caused BAD Parse
+Error and aborted the whole inbox fetch (empty polls). Quote mailboxes,
+skip missing folders, discover Junk via LIST, keep recipient match for
+Hide My Email, timed fallback only for fresh verify mail.
 Zip does not include data/tasks.csv.

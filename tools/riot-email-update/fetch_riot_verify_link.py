@@ -29,29 +29,43 @@ def _load_dotenv() -> None:
             os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
-def _pick_link(messages, *, wanted_subject: str, recipient: str):
-    """Prefer newest verify mail that mentions recipient; else newest verify mail."""
+def _is_verify_candidate(message, *, wanted_subject: str) -> bool:
+    subject = (message.subject or "").casefold()
+    if wanted_subject in subject:
+        return bool(message.verify_link)
+    if "verify" in subject:
+        return bool(message.verify_link)
+    return False
+
+
+def _pick_link(
+    messages,
+    *,
+    wanted_subject: str,
+    recipient: str,
+    allow_any: bool = False,
+    fallback_min_received: float | None = None,
+):
+    """Prefer newest verify mail that mentions recipient; optional timed fallback."""
     recip = (recipient or "").casefold().strip()
     matched = []
     fallback = []
     for message in messages:
-        if wanted_subject not in message.subject.casefold():
-            # Still accept close subjects that carry a verify link.
-            if "verify" not in message.subject.casefold():
-                continue
-        if not message.verify_link:
+        if not _is_verify_candidate(message, wanted_subject=wanted_subject):
             continue
         if recip and recip in (message.recipients or ""):
             matched.append(message)
-        else:
-            fallback.append(message)
+            continue
+        if fallback_min_received is not None and message.received_epoch < fallback_min_received:
+            continue
+        fallback.append(message)
     if matched:
-        return matched[0]
-    if recip:
-        return None
-    if fallback:
-        return fallback[0]
-    return None
+        return matched[0], "recipient"
+    if not allow_any or not fallback:
+        return None, ""
+    if len(fallback) == 1:
+        return fallback[0], "only-fresh"
+    return fallback[0], "newest-fresh"
 
 
 def main() -> int:
@@ -91,6 +105,12 @@ def main() -> int:
         if args.since_epoch is not None
         else time.time() - args.since_seconds
     )
+    # Fallback must stay near the SAVE click — do not reuse older verify mails.
+    fallback_min_received = (
+        float(args.since_epoch) - 15.0
+        if args.since_epoch is not None
+        else since
+    )
     deadline = time.time() + args.timeout
     wanted_subject = args.subject.casefold().strip()
     recipient = args.recipient
@@ -101,7 +121,11 @@ def main() -> int:
         file=sys.stderr,
     )
 
-    any_fallback_after = time.time() + min(90.0, args.timeout * 0.45)
+    # After a short recipient-only window, allow a timed fallback. Hide My Email
+    # usually puts the alias in To ("Hide My Email <alias@icloud.com>"); when it
+    # does not, the newest mail after SAVE is the next-best signal.
+    any_fallback_after = time.time() + min(45.0, max(20.0, args.timeout * 0.2))
+    last_diag = ""
     while time.time() < deadline:
         try:
             messages = inbox.fetch_recent_riot_mail(since_epoch=since)
@@ -109,26 +133,41 @@ def main() -> int:
             print(f"imap poll: {exc}", file=sys.stderr)
             messages = []
 
-        picked = _pick_link(
-            messages, wanted_subject=wanted_subject, recipient=recipient
+        verify_msgs = [
+            m
+            for m in messages
+            if "verify" in (m.subject or "").casefold() or m.verify_link
+        ]
+        diag = (
+            f"imap seen={len(messages)} verifyish={len(verify_msgs)} "
+            f"with_link={sum(1 for m in verify_msgs if m.verify_link)}"
         )
-        if picked is None and recipient and time.time() >= any_fallback_after:
-            # Recipient header missing on some iCloud forwards — accept newest verify link.
-            picked = _pick_link(
-                messages, wanted_subject=wanted_subject, recipient=""
-            )
-            if picked:
+        if diag != last_diag:
+            print(diag, file=sys.stderr)
+            last_diag = diag
+
+        allow_any = (not recipient) or (time.time() >= any_fallback_after)
+        picked, how = _pick_link(
+            messages,
+            wanted_subject=wanted_subject,
+            recipient=recipient,
+            allow_any=allow_any,
+            fallback_min_received=fallback_min_received if recipient else None,
+        )
+        if picked and picked.verify_link:
+            if how and how != "recipient":
                 print(
-                    "recipient filter missed; using newest Verify Your Email link",
+                    f"recipient filter missed; using {how} Verify Your Email link",
                     file=sys.stderr,
                 )
-        if picked and picked.verify_link:
             print(f'found verify link in "{picked.subject}"', file=sys.stderr)
             print(picked.verify_link)
             return 0
         time.sleep(3)
 
     print(f'timeout waiting for "{args.subject}" verification link', file=sys.stderr)
+    if last_diag:
+        print(f"last status: {last_diag}", file=sys.stderr)
     return 1
 
 

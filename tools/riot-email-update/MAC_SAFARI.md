@@ -48,7 +48,7 @@ Prefer Option A/B. The launcher prints `script folder:` and `using CSV:` so you 
 1. Safari → Settings → Advanced → Show Develop menu  
 2. Develop → Allow JavaScript from Apple Events  
 
-## Cloudflare / warm-up (BUILD 2026-08-09v+)
+## Cloudflare / warm-up (BUILD 2026-08-09w+)
 
 If Safari shows **Just a moment…** / Cloudflare:
 
@@ -94,7 +94,10 @@ Share that `.log` file when asking for help with an error.
 
 Riot’s “Verify Your Email” messages often arrive with an iCloud-rewritten
 From address (`…riotgames_com…@icloud.com`). BUILD **2026-08-09k+** fetches
-with `BODY.PEEK[]` and accepts those senders. Quick check on the Mac:
+with `BODY.PEEK[]` and accepts those senders. BUILD **2026-08-09w+** also
+quotes IMAP mailbox names and skips missing folders — older builds could abort
+the whole inbox poll with `SELECT … BAD Parse Error` while trying
+`Junk Folder`. Quick check on the Mac:
 
 ```bash
 cd ~/Desktop/"riot-email-update-safari-mac 3"
@@ -103,7 +106,7 @@ IMAP_HOST=imap.mail.me.com IMAP_USER='you@icloud.com' IMAP_PASSWORD='app-passwor
 ```
 
 If Script Editor reports an error about setting `line` / `st` / `key`, update to
-the latest zip (**BUILD 2026-08-09v** or newer) — those names are reserved in
+the latest zip (**BUILD 2026-08-09w** or newer) — those names are reserved in
 AppleScript.
 
 ## Account flow
@@ -131,7 +134,7 @@ replace your existing `data/tasks.csv`.
 - Terminal: press **Ctrl+C**
 - Or double-click **STOP_BATCH.command**
 
-**BUILD 2026-08-09v+** hard-kills the whole tree: `run_safari_batch.py`,
+**BUILD 2026-08-09w+** hard-kills the whole tree: `run_safari_batch.py`,
 `osascript` / `safari_riot_email.applescript`, and IMAP helpers
 (`fetch_riot_verify_link.py`). Remaining CSV rows do not start. If anything
 still looks stuck, run STOP again or quit the Terminal / Script Editor window.
