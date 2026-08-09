@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """Batch Riot email updates via macOS Safari AppleScript.
 
-Reads accounts from a CSV, runs safari_riot_email.applescript one-by-one,
-appends successes to success.txt and failures to failed.txt.
+Reads accounts from a CSV, runs safari_riot_email.applescript one-by-one.
+
+On SUCCESS:
+  - append to success.txt
+  - remove that row from tasks.csv (so the queue shrinks as you go)
+
+On FAILURE:
+  - append a paste-ready CSV row to failed.txt (same columns as tasks.csv)
+  - append reason/log to failed_reasons.txt
 
 Stop immediately (does not continue remaining tasks):
   - Ctrl+C / Terminal Stop
@@ -277,8 +284,22 @@ def read_tasks(path: Path) -> list[dict[str, str]]:
     return rows
 
 
+TASK_CSV_FIELDS = [
+    "riot_username",
+    "riot_password",
+    "new_password",
+    "imap_email",
+    "imap_app_password",
+    "new_email",
+    "imap_host",
+    "imap_port",
+    "proxy_index",
+    "email_change_url",
+]
+
+
 def account_line(row: dict[str, str]) -> str:
-    """Compact line written to success.txt / failed.txt (uses new_password when set)."""
+    """Compact line written to success.txt (uses new_password when set)."""
     final_password = row.get("new_password") or row.get("riot_password", "")
     return "\t".join(
         [
@@ -296,6 +317,68 @@ def append_line(path: Path, line: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(line.rstrip("\n") + "\n")
+
+
+def task_csv_row_for_rerun(row: dict[str, str]) -> dict[str, str]:
+    """Build a tasks.csv-compatible row for failed.txt paste/rerun.
+
+    If new_password was set, use it as riot_password for retry — password change
+    usually already succeeded before a later email/IMAP failure.
+    """
+    out = {key: (row.get(key) or "").strip() for key in TASK_CSV_FIELDS}
+    new_password = out.get("new_password") or ""
+    if new_password:
+        out["riot_password"] = new_password
+    out["imap_host"] = out.get("imap_host") or derive_imap_host(out.get("imap_email", ""))
+    if not out.get("imap_port"):
+        out["imap_port"] = "993"
+    return out
+
+
+def append_failed_csv(path: Path, row: dict[str, str]) -> None:
+    """Append one paste-ready tasks.csv row (writes header if file is new/empty)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = (not path.exists()) or path.stat().st_size == 0
+    with path.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=TASK_CSV_FIELDS, extrasaction="ignore")
+        if write_header:
+            writer.writeheader()
+        writer.writerow(task_csv_row_for_rerun(row))
+
+
+def remove_username_from_tasks_csv(path: Path, username: str) -> bool:
+    """Remove a completed account from tasks.csv. Returns True if a row was removed."""
+    if not path.exists():
+        return False
+    with path.open(newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames:
+            return False
+        fieldnames = list(reader.fieldnames)
+        rows = list(reader)
+
+    username = (username or "").strip()
+    kept = [
+        r
+        for r in rows
+        if ((r.get("riot_username") or "").strip() != username)
+    ]
+    if len(kept) == len(rows):
+        return False
+
+    # Preserve known column order; keep any extra columns from the original file.
+    for key in TASK_CSV_FIELDS:
+        if key not in fieldnames:
+            fieldnames.append(key)
+
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for r in kept:
+            writer.writerow({k: (r.get(k) or "") for k in fieldnames})
+    tmp.replace(path)
+    return True
 
 
 def run_one(
@@ -562,10 +645,17 @@ def main() -> int:
         if not failed_path.is_absolute():
             failed_path = ROOT / failed_path
 
+        # failed.txt → failed_reasons.txt (reason + log path; not for pasting)
+        failed_reasons_path = failed_path.with_name(
+            f"{failed_path.stem}_reasons{failed_path.suffix}"
+        )
+
         print(f"Loaded {len(tasks)} task(s) from {csv_path}")
         print(f"  success → {success_path}")
-        print(f"  failed  → {failed_path}")
+        print(f"  failed  → {failed_path}  (CSV rows; paste back into tasks.csv)")
+        print(f"  reasons → {failed_reasons_path}")
         print(f"  logs    → {ROOT / 'debug' / 'logs'}")
+        print("  on success: row removed from tasks.csv")
         print("  stop    → Ctrl+C  or  double-click STOP_BATCH.command")
         if args.dry_run:
             for i, t in enumerate(tasks, 1):
@@ -609,15 +699,38 @@ def main() -> int:
             line = account_line(row)
             if ok:
                 append_line(success_path, line)
+                removed = remove_username_from_tasks_csv(csv_path, row["riot_username"])
                 ok_n += 1
                 print(f"SUCCESS → {success_path.name}: {row['riot_username']}", flush=True)
+                if removed:
+                    print(f"  removed from {csv_path.name}", flush=True)
+                else:
+                    print(
+                        f"  warning: could not remove {row['riot_username']} from {csv_path.name}",
+                        flush=True,
+                    )
                 if log_path:
                     print(f"  log → {log_path}", flush=True)
             else:
-                append_line(failed_path, f"{line}\t{reason}\t{log_path}")
+                append_failed_csv(failed_path, row)
+                append_line(
+                    failed_reasons_path,
+                    "\t".join(
+                        [
+                            row.get("riot_username", ""),
+                            reason,
+                            log_path or "",
+                        ]
+                    ),
+                )
                 fail_n += 1
                 print(
                     f"FAILED  → {failed_path.name}: {row['riot_username']} ({reason})",
+                    flush=True,
+                )
+                print(
+                    "  tip: failed.txt is CSV — copy rows into tasks.csv to rerun "
+                    "(riot_password already set to new_password when present)",
                     flush=True,
                 )
                 if log_path:

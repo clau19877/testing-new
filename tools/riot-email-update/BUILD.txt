@@ -1,5 +1,7 @@
-BUILD 2026-08-09s
-Hard-stop fix: STOP_BATCH kills the full process tree
-  (python batch, osascript, IMAP helpers) and exits immediately.
-Safari navigation is stopped best-effort.
+BUILD 2026-08-09t
+On success: remove that row from tasks.csv automatically.
+failed.txt is now paste-ready CSV (same columns as tasks.csv);
+riot_password set to new_password for rerun when present.
+Reasons/logs → failed_reasons.txt.
+Hard-stop (09s) + IMAP fixes (09r) kept.
 Zip does not include data/tasks.csv.

@@ -15,8 +15,10 @@ riot_username,riot_password,new_password,imap_email,imap_app_password,new_email,
 #
 # macOS Safari batch (usually no captcha):
 #   ./run_safari_batch.sh data/tasks.csv
-#   → success.txt  (ok accounts; password column is the NEW password)
-#   → failed.txt   (failed accounts + reason)
+#   → success.txt         (ok accounts; password column is the NEW password)
+#   → tasks.csv           (successful rows are removed automatically)
+#   → failed.txt          (CSV rows you can paste back into tasks.csv to rerun)
+#   → failed_reasons.txt  (username + reason + log path)
 #
 # Skip password change only:  SKIP_PASSWORD_CHANGE=1 ./run_safari_mac.sh
 #
