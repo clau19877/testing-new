@@ -60,7 +60,7 @@ on run argv
 	end if
 
 	-- Opened directly (Script Editor / double-click) with no account supplied:
-	-- auto-find data/tasks.csv beside this script and run the whole batch.
+	-- search Desktop for data/tasks.csv (handles "riot-email-update-safari-mac 3").
 	if riotUser is "" and taskFile is "" and (not batchMode) then
 		set didBatch to runBatchFromCsv()
 		if didBatch then return "batch_done"
@@ -68,15 +68,16 @@ on run argv
 
 	if riotUser is "" then
 		if batchMode then error "batch mode: no riot_username (check tasks.csv / task file)"
-		error "No account found. Put rows in data/tasks.csv next to this script, then run RUN_ME.command (or ./run_safari_mac.sh)."
+		set hint to discoverHint()
+		error "No account found." & return & return & hint
 	end if
 	if riotPass is "" then
 		if batchMode then error "batch mode: no riot_password (check tasks.csv)"
-		error "No Riot password. Add riot_password to data/tasks.csv, then run RUN_ME.command."
+		error "No Riot password in the task. Check data/tasks.csv riot_password column."
 	end if
 	if (not skipEmail) and newEmail is "" then
 		if batchMode then error "batch mode: no new_email (check tasks.csv)"
-		error "No new email. Add new_email to data/tasks.csv, then run RUN_ME.command."
+		error "No new email in the task. Check data/tasks.csv new_email column."
 	end if
 
 	logLine("Account: " & riotUser & " -> " & newEmail)
@@ -490,54 +491,91 @@ end taskFileValue
 
 on scriptDir()
 	try
-		-- Prefer TOOL_DIR env from the launcher (path to me is often osascript itself).
 		set envDir to ""
 		try
 			set envDir to system attribute "TOOL_DIR"
 		end try
 		if envDir is not "" then return envDir
+
+		-- path to me is Script Editor for .applescript text — only trust if batch runner is there.
 		set p to POSIX path of (path to me)
-		return do shell script "dirname " & quoted form of p
+		set d to do shell script "dirname " & quoted form of p
+		try
+			do shell script "test -f " & quoted form of (d & "/run_safari_batch.py")
+			return d
+		end try
+
+		set found to findTasksCsvPath()
+		if found is not "" then return toolkitRootFromCsv(found)
+		return d
 	on error
 		return do shell script "pwd"
 	end try
 end scriptDir
 
-on runBatchFromCsv()
-	-- When the script is opened directly, locate data/tasks.csv beside it and
-	-- run the tested Python batch runner (which drives Safari per row).
-	set dir to scriptDir()
-	set csvPath to dir & "/data/tasks.csv"
-	set hasCsv to false
-	try
-		do shell script "test -f " & quoted form of csvPath
-		set hasCsv to true
-	end try
-	if not hasCsv then
-		-- also accept tasks.csv directly in the folder
-		set csvPath to dir & "/tasks.csv"
-		try
-			do shell script "test -f " & quoted form of csvPath
-			set hasCsv to true
-		end try
+on toolkitRootFromCsv(csvPath)
+	set parentDir to do shell script "dirname " & quoted form of csvPath
+	set baseName to do shell script "basename " & quoted form of parentDir
+	if baseName is "data" then
+		return do shell script "dirname " & quoted form of parentDir
 	end if
-	if not hasCsv then return false
+	return parentDir
+end toolkitRootFromCsv
 
-	-- Confirm there is at least one data row
+on findTasksCsvPath()
+	-- Desktop downloads often look like:
+	--   ~/Desktop/riot-email-update-safari-mac 3/data/tasks.csv
+	-- Prefer the last match alphabetically so " 3" wins over older copies.
+	-- Helper script avoids quote-escaping issues inside AppleScript strings.
+	try
+		set helper to "find \"$HOME/Desktop\" \"$HOME/Downloads\" -type f -name tasks.csv 2>/dev/null | while IFS= read -r f; do " & ¬
+			"d=$(dirname \"$f\"); " & ¬
+			"case $(basename \"$d\") in data) root=$(dirname \"$d\");; *) root=$d;; esac; " & ¬
+			"[ -f \"$root/run_safari_batch.py\" ] || continue; " & ¬
+			"awk 'NR>1 && NF && $0 !~ /^#/ {found=1; exit} END{exit !found}' \"$f\" || continue; " & ¬
+			"echo \"$f\"; done | sort | tail -1"
+		-- Write helper to a temp file so we do not embed complex quoting in AS.
+		set tmpHelper to do shell script "mktemp /tmp/riot-find-csv.XXXXXX"
+		do shell script "printf %s " & quoted form of helper & " > " & quoted form of tmpHelper
+		set found to do shell script "/bin/bash " & quoted form of tmpHelper
+		try
+			do shell script "rm -f " & quoted form of tmpHelper
+		end try
+		return found
+	on error
+		return ""
+	end try
+end findTasksCsvPath
+
+on discoverHint()
+	set found to findTasksCsvPath()
+	if found is not "" then
+		set rootDir to toolkitRootFromCsv(found)
+		return "BUILD 2026-08-09b" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder."
+	end if
+	return "BUILD 2026-08-09b" & return & return & "Put accounts in data/tasks.csv inside your Desktop folder, then in Terminal:" & return & "cd ~/Desktop/riot-email-update-safari-mac\\ 3" & return & "./run_safari_mac.sh"
+end discoverHint
+
+on runBatchFromCsv()
+	set csvPath to findTasksCsvPath()
+	if csvPath is "" then return false
+
 	set rowCount to 0
 	try
-		set rowCount to (do shell script "awk 'NR>1 && $0 !~ /^[[:space:]]*$/ && $0 !~ /^#/ {n++} END{print n+0}' " & quoted form of csvPath) as integer
+		set rowCount to (do shell script "awk 'NR>1 && NF && $0 !~ /^#/ {n++} END{print n+0}' " & quoted form of csvPath) as integer
 	end try
 	if rowCount is 0 then return false
 
-	display dialog "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
+	set dir to toolkitRootFromCsv(csvPath)
+
+	display dialog "BUILD 2026-08-09b" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
 
 	set py to "/usr/bin/python3"
 	try
 		set py to do shell script "if [ -x " & quoted form of (dir & "/.venv/bin/python") & " ]; then echo " & quoted form of (dir & "/.venv/bin/python") & "; else command -v python3; fi"
 	end try
 
-	logLine("Launching batch for " & rowCount & " account(s)…")
+	logLine("Launching batch for " & rowCount & " account(s) from " & csvPath)
 	set batchCmd to "cd " & quoted form of dir & " && TOOL_DIR=" & quoted form of dir & " " & quoted form of py & " " & quoted form of (dir & "/run_safari_batch.py") & " " & quoted form of csvPath & " 2>&1"
 	try
 		set batchOut to do shell script batchCmd

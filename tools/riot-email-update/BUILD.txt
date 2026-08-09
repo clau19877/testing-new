@@ -1,7 +1,3 @@
-TOOL_BUILD=2026-07-24i-qq-continue
-
-Login entry: docs.qq.com Continue → account.riotgames.com
-
-macOS Safari (local, usually no captcha):
-  see MAC_SAFARI.md
-  ./run_safari_mac.sh
+BUILD 2026-08-09b
+If Script Editor shows this build id in the dialog, you have the new script.
+Finds Desktop folders like: riot-email-update-safari-mac 3

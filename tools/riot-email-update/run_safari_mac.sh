@@ -52,9 +52,7 @@ find_tasks_csv() {
     "$ROOT/../data/tasks.csv" \
     "$ROOT/../tasks.csv" \
     "$HOME/Desktop/riotemail/data/tasks.csv" \
-    "$HOME/Desktop/riotemail/tasks.csv" \
-    "$HOME/Desktop/riotemail/riot-email-update-safari-mac/data/tasks.csv" \
-    "$HOME/Desktop/riotemail/riot-email-update-safari-mac/tasks.csv"
+    "$HOME/Desktop/riotemail/tasks.csv"
   do
     if [[ -f "$c" ]] && csv_has_rows "$c"; then
       echo "$c"
@@ -62,14 +60,20 @@ find_tasks_csv() {
     fi
   done
 
-  # Last resort: any tasks.csv under Desktop/riotemail with data rows
-  if [[ -d "$HOME/Desktop/riotemail" ]]; then
-    while IFS= read -r c; do
-      if csv_has_rows "$c"; then
-        echo "$c"
-        return 0
-      fi
-    done < <(find "$HOME/Desktop/riotemail" -type f -name 'tasks.csv' 2>/dev/null | head -20)
+  # Desktop unzip folders: "riot-email-update-safari-mac", "… 2", "… 3", etc.
+  # Prefer the last match alphabetically so " 3" wins over older copies.
+  local best=""
+  while IFS= read -r c; do
+    [[ -z "$c" ]] && continue
+    local root
+    root="$(dirname "$(dirname "$c")")"
+    [[ -f "$root/run_safari_batch.py" ]] || continue
+    csv_has_rows "$c" || continue
+    best="$c"
+  done < <(find "$HOME/Desktop" "$HOME/Downloads" -type f -name 'tasks.csv' 2>/dev/null | sort)
+  if [[ -n "$best" ]]; then
+    echo "$best"
+    return 0
   fi
   return 1
 }
