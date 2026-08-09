@@ -151,9 +151,15 @@ on run argv
 		end if
 
 		if phase is not "logged_in" and phase is not "account" then
-			-- One more chance: maybe already on account
-			tell application "Safari" to set cur to URL of document 1
-			if cur does not contain "account.riotgames.com" then
+			-- One more chance: maybe already on account (phase probe timed out during redirects).
+			set cur to ""
+			try
+				tell application "Safari" to set cur to URL of document 1
+			end try
+			logLine("Post-login URL fallback: " & cur)
+			if cur contains "account.riotgames.com" and cur does not contain "log-in" then
+				logLine("Treating as logged in despite phase=" & phase)
+			else
 				error "Login did not reach account.riotgames.com (phase=" & phase & "). Check Safari window."
 			end if
 		end if
@@ -212,12 +218,22 @@ on run argv
 		if submitResult does not contain "clicked-save" then error "Could not click SAVE AND VERIFY (" & submitResult & ")."
 		delay 3
 
-		-- If an hCaptcha challenge becomes visible, allow solving (skip in batch)
-		if safariJS(jsCaptchaVisible()) is "captcha" then
+		-- Page often navigates after Save; JS may return empty (-2763). Keep going.
+		set captchaState to ""
+		try
+			set captchaState to safariJS(jsCaptchaVisible())
+		end try
+		logLine("Post-save captcha state: " & captchaState)
+		if captchaState is "captcha" then
 			if batchMode then
 				logLine("hCaptcha challenge visible during save — waiting up to 60s for auto/solve…")
 				set waited to 0
-				repeat while waited < 60 and (safariJS(jsCaptchaVisible()) is "captcha")
+				repeat while waited < 60
+					set captchaState to ""
+					try
+						set captchaState to safariJS(jsCaptchaVisible())
+					end try
+					if captchaState is not "captcha" then exit repeat
 					delay 3
 					set waited to waited + 3
 				end repeat
@@ -361,28 +377,35 @@ end logStep
 
 on dumpDebug(reasonLabel)
 	-- Capture Safari URL/title + DOM probes for post-mortem investigation.
+	-- Never call logLine inside "tell application Safari" (Apple Events routing breaks).
 	logLine("--- debug dump (" & reasonLabel & ") ---")
+	set curURL to ""
+	set curName to ""
 	try
 		tell application "Safari"
 			try
 				set curURL to URL of document 1
-				logLine("safari.url=" & curURL)
-			on error errMsg
-				logLine("safari.url=<unavailable> (" & errMsg & ")")
 			end try
 			try
 				set curName to name of document 1
-				logLine("safari.title=" & curName)
-			on error errMsg
-				logLine("safari.title=<unavailable> (" & errMsg & ")")
 			end try
 		end tell
 	on error errMsg
 		logLine("safari dump failed: " & errMsg)
 	end try
+	if curURL is not "" then
+		logLine("safari.url=" & curURL)
+	else
+		logLine("safari.url=<unavailable>")
+	end if
+	if curName is not "" then
+		logLine("safari.title=" & curName)
+	else
+		logLine("safari.title=<unavailable>")
+	end if
 	try
-		set probe to safariJS(jsDumpPageState())
-		logLine("page.probe=" & probe)
+		set pageProbe to safariJS(jsDumpPageState())
+		logLine("page.probe=" & pageProbe)
 	on error errMsg
 		logLine("page.probe=<failed> (" & errMsg & ")")
 	end try
@@ -410,14 +433,24 @@ on replaceText(theText, oldString, newString)
 end replaceText
 
 on safariJS(js)
+	-- Always return text. During page navigations Safari often yields "no result" (-2763).
 	tell application "Safari"
 		try
-			return do JavaScript js in document 1
+			set jsResult to do JavaScript js in document 1
+			if jsResult is missing value then return ""
+			try
+				return jsResult as text
+			on error
+				return ""
+			end try
 		on error errMsg number errNum
 			if errNum is -1728 or errMsg contains "JavaScript from Apple Events" or errMsg contains "Allow JavaScript" then
 				error "Enable Safari → Develop → Allow JavaScript from Apple Events, then re-run. (" & errMsg & ")"
 			end if
-			error errMsg
+			-- -2763: expression did not return a result (page navigating / empty JS return)
+			if errNum is -2763 then return ""
+			if errMsg contains "沒有傳回結果" or errMsg contains "did not return a result" then return ""
+			error errMsg number errNum
 		end try
 	end tell
 end safariJS
@@ -495,9 +528,16 @@ on jsProbePhase()
 		"    if (onLogin && /check your details and try again/.test(body)) return true;" & ¬
 		"    return false;" & ¬
 		"  }" & ¬
-		"  if (badCredsVisible()) return 'bad_creds';" & ¬
-		"  if (document.querySelector('iframe[src*=hcaptcha.com]'))" & ¬
-		"    return 'captcha';" & ¬
+		"  	if (badCredsVisible()) return 'bad_creds';" & ¬
+		"  if (document.querySelector('input[data-testid=personal-information-card__emailAddress]'))" & ¬
+		"    return 'account';" & ¬
+		"  var frames = Array.from(document.querySelectorAll('iframe[src*=hcaptcha.com]'));" & ¬
+		"  for (var fi = 0; fi < frames.length; fi++) {" & ¬
+		"    var fr = frames[fi];" & ¬
+		"    var box = fr.getBoundingClientRect();" & ¬
+		"    if (box.width > 50 && box.height > 50 && fr.offsetParent !== null && fr.src.indexOf('frame=challenge') >= 0)" & ¬
+		"      return 'captcha';" & ¬
+		"  }" & ¬
 		"  if (/code|verification|authenticate|two-factor|2fa|email you/.test(body)" & ¬
 		"      && document.querySelector('input[name=code], input[autocomplete=one-time-code], input[inputmode=numeric]'))" & ¬
 		"    return 'mfa';" & ¬
