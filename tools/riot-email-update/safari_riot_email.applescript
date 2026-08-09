@@ -140,13 +140,13 @@ on run argv
 		logLine("Clicking Sign in…")
 		safariJS(jsClickSignIn())
 
-		-- Wait for MFA, captcha, Cloudflare, account, or error
-		set phase to waitForPostLogin(120)
+		-- Short post-login wait: succeed as soon as account/email field appears (do not burn 2 minutes).
+		set phase to waitForPostLogin(45)
 		logLine("Post-login phase: " & phase)
 
 		if phase is "cloudflare" then
-			logLine("Cloudflare challenge detected — waiting up to 90s for Safari to pass…")
-			set phase to waitForCloudflareClear(90)
+			logLine("Cloudflare challenge detected — waiting up to 60s for Safari to pass…")
+			set phase to waitForCloudflareClear(60)
 			logLine("After Cloudflare wait phase: " & phase)
 			if phase is "cloudflare" then
 				dumpDebug("cloudflare")
@@ -157,7 +157,7 @@ on run argv
 		if phase is "captcha" then
 			if batchMode then error "hCaptcha appeared (batch mode will not wait for manual solve)"
 			display dialog "hCaptcha appeared in Safari. Solve it in the Safari window, then click OK." buttons {"OK"} default button 1
-			set phase to waitForPostLogin(120)
+			set phase to waitForPostLogin(60)
 			logLine("After manual captcha phase: " & phase)
 		end if
 
@@ -177,23 +177,38 @@ on run argv
 			end if
 			logLine("Submitting MFA code…")
 			safariJS(jsSubmitCode(mfaCode, "mfa"))
-			delay 3
-			set phase to waitForPostLogin(60)
+			delay 2
+			set phase to waitForPostLogin(45)
 			logLine("After MFA phase: " & phase)
 		end if
 
-		if phase is not "logged_in" and phase is not "account" then
-			-- One more chance: maybe already on account (phase probe timed out during redirects).
-			set cur to ""
-			try
-				tell application "Safari" to set cur to URL of document 1
-			end try
-			logLine("Post-login URL fallback: " & cur)
-			if cur contains "account.riotgames.com" and cur does not contain "log-in" then
-				logLine("Treating as logged in despite phase=" & phase)
-			else
-				error "Login did not reach account.riotgames.com (phase=" & phase & "). Check Safari window."
+		-- Fast path: if the email field is already on screen, skip long waits / reload.
+		set emailReady to safariJS(jsProbeEmailField())
+		if emailReady is not "ready" then
+			if phase is not "logged_in" and phase is not "account" then
+				set cur to ""
+				try
+					tell application "Safari" to set cur to URL of document 1
+				end try
+				logLine("Post-login URL fallback: " & cur)
+				if cur contains "account.riotgames.com" and cur does not contain "log-in" then
+					logLine("Treating as logged in despite phase=" & phase)
+				else
+					-- Brief extra wait for redirects, then require account host.
+					set phase to waitForPostLogin(20)
+					logLine("Post-login extra phase: " & phase)
+					try
+						tell application "Safari" to set cur to URL of document 1
+					end try
+					if not (cur contains "account.riotgames.com" and cur does not contain "log-in") then
+						if phase is not "logged_in" and phase is not "account" then
+							error "Login did not reach account.riotgames.com (phase=" & phase & "). Check Safari window."
+						end if
+					end if
+				end if
 			end if
+		else
+			logLine("Email field already visible after login — skipping account reload wait")
 		end if
 
 		if skipEmail then
@@ -204,21 +219,22 @@ on run argv
 			return "login_ok"
 		end if
 
-		logStep("open_account")
-		logLine("Opening account email settings…")
-		tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
-		delay 2
+		-- Only navigate if we are not already on the account settings page with the field.
+		if emailReady is not "ready" then
+			logStep("open_account")
+			logLine("Opening account email settings…")
+			tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
+			humanDelay(0.8, 1.5)
+		end if
 
-		-- Wait for Riot personal-information email field
 		logStep("wait_email_field")
 		logLine("Waiting for personal-information-card__emailAddress…")
-		set emailReady to waitForEmailField(45)
+		set emailReady to waitForEmailField(20)
 		logLine("Email field ready: " & emailReady)
 		if emailReady is not "ready" then
-			-- Try clicking edit/email controls once, then wait again
 			safariJS(jsClickEmailControl())
-			delay 2
-			set emailReady to waitForEmailField(30)
+			humanDelay(0.6, 1.2)
+			set emailReady to waitForEmailField(12)
 			logLine("Email field ready (retry): " & emailReady)
 		end if
 		if emailReady is not "ready" then error "Could not find personal-information-card__emailAddress on account page."
@@ -377,7 +393,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-09m")
+	logLine("BUILD 2026-08-09n")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -657,12 +673,15 @@ on jsProbePhase()
 		"  if (/code|verification|authenticate|two-factor|2fa|email you/.test(body)" & ¬
 		"      && document.querySelector('input[name=code], input[autocomplete=one-time-code], input[inputmode=numeric]'))" & ¬
 		"    return 'mfa';" & ¬
-		"  if (/account" & bs & ".riotgames" & bs & ".com/.test(href) && href.indexOf('log-in') < 0 && href.indexOf('login') < 0 && href.indexOf('oauth2') < 0 && !onLogin)" & ¬
+		"  var host = (location.hostname || '').toLowerCase();" & ¬
+		"  var onRiot = host.indexOf('riotgames.com') >= 0 || host.indexOf('riot.com') >= 0;" & ¬
+		"  if (onRiot && /account" & bs & ".riotgames" & bs & ".com/.test(host) && href.indexOf('log-in') < 0 && href.indexOf('login') < 0 && href.indexOf('oauth2') < 0 && !onLogin)" & ¬
 		"    return 'account';" & ¬
-		"  if ((/account" & bs & ".riotgames" & bs & ".com/.test(href) || /authenticate" & bs & ".riotgames" & bs & ".com/.test(href)) && !onLogin)" & ¬
+		"  if (onRiot && !onLogin && (host.indexOf('account.') === 0 || host.indexOf('authenticate.') === 0 || host.indexOf('auth.') === 0))" & ¬
 		"    return 'logged_in';" & ¬
 		"  if (onLogin || document.querySelector('input[name=username]'))" & ¬
 		"    return 'login';" & ¬
+		"  if (onRiot && !onLogin) return 'logged_in';" & ¬
 		"  return 'unknown';" & ¬
 		"})();"
 end jsProbePhase
@@ -959,19 +978,6 @@ on jsDumpPageState()
 		"})();"
 end jsDumpPageState
 
-on waitForEmailField(timeoutSec)
-	set deadline to (current date) + timeoutSec
-	repeat while (current date) < deadline
-		set emailFieldState to "missing"
-		try
-			set emailFieldState to safariJS(jsProbeEmailField()) as text
-		end try
-		if emailFieldState is "ready" then return "ready"
-		delay 0.5
-	end repeat
-	return "timeout"
-end waitForEmailField
-
 on humanDelay(minSec, maxSec)
 	-- Jittered pause so pacing is less robotic.
 	set lo to minSec as real
@@ -1109,6 +1115,10 @@ on waitForPostLogin(timeoutSec)
 	set badCredHits to 0
 	set cfHits to 0
 	repeat while (current date) < deadline
+		-- Fast success: email field means we can enter the new address immediately.
+		try
+			if safariJS(jsProbeEmailField()) is "ready" then return "account"
+		end try
 		try
 			set loginPhase to safariJS(jsProbePhase()) as text
 		on error
@@ -1131,10 +1141,23 @@ on waitForPostLogin(timeoutSec)
 		if loginPhase is "mfa" then return "mfa"
 		if loginPhase is "account" then return "account"
 		if loginPhase is "logged_in" then return "logged_in"
-		delay 0.8
+		delay 0.35
 	end repeat
 	return "timeout"
 end waitForPostLogin
+
+on waitForEmailField(timeoutSec)
+	set deadline to (current date) + timeoutSec
+	repeat while (current date) < deadline
+		set emailFieldState to "missing"
+		try
+			set emailFieldState to safariJS(jsProbeEmailField()) as text
+		end try
+		if emailFieldState is "ready" then return "ready"
+		delay 0.35
+	end repeat
+	return "timeout"
+end waitForEmailField
 
 on parseArgs(argv)
 	set opts to {}
@@ -1271,9 +1294,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-09m" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-09n" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-09m" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-09n" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -1294,7 +1317,7 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-09m" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-09n" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
 
 	set py to "/usr/bin/python3"
 	try

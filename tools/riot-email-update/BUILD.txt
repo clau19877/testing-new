@@ -1,4 +1,4 @@
-BUILD 2026-08-09m
-Cloudflare avoid: Safari warm-up, hostname-safe waits, jitter, CF probe/backoff.
-Default SAFARI_BATCH_DELAY=25 (+jitter). Logout Confirm + iCloud IMAP fixes kept.
+BUILD 2026-08-09n
+Faster post-login → email fill (no 120s wait; skip reload if field visible).
+Keeps Cloudflare warm-up from 09m.
 Zip does not include data/tasks.csv.
