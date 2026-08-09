@@ -96,7 +96,7 @@ For each CSV row, the runner:
 3. Clicks `personal-information-card__saveChanges-btn` (**SAVE AND VERIFY**)
 4. Waits via IMAP for a **Verify Your Email** message and opens its
    **Verify Email** link
-5. Returns to the account page and clicks `log-out-everywhere-button`
+5. Returns to the account page, clicks `log-out-everywhere-button`, then Confirm (`modal_close-btn`)
 6. Records the result, then starts the next CSV row
 
 The zip contains only `data/tasks.csv.example`; updating the scripts will not

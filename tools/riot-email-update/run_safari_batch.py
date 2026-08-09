@@ -242,6 +242,8 @@ def run_one(
         "No Verify Your Email link",
         "log-out-everywhere-button",
         "LOG OUT EVERYWHERE",
+        "modal_close-btn",
+        "Confirm modal",
         "Timed out",
         "Allow JavaScript",
     ):

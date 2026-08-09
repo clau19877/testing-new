@@ -1,4 +1,4 @@
-BUILD 2026-08-09k
-Fix IMAP verify-link discovery on iCloud (BODY.PEEK + mangled Riot From).
-Verified live: finds "Verify Your Email" → ap.account.riotgames.com link.
+BUILD 2026-08-09l
+Logout: click log-out-everywhere-button, then Confirm (modal_close-btn).
+Includes iCloud IMAP verify-link fix from 09k.
 Zip does not include data/tasks.csv.

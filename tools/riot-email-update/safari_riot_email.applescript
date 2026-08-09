@@ -276,8 +276,17 @@ on run argv
 		set logoutResult to safariJS(jsClickLogoutEverywhere())
 		logLine(logoutResult)
 		if logoutResult does not contain "clicked-logout" then error "Could not click LOG OUT EVERYWHERE (" & logoutResult & ")."
-		delay 1
-		logLine(safariJS(jsConfirmLogoutEverywhere()))
+		delay 0.8
+
+		-- Confirm modal: button[data-testid=modal_close-btn] title="Confirm"
+		logLine("Waiting for Confirm modal (modal_close-btn)…")
+		set confirmReady to waitForLogoutConfirmButton(15)
+		logLine("Confirm button ready: " & confirmReady)
+		if confirmReady is not "ready" then error "LOG OUT EVERYWHERE Confirm modal (modal_close-btn) did not appear."
+		logLine("Clicking Confirm…")
+		set confirmResult to safariJS(jsConfirmLogoutEverywhere())
+		logLine(confirmResult)
+		if confirmResult does not contain "confirmed-logout" then error "Could not click Confirm on logout modal (" & confirmResult & ")."
 		delay 2
 
 		if not batchMode then
@@ -336,7 +345,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-09k")
+	logLine("BUILD 2026-08-09l")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -686,37 +695,72 @@ on jsClickVerifyOnLanding()
 end jsClickVerifyOnLanding
 
 on jsClickLogoutEverywhere()
+	-- Exact Riot control:
+	-- <button type="submit" data-testid="log-out-everywhere-button" title="LOG OUT EVERYWHERE">
 	return "(function () {" & ¬
 		"  var btn = document.querySelector('button[data-testid=log-out-everywhere-button]');" & ¬
 		"  if (!btn) {" & ¬
-		"    var cands = Array.from(document.querySelectorAll('button'));" & ¬
+		"    var cands = Array.from(document.querySelectorAll('button[type=submit], button'));" & ¬
 		"    btn = cands.find(function (b) {" & ¬
-		"      var t = ((b.textContent || '') + ' ' + (b.getAttribute('title') || '')).toLowerCase();" & ¬
+		"      var t = ((b.getAttribute('title') || '') + ' ' + (b.textContent || '')).toLowerCase();" & ¬
 		"      return t.indexOf('log out everywhere') >= 0;" & ¬
 		"    }) || null;" & ¬
 		"  }" & ¬
 		"  if (!btn) return 'no-logout-button';" & ¬
-		"  btn.scrollIntoView({ block: 'center' });" & ¬
+		"  try { btn.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e1) {}" & ¬
+		"  try { btn.focus(); } catch (e2) {}" & ¬
 		"  btn.click();" & ¬
-		"  return 'clicked-logout';" & ¬
+		"  return 'clicked-logout:' + ((btn.getAttribute('title') || btn.textContent || '').trim().slice(0, 40));" & ¬
 		"})();"
 end jsClickLogoutEverywhere
 
-on jsConfirmLogoutEverywhere()
-	-- Riot may show a confirmation dialog after LOG OUT EVERYWHERE.
+on jsProbeLogoutConfirmButton()
+	-- Confirm modal after LOG OUT EVERYWHERE:
+	-- <button type="submit" data-testid="modal_close-btn" title="Confirm">
 	return "(function () {" & ¬
-		"  var roots = Array.from(document.querySelectorAll('[role=dialog], .modal, .ds-modal'));" & ¬
+		"  var btn = document.querySelector('button[data-testid=modal_close-btn]');" & ¬
+		"  if (!btn) return 'missing';" & ¬
+		"  if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') return 'disabled';" & ¬
+		"  var t = ((btn.getAttribute('title') || '') + ' ' + (btn.textContent || '')).toLowerCase();" & ¬
+		"  if (t.indexOf('confirm') < 0 && t.indexOf('log out') < 0) return 'missing';" & ¬
+		"  return 'ready';" & ¬
+		"})();"
+end jsProbeLogoutConfirmButton
+
+on waitForLogoutConfirmButton(timeoutSec)
+	set deadline to (current date) + timeoutSec
+	repeat while (current date) < deadline
+		set confirmState to "missing"
+		try
+			set confirmState to safariJS(jsProbeLogoutConfirmButton()) as text
+		end try
+		if confirmState is "ready" then return "ready"
+		delay 0.4
+	end repeat
+	return "timeout"
+end waitForLogoutConfirmButton
+
+on jsConfirmLogoutEverywhere()
+	-- Prefer exact Riot Confirm control: data-testid=modal_close-btn title=Confirm
+	return "(function () {" & ¬
+		"  var btn = document.querySelector('button[data-testid=modal_close-btn]');" & ¬
+		"  if (btn && !btn.disabled) {" & ¬
+		"    var label = ((btn.getAttribute('title') || '') + ' ' + (btn.textContent || '')).trim();" & ¬
+		"    btn.click();" & ¬
+		"    return 'confirmed-logout:modal_close-btn:' + label.slice(0, 40);" & ¬
+		"  }" & ¬
+		"  var roots = Array.from(document.querySelectorAll('[role=dialog], .modal, .ds-modal, [class*=modal]'));" & ¬
 		"  var scope = roots.length ? roots[roots.length - 1] : document;" & ¬
-		"  var btns = Array.from(scope.querySelectorAll('button, input[type=submit], [role=button]'));" & ¬
+		"  var btns = Array.from(scope.querySelectorAll('button[type=submit], button, input[type=submit]'));" & ¬
 		"  for (var i = 0; i < btns.length; i++) {" & ¬
-		"    var btn = btns[i];" & ¬
-		"    var txt = ((btn.textContent || btn.value || '') + ' ' + (btn.getAttribute('title') || '') + ' ' + (btn.getAttribute('data-testid') || '')).toLowerCase();" & ¬
-		"    if (/log out|confirm|yes/.test(txt) && !btn.disabled) {" & ¬
-		"      btn.click();" & ¬
-		"      return 'confirmed-logout:' + txt.trim().slice(0, 50);" & ¬
+		"    var el = btns[i];" & ¬
+		"    var txt = ((el.textContent || el.value || '') + ' ' + (el.getAttribute('title') || '') + ' ' + (el.getAttribute('data-testid') || '')).toLowerCase();" & ¬
+		"    if ((txt.indexOf('confirm') >= 0 || txt.indexOf('log out everywhere') >= 0) && !el.disabled) {" & ¬
+		"      el.click();" & ¬
+		"      return 'confirmed-logout:fallback:' + txt.trim().slice(0, 50);" & ¬
 		"    }" & ¬
 		"  }" & ¬
-		"  return 'no-confirmation-needed';" & ¬
+		"  return 'no-confirm-button';" & ¬
 		"})();"
 end jsConfirmLogoutEverywhere
 
@@ -995,9 +1039,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-09k" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-09l" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-09k" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-09l" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -1018,7 +1062,7 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-09k" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-09l" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
 
 	set py to "/usr/bin/python3"
 	try
