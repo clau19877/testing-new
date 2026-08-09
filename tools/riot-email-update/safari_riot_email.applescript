@@ -178,43 +178,72 @@ on run argv
 	if emailFill does not contain "filled=1" and emailFill does not contain "ok" then
 		error "Failed to type new email into personal-information-card__emailAddress (" & emailFill & ")"
 	end if
-	delay 0.5
+	delay 0.6
 
-	-- Click the email field again (as requested), then save/submit
-	logLine("Clicking email field again…")
-	logLine(safariJS(jsClickEmailField()))
-	delay 0.3
-
-	logLine("Submitting email change…")
-	set submitResult to safariJS(jsClickSubmitEmail())
+	-- Click SAVE AND VERIFY (personal-information-card__saveChanges-btn)
+	set verifySinceEpoch to do shell script "date +%s"
+	logLine("Waiting for SAVE AND VERIFY button…")
+	set saveReady to waitForSaveButton(20)
+	logLine("Save button ready: " & saveReady)
+	if saveReady is not "ready" then error "SAVE AND VERIFY button did not become enabled (personal-information-card__saveChanges-btn)."
+	logLine("Clicking SAVE AND VERIFY…")
+	set submitResult to safariJS(jsClickSaveAndVerify())
 	logLine(submitResult)
-	delay 2.5
+	if submitResult does not contain "clicked-save" then error "Could not click SAVE AND VERIFY (" & submitResult & ")."
+	delay 3
 
-	if not batchMode then
-		display dialog "Review the Safari window: confirm the new email looks right, then click OK to continue (verify code next if needed)." buttons {"OK"} default button 1
+	-- If an hCaptcha challenge becomes visible, allow solving (skip in batch)
+	if safariJS(jsCaptchaVisible()) is "captcha" then
+		if batchMode then
+			logLine("hCaptcha challenge visible during save — waiting up to 60s for auto/solve…")
+			set waited to 0
+			repeat while waited < 60 and (safariJS(jsCaptchaVisible()) is "captcha")
+				delay 3
+				set waited to waited + 3
+			end repeat
+		else
+			display dialog "Solve the hCaptcha in Safari, then click OK." buttons {"OK"} default button 1
+		end if
 	end if
+	delay 2
 
-	if verifyCode is "" then
-		set verifyCode to fetchImapCode("NEW_IMAP")
-		if verifyCode is "" then set verifyCode to fetchImapCode("IMAP")
-	end if
-	if verifyCode is "" and not batchMode then
-		try
-			set verifyCode to text returned of (display dialog "New-email verify code (leave blank to finish manually in Safari):" default answer "")
-		on error
-			set verifyCode to ""
-		end try
-	end if
+	-- Email verification: fetch the "Verify Your Email" link via IMAP and open it.
+	logLine("Fetching verification link via IMAP…")
+	set verifyLink to fetchImapVerifyLink("NEW_IMAP", verifySinceEpoch)
+	if verifyLink is "" then set verifyLink to fetchImapVerifyLink("IMAP", verifySinceEpoch)
 
-	if verifyCode is not "" then
-		safariJS(jsSubmitCode(verifyCode, "verify"))
+	if verifyLink is not "" then
+		logLine("Opening verification link in Safari…")
+		tell application "Safari" to set URL of document 1 to verifyLink
+		delay 4
+		-- Some landing pages need a confirm/verify click.
+		logLine(safariJS(jsClickVerifyOnLanding()))
 		delay 2
-	else if batchMode then
-		logLine("No verify code from IMAP — assuming save without code / check manually later")
+	else
+		if batchMode then
+			error "No Verify Your Email link found via IMAP within timeout."
+		else
+			display dialog "No verification link found via IMAP. Verify the email manually in Safari, then click OK." buttons {"OK"} default button 1
+		end if
 	end if
 
+	-- Log out everywhere, then move on to the next account.
+	logLine("Returning to account page to log out everywhere…")
+	tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
+	delay 3
+	set logoutReady to waitForLogoutButton(20)
+	logLine("Logout button ready: " & logoutReady)
+	if logoutReady is not "ready" then error "Could not find log-out-everywhere-button after verification."
+	logLine("Clicking LOG OUT EVERYWHERE…")
+	set logoutResult to safariJS(jsClickLogoutEverywhere())
+	logLine(logoutResult)
+	if logoutResult does not contain "clicked-logout" then error "Could not click LOG OUT EVERYWHERE (" & logoutResult & ")."
+	delay 1
+	logLine(safariJS(jsConfirmLogoutEverywhere()))
+	delay 2
+
 	if not batchMode then
-		display dialog "Safari flow finished. Confirm the email change completed in the Safari window." buttons {"OK"} default button 1
+		display dialog "Finished this account (email changed + verify attempted + logged out)." buttons {"OK"} default button 1
 	end if
 	logLine("SUCCESS")
 	return "done"
@@ -437,42 +466,128 @@ on jsFillEmail(emailText)
 		"})(" & jsonString(emailText) & ");"
 end jsFillEmail
 
-on jsClickSubmitEmail()
+on jsClickSaveAndVerify()
+	-- Riot save button appears once the email field is dirty:
+	-- button data-testid=personal-information-card__saveChanges-btn title=SAVE AND VERIFY
 	return "(function () {" & ¬
-		"  const field = document.querySelector('input[data-testid=personal-information-card__emailAddress]');" & ¬
-		"  const testIdHints = ['personal-information', 'email', 'save', 'submit', 'confirm', 'continue', 'send'];" & ¬
-		"  const buttons = Array.from(document.querySelectorAll('button, input[type=submit], [role=button]'));" & ¬
-		"  function score(el) {" & ¬
-		"    const t = ((el.textContent || el.value || '') + ' ' + (el.getAttribute('data-testid') || '') + ' ' + (el.getAttribute('aria-label') || '')).toLowerCase();" & ¬
-		"    let s = 0;" & ¬
-		"    if (/save|submit|confirm|continue|send|update/.test(t)) s += 3;" & ¬
-		"    if (t.includes('email')) s += 2;" & ¬
-		"    if (t.includes('personal-information')) s += 4;" & ¬
-		"    if (el.disabled || el.getAttribute('aria-disabled') === 'true') s -= 10;" & ¬
-		"    return s;" & ¬
+		"  var btn = document.querySelector('button[data-testid=personal-information-card__saveChanges-btn]');" & ¬
+		"  if (!btn) {" & ¬
+		"    var cands = Array.from(document.querySelectorAll('#personal-information button, .personal-information-card__buttonSection button'));" & ¬
+		"    btn = cands.find(function (b) {" & ¬
+		"      var t = ((b.textContent || '') + ' ' + (b.getAttribute('title') || '')).toLowerCase();" & ¬
+		"      return t.indexOf('save') >= 0;" & ¬
+		"    }) || null;" & ¬
 		"  }" & ¬
-		"  let best = null, bestScore = 0;" & ¬
-		"  for (const el of buttons) {" & ¬
-		"    const sc = score(el);" & ¬
-		"    if (sc > bestScore) { bestScore = sc; best = el; }" & ¬
-		"  }" & ¬
-		"  if (best && bestScore > 0) {" & ¬
-		"    best.click();" & ¬
-		"    return 'clicked:' + ((best.getAttribute('data-testid') || best.textContent || best.value || '').toString().trim().slice(0, 60));" & ¬
-		"  }" & ¬
-		"  if (field) {" & ¬
-		"    field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));" & ¬
-		"    field.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));" & ¬
-		"    const form = field.closest('form');" & ¬
-		"    if (form) {" & ¬
-		"      if (form.requestSubmit) form.requestSubmit(); else form.submit();" & ¬
-		"      return 'submitted-form';" & ¬
-		"    }" & ¬
-		"    return 'pressed-enter';" & ¬
-		"  }" & ¬
-		"  return 'no-submit';" & ¬
+		"  if (!btn) return 'no-save-button';" & ¬
+		"  if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') return 'save-button-disabled';" & ¬
+		"  btn.scrollIntoView({ block: 'center' });" & ¬
+		"  btn.click();" & ¬
+		"  return 'clicked-save:' + ((btn.getAttribute('title') || btn.textContent || '').trim().slice(0, 40));" & ¬
 		"})();"
-end jsClickSubmitEmail
+end jsClickSaveAndVerify
+
+on jsCaptchaVisible()
+	return "(function () {" & ¬
+		"  var frames = Array.from(document.querySelectorAll('iframe[src*=hcaptcha.com]'));" & ¬
+		"  for (var i = 0; i < frames.length; i++) {" & ¬
+		"    var f = frames[i];" & ¬
+		"    var r = f.getBoundingClientRect();" & ¬
+		"    var vis = r.width > 50 && r.height > 50 && f.offsetParent !== null;" & ¬
+		"    if (vis && (f.src.indexOf('frame=challenge') >= 0 || f.src.indexOf('checkbox') >= 0)) return 'captcha';" & ¬
+		"  }" & ¬
+		"  return 'none';" & ¬
+		"})();"
+end jsCaptchaVisible
+
+on jsClickVerifyOnLanding()
+	return "(function () {" & ¬
+		"  var btns = Array.from(document.querySelectorAll('button, a[role=button], input[type=submit], a'));" & ¬
+		"  for (var i = 0; i < btns.length; i++) {" & ¬
+		"    var el = btns[i];" & ¬
+		"    var t = ((el.textContent || el.value || '') + ' ' + (el.getAttribute('data-testid') || '')).toLowerCase();" & ¬
+		"    if (/verify email|verify your email|verify|confirm email|confirm/.test(t)) {" & ¬
+		"      el.click();" & ¬
+		"      return 'landing-clicked:' + t.trim().slice(0, 40);" & ¬
+		"    }" & ¬
+		"  }" & ¬
+		"  return 'landing-no-button';" & ¬
+		"})();"
+end jsClickVerifyOnLanding
+
+on jsClickLogoutEverywhere()
+	return "(function () {" & ¬
+		"  var btn = document.querySelector('button[data-testid=log-out-everywhere-button]');" & ¬
+		"  if (!btn) {" & ¬
+		"    var cands = Array.from(document.querySelectorAll('button'));" & ¬
+		"    btn = cands.find(function (b) {" & ¬
+		"      var t = ((b.textContent || '') + ' ' + (b.getAttribute('title') || '')).toLowerCase();" & ¬
+		"      return t.indexOf('log out everywhere') >= 0;" & ¬
+		"    }) || null;" & ¬
+		"  }" & ¬
+		"  if (!btn) return 'no-logout-button';" & ¬
+		"  btn.scrollIntoView({ block: 'center' });" & ¬
+		"  btn.click();" & ¬
+		"  return 'clicked-logout';" & ¬
+		"})();"
+end jsClickLogoutEverywhere
+
+on jsConfirmLogoutEverywhere()
+	-- Riot may show a confirmation dialog after LOG OUT EVERYWHERE.
+	return "(function () {" & ¬
+		"  var roots = Array.from(document.querySelectorAll('[role=dialog], .modal, .ds-modal'));" & ¬
+		"  var scope = roots.length ? roots[roots.length - 1] : document;" & ¬
+		"  var btns = Array.from(scope.querySelectorAll('button, input[type=submit], [role=button]'));" & ¬
+		"  for (var i = 0; i < btns.length; i++) {" & ¬
+		"    var btn = btns[i];" & ¬
+		"    var txt = ((btn.textContent || btn.value || '') + ' ' + (btn.getAttribute('title') || '') + ' ' + (btn.getAttribute('data-testid') || '')).toLowerCase();" & ¬
+		"    if (/log out|confirm|yes/.test(txt) && !btn.disabled) {" & ¬
+		"      btn.click();" & ¬
+		"      return 'confirmed-logout:' + txt.trim().slice(0, 50);" & ¬
+		"    }" & ¬
+		"  }" & ¬
+		"  return 'no-confirmation-needed';" & ¬
+		"})();"
+end jsConfirmLogoutEverywhere
+
+on jsProbeSaveButton()
+	return "(function () {" & ¬
+		"  var btn = document.querySelector('button[data-testid=personal-information-card__saveChanges-btn]');" & ¬
+		"  if (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true') return 'ready';" & ¬
+		"  return 'missing';" & ¬
+		"})();"
+end jsProbeSaveButton
+
+on waitForSaveButton(timeoutSec)
+	set deadline to (current date) + timeoutSec
+	repeat while (current date) < deadline
+		set saveState to "missing"
+		try
+			set saveState to safariJS(jsProbeSaveButton()) as text
+		end try
+		if saveState is "ready" then return "ready"
+		delay 0.5
+	end repeat
+	return "timeout"
+end waitForSaveButton
+
+on jsProbeLogoutButton()
+	return "(function () {" & ¬
+		"  return document.querySelector('button[data-testid=log-out-everywhere-button]') ? 'ready' : 'missing';" & ¬
+		"})();"
+end jsProbeLogoutButton
+
+on waitForLogoutButton(timeoutSec)
+	set deadline to (current date) + timeoutSec
+	repeat while (current date) < deadline
+		set logoutState to "missing"
+		try
+			set logoutState to safariJS(jsProbeLogoutButton()) as text
+		end try
+		if logoutState is "ready" then return "ready"
+		delay 0.5
+	end repeat
+	return "timeout"
+end waitForLogoutButton
 
 on jsProbeEmailField()
 	-- Keep JS in a handler; avoid short var names like "st" (Script Editor rejects them).
@@ -654,9 +769,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to toolkitRootFromCsv(found)
-		return "BUILD 2026-08-09e" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder."
+		return "BUILD 2026-08-09f" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder."
 	end if
-	return "BUILD 2026-08-09e" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-09f" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -671,7 +786,7 @@ on runBatchFromCsv()
 
 	set dir to toolkitRootFromCsv(csvPath)
 
-	display dialog "BUILD 2026-08-09e" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-09f" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
 
 	set py to "/usr/bin/python3"
 	try
@@ -713,3 +828,22 @@ on fetchImapCode(prefix)
 	end try
 	return ""
 end fetchImapCode
+
+on fetchImapVerifyLink(prefix, sinceEpoch)
+	-- Wait for a Riot email titled "Verify Your Email" and return its Verify Email URL.
+	try
+		set dir to scriptDir()
+		set py to do shell script "if [ -x " & quoted form of (dir & "/.venv/bin/python") & " ]; then echo " & quoted form of (dir & "/.venv/bin/python") & "; else command -v python3; fi"
+		set helperPath to dir & "/fetch_riot_verify_link.py"
+		set cmd to "cd " & quoted form of dir & " && TOOL_DIR=" & quoted form of dir & " " & quoted form of py & " " & quoted form of helperPath & " --prefix " & quoted form of prefix & " --timeout 180 --since-epoch " & quoted form of sinceEpoch & " --subject " & quoted form of "Verify Your Email"
+		logLine("IMAP verify-link fetch (" & prefix & ")…")
+		set verifyURL to do shell script cmd
+		if verifyURL is not "" then
+			logLine("IMAP verification link received (" & prefix & ")")
+			return verifyURL
+		end if
+	on error errMsg
+		logLine("IMAP verify-link fetch skipped/failed: " & errMsg)
+	end try
+	return ""
+end fetchImapVerifyLink

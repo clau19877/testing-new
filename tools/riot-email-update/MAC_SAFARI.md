@@ -56,3 +56,18 @@ RiotUser,YourRiotPass,you@icloud.com,xxxx-xxxx-xxxx-xxxx,new@icloud.com,imap.mai
 ```
 
 Results: `success.txt` / `failed.txt` in the same folder as the scripts.
+
+## Account flow
+
+For each CSV row, the runner:
+
+1. Logs in and waits for `https://account.riotgames.com/`
+2. Fills `personal-information-card__emailAddress`
+3. Clicks `personal-information-card__saveChanges-btn` (**SAVE AND VERIFY**)
+4. Waits via IMAP for a **Verify Your Email** message and opens its
+   **Verify Email** link
+5. Returns to the account page and clicks `log-out-everywhere-button`
+6. Records the result, then starts the next CSV row
+
+The zip contains only `data/tasks.csv.example`; updating the scripts will not
+replace your existing `data/tasks.csv`.

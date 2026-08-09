@@ -207,6 +207,10 @@ def run_one(row: dict[str, str], *, entry_url: str, skip_email: bool) -> tuple[b
         "rejected username/password",
         "hCaptcha",
         "MFA required",
+        "SAVE AND VERIFY",
+        "No Verify Your Email link",
+        "log-out-everywhere-button",
+        "LOG OUT EVERYWHERE",
         "Timed out",
         "Allow JavaScript",
     ):

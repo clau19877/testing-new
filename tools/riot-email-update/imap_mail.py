@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import email
+import html
 import imaplib
 import re
 import time
@@ -24,9 +25,20 @@ CODE_PATTERNS = (
     re.compile(r"(?:code|passcode|verification)[^\d]{0,40}(\d{6})", re.I),
 )
 
-VERIFY_LINK_PATTERN = re.compile(
-    r"https?://[^\s\"'<>]*riotgames\.com[^\s\"'<>]*(?:verify|confirm|email)[^\s\"'<>]*",
-    re.I,
+VERIFY_LINK_PATTERNS = (
+    # Prefer a link whose URL itself clearly identifies the verification action.
+    re.compile(
+        r"https?://[^\s\"'<>]*(?:riotgames\.com|riotgames\.com\.cn)"
+        r"[^\s\"'<>]*(?:verify|confirm|email)[^\s\"'<>]*",
+        re.I,
+    ),
+    # Riot email templates may use a tracking URL; select the href around
+    # the visible "Verify Email" call-to-action.
+    re.compile(
+        r'href\s*=\s*["\'](https?://[^"\']+)["\'][^>]*>'
+        r"(?:(?!</a>).){0,500}?(?:verify\s+(?:your\s+)?email|confirm\s+email)",
+        re.I | re.S,
+    ),
 )
 
 
@@ -111,10 +123,14 @@ def _extract_code(text: str) -> str | None:
 
 
 def _extract_verify_link(text: str) -> str | None:
-    m = VERIFY_LINK_PATTERN.search(text)
-    if not m:
-        return None
-    return m.group(0).rstrip(").,]}>\"'")
+    decoded = html.unescape(text)
+    for pattern in VERIFY_LINK_PATTERNS:
+        match = pattern.search(decoded)
+        if not match:
+            continue
+        url = match.group(1) if match.lastindex else match.group(0)
+        return html.unescape(url).rstrip(").,]}>\"'")
+    return None
 
 
 def _is_riot_sender(sender: str) -> bool:
