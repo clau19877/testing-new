@@ -1,7 +1,4 @@
-BUILD 2026-08-09t
-On success: remove that row from tasks.csv automatically.
-failed.txt is now paste-ready CSV (same columns as tasks.csv);
-riot_password set to new_password for rerun when present.
-Reasons/logs → failed_reasons.txt.
-Hard-stop (09s) + IMAP fixes (09r) kept.
+BUILD 2026-08-09u
+Fix AppleScript syntax: no ";" between do shell script lines.
+Auto-prune tasks.csv + CSV failed.txt (09t) kept.
 Zip does not include data/tasks.csv.

@@ -103,7 +103,7 @@ IMAP_HOST=imap.mail.me.com IMAP_USER='you@icloud.com' IMAP_PASSWORD='app-passwor
 ```
 
 If Script Editor reports an error about setting `line` / `st` / `key`, update to
-the latest zip (**BUILD 2026-08-09t** or newer) — those names are reserved in
+the latest zip (**BUILD 2026-08-09u** or newer) — those names are reserved in
 AppleScript.
 
 ## Account flow
@@ -131,7 +131,7 @@ replace your existing `data/tasks.csv`.
 - Terminal: press **Ctrl+C**
 - Or double-click **STOP_BATCH.command**
 
-**BUILD 2026-08-09t+** hard-kills the whole tree: `run_safari_batch.py`,
+**BUILD 2026-08-09u+** hard-kills the whole tree: `run_safari_batch.py`,
 `osascript` / `safari_riot_email.applescript`, and IMAP helpers
 (`fetch_riot_verify_link.py`). Remaining CSV rows do not start. If anything
 still looks stuck, run STOP again or quit the Terminal / Script Editor window.

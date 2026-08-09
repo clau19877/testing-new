@@ -1661,7 +1661,8 @@ on runBatchFromCsv()
 	logLine("Using toolkit scripts: " & dir)
 	-- Clear any previous stop flag; write PID so STOP_BATCH.command / Script Editor Stop can kill it.
 	try
-		do shell script "rm -f " & quoted form of (dir & "/.safari_batch_stop"); do shell script "chmod +x " & quoted form of (dir & "/stop_safari_batch.sh") & " " & quoted form of (dir & "/STOP_BATCH.command") & " 2>/dev/null || true"
+		do shell script "rm -f " & quoted form of (dir & "/.safari_batch_stop")
+		do shell script "chmod +x " & quoted form of (dir & "/stop_safari_batch.sh") & " " & quoted form of (dir & "/STOP_BATCH.command") & " 2>/dev/null || true"
 	end try
 	-- Background the batch; poll until it exits OR stop flag appears (Script Editor Stop / STOP_BATCH).
 	set batchCmd to "cd " & quoted form of dir & " && rm -f .safari_batch_stop && TOOL_DIR=" & quoted form of dir & " " & quoted form of py & " " & quoted form of (dir & "/run_safari_batch.py") & " " & quoted form of csvPath & " > " & quoted form of (dir & "/.safari_batch_console.log") & " 2>&1 & echo $! > " & quoted form of (dir & "/.safari_batch.pid") & "; pid=$(cat " & quoted form of (dir & "/.safari_batch.pid") & "); while kill -0 \"$pid\" 2>/dev/null; do if [ -f " & quoted form of (dir & "/.safari_batch_stop") & " ]; then /bin/bash " & quoted form of (dir & "/stop_safari_batch.sh") & " >/dev/null 2>&1; break; fi; sleep 0.5; done; wait \"$pid\" 2>/dev/null; exit 0"
