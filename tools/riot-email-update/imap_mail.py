@@ -216,10 +216,16 @@ class ImapInbox:
         self.config = config
 
     def _login(self) -> imaplib.IMAP4:
+        # Socket timeout so a stalled IMAP server cannot pin the Safari helper forever.
+        sock_timeout = 45.0
         if self.config.use_ssl:
-            client: imaplib.IMAP4 = imaplib.IMAP4_SSL(self.config.host, self.config.port)
+            client: imaplib.IMAP4 = imaplib.IMAP4_SSL(
+                self.config.host, self.config.port, timeout=sock_timeout
+            )
         else:
-            client = imaplib.IMAP4(self.config.host, self.config.port)
+            client = imaplib.IMAP4(
+                self.config.host, self.config.port, timeout=sock_timeout
+            )
         client.login(self.config.user, self.config.password)
         return client
 

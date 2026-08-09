@@ -19,6 +19,8 @@
 -- Per-run debug log path (set by logInit). Empty means file logging is off.
 property logFilePath : ""
 property logAccountLabel : ""
+-- Cooperative stop: STOP_BATCH.command / run_safari_batch.py write this file.
+property stopFlagPath : ""
 
 
 on run argv
@@ -112,10 +114,12 @@ on run argv
 
 		logStep("open_entry")
 		logLine("Opening Safari → docs.qq.com entry…")
-		tell application "Safari"
-			activate
-			set URL of document 1 to entryURL
-		end tell
+		with timeout of 45 seconds
+			tell application "Safari"
+				activate
+				set URL of document 1 to entryURL
+			end tell
+		end timeout
 		humanDelay(2.5, 4.5)
 		assertNoCloudflare("after_entry")
 		waitForContinueReady(20)
@@ -205,7 +209,7 @@ on run argv
 			if phase is not "logged_in" and phase is not "account" then
 				set cur to ""
 				try
-					tell application "Safari" to set cur to URL of document 1
+					set cur to safariCurrentURL()
 				end try
 				logLine("Post-login URL fallback: " & cur)
 				if cur contains "account.riotgames.com" and cur does not contain "log-in" then
@@ -215,7 +219,7 @@ on run argv
 					set phase to waitForPostLogin(20)
 					logLine("Post-login extra phase: " & phase)
 					try
-						tell application "Safari" to set cur to URL of document 1
+						set cur to safariCurrentURL()
 					end try
 					if not (cur contains "account.riotgames.com" and cur does not contain "log-in") then
 						if phase is not "logged_in" and phase is not "account" then
@@ -232,7 +236,7 @@ on run argv
 		if emailReady is not "ready" then
 			logStep("open_account")
 			logLine("Opening account settings…")
-			tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
+			safariGoTo("https://account.riotgames.com/")
 			humanDelay(0.8, 1.5)
 		end if
 
@@ -243,7 +247,7 @@ on run argv
 			set pwReady to waitForPasswordFields(20)
 			logLine("Password fields ready: " & pwReady)
 			if pwReady is not "ready" then
-				tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
+				safariGoTo("https://account.riotgames.com/")
 				humanDelay(1.0, 1.8)
 				set pwReady to waitForPasswordFields(20)
 				logLine("Password fields ready (retry): " & pwReady)
@@ -296,7 +300,7 @@ on run argv
 						exit repeat
 					end if
 				end try
-				delay 0.8
+				waitTick(0.8)
 				set settleWaited to settleWaited + 1
 			end repeat
 			logLine("Restoring account session with new password if needed…")
@@ -371,7 +375,7 @@ on run argv
 						set captchaState to safariJS(jsCaptchaVisible())
 					end try
 					if captchaState is not "captcha" then exit repeat
-					delay 3
+					waitTick(3)
 					set waited to waited + 3
 				end repeat
 			else
@@ -388,11 +392,11 @@ on run argv
 
 		if verifyLink is not "" then
 			logLine("Opening verification link in Safari…")
-			tell application "Safari" to set URL of document 1 to verifyLink
-			delay 4
+			safariGoTo(verifyLink)
+			waitTick(4)
 			-- Some landing pages need a confirm/verify click.
 			logLine(safariJS(jsClickVerifyOnLanding()))
-			delay 2
+			waitTick(2)
 		else
 			if batchMode then
 				error "No Verify Your Email link found via IMAP within timeout."
@@ -469,6 +473,9 @@ end logSafeLabel
 on logInit(accountLabel)
 	-- Create (or reuse) debug/logs/safari_YYYYMMDD_HHMMSS_<user>.log for error investigation.
 	set logAccountLabel to accountLabel as text
+	try
+		set stopFlagPath to scriptDir() & "/.safari_batch_stop"
+	end try
 	set existing to envOrEmpty("SAFARI_LOG_PATH")
 	if existing is not "" then
 		set logFilePath to existing
@@ -482,7 +489,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-09w")
+	logLine("BUILD 2026-08-09x")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -528,14 +535,16 @@ on dumpDebug(reasonLabel)
 	set curURL to ""
 	set curName to ""
 	try
-		tell application "Safari"
-			try
-				set curURL to URL of document 1
-			end try
-			try
-				set curName to name of document 1
-			end try
-		end tell
+		with timeout of 15 seconds
+			tell application "Safari"
+				try
+					set curURL to URL of document 1
+				end try
+				try
+					set curName to name of document 1
+				end try
+			end tell
+		end timeout
 	on error errMsg
 		logLine("safari dump failed: " & errMsg)
 	end try
@@ -578,28 +587,74 @@ on replaceText(theText, oldString, newString)
 	return theText
 end replaceText
 
+on assertNotStopped()
+	-- Exit promptly when STOP_BATCH / Ctrl+C wrote .safari_batch_stop.
+	try
+		if stopFlagPath is "" then set stopFlagPath to scriptDir() & "/.safari_batch_stop"
+		do shell script "/bin/test -f " & quoted form of stopFlagPath
+		error "Batch stop requested (.safari_batch_stop)."
+	on error errMsg number errNum
+		if errMsg contains "Batch stop requested" then error errMsg number errNum
+	end try
+end assertNotStopped
+
+on waitTick(pauseSec)
+	-- Short pause that still lets Stop / stop-flag land between iterations.
+	assertNotStopped()
+	set secs to pauseSec as real
+	if secs < 0 then set secs to 0
+	delay secs
+end waitTick
+
 on safariJS(js)
 	-- Always return text. During page navigations Safari often yields "no result" (-2763).
-	tell application "Safari"
-		try
-			set jsResult to do JavaScript js in document 1
-			if jsResult is missing value then return ""
+	-- with timeout: Safari Apple Events can hang forever without this.
+	assertNotStopped()
+	with timeout of 30 seconds
+		tell application "Safari"
 			try
-				return jsResult as text
+				set jsResult to do JavaScript js in document 1
+				if jsResult is missing value then return ""
+				try
+					return jsResult as text
+				on error
+					return ""
+				end try
+			on error errMsg number errNum
+				if errNum is -1712 then error "Safari JavaScript timed out (30s)." number errNum
+				if errNum is -1728 or errMsg contains "JavaScript from Apple Events" or errMsg contains "Allow JavaScript" then
+					error "Enable Safari → Develop → Allow JavaScript from Apple Events, then re-run. (" & errMsg & ")"
+				end if
+				-- -2763: expression did not return a result (page navigating / empty JS return)
+				if errNum is -2763 then return ""
+				if errMsg contains "沒有傳回結果" or errMsg contains "did not return a result" then return ""
+				error errMsg number errNum
+			end try
+		end tell
+	end timeout
+end safariJS
+
+on safariGoTo(destURL)
+	-- Navigate document 1 with a hard Apple Event ceiling.
+	assertNotStopped()
+	with timeout of 45 seconds
+		tell application "Safari"
+			set URL of document 1 to destURL
+		end tell
+	end timeout
+end safariGoTo
+
+on safariCurrentURL()
+	with timeout of 15 seconds
+		tell application "Safari"
+			try
+				return URL of document 1
 			on error
 				return ""
 			end try
-		on error errMsg number errNum
-			if errNum is -1728 or errMsg contains "JavaScript from Apple Events" or errMsg contains "Allow JavaScript" then
-				error "Enable Safari → Develop → Allow JavaScript from Apple Events, then re-run. (" & errMsg & ")"
-			end if
-			-- -2763: expression did not return a result (page navigating / empty JS return)
-			if errNum is -2763 then return ""
-			if errMsg contains "沒有傳回結果" or errMsg contains "did not return a result" then return ""
-			error errMsg number errNum
-		end try
-	end tell
-end safariJS
+		end tell
+	end timeout
+end safariCurrentURL
 
 -- JS builders: keep double-quotes out of AppleScript string literals.
 -- Use only single quotes in the JS source text below.
@@ -906,7 +961,7 @@ on waitForPasswordFields(timeoutSec)
 			set pwState to safariJS(jsProbePasswordFields()) as text
 		end try
 		if pwState is "ready" then return "ready"
-		delay 0.35
+		waitTick(0.35)
 	end repeat
 	return "timeout"
 end waitForPasswordFields
@@ -967,7 +1022,7 @@ on waitForPasswordSaveButton(timeoutSec)
 			set pwSaveState to safariJS(jsProbePasswordSaveButton()) as text
 		end try
 		if pwSaveState is "ready" then return "ready"
-		delay 0.35
+		waitTick(0.35)
 	end repeat
 	return "timeout"
 end waitForPasswordSaveButton
@@ -1080,7 +1135,7 @@ on waitForLogoutConfirmButton(timeoutSec)
 			set confirmState to safariJS(jsProbeLogoutConfirmButton()) as text
 		end try
 		if confirmState is "ready" then return "ready"
-		delay 0.4
+		waitTick(0.4)
 	end repeat
 	return "timeout"
 end waitForLogoutConfirmButton
@@ -1125,7 +1180,7 @@ on waitForSaveButton(timeoutSec)
 			set saveState to safariJS(jsProbeSaveButton()) as text
 		end try
 		if saveState is "ready" then return "ready"
-		delay 0.5
+		waitTick(0.5)
 	end repeat
 	return "timeout"
 end waitForSaveButton
@@ -1144,7 +1199,7 @@ on waitForLogoutButton(timeoutSec)
 			set logoutState to safariJS(jsProbeLogoutButton()) as text
 		end try
 		if logoutState is "ready" then return "ready"
-		delay 0.5
+		waitTick(0.5)
 	end repeat
 	return "timeout"
 end waitForLogoutButton
@@ -1198,30 +1253,38 @@ on jsDumpPageState()
 end jsDumpPageState
 
 on humanDelay(minSec, maxSec)
-	-- Jittered pause so pacing is less robotic.
+	-- Jittered pause so pacing is less robotic. Slice so Stop can land.
 	set lo to minSec as real
 	set hi to maxSec as real
 	if hi < lo then set hi to lo
 	set span to hi - lo
-	set pick to lo + (span * (random number from 0 to 1000) / 1000.0)
-	delay pick
+	set remaining to lo + (span * (random number from 0 to 1000) / 1000.0)
+	repeat while remaining > 0
+		assertNotStopped()
+		set slice to remaining
+		if slice > 0.25 then set slice to 0.25
+		delay slice
+		set remaining to remaining - slice
+	end repeat
 end humanDelay
 
 on warmupSafari()
 	-- Prime a normal Safari document before docs.qq / Riot (reduces cold-start CF hits).
 	logLine("Warming up Safari with a normal page…")
-	tell application "Safari"
-		activate
-		try
-			if (count of documents) is 0 then
+	with timeout of 45 seconds
+		tell application "Safari"
+			activate
+			try
+				if (count of documents) is 0 then
+					make new document with properties {URL:"https://www.apple.com/"}
+				else
+					set URL of document 1 to "https://www.apple.com/"
+				end if
+			on error
 				make new document with properties {URL:"https://www.apple.com/"}
-			else
-				set URL of document 1 to "https://www.apple.com/"
-			end if
-		on error
-			make new document with properties {URL:"https://www.apple.com/"}
-		end try
-	end tell
+			end try
+		end tell
+	end timeout
 	humanDelay(3.0, 6.0)
 	try
 		logLine(safariJS(jsWarmScroll()))
@@ -1259,7 +1322,7 @@ on waitForContinueReady(timeoutSec)
 				if waitForCloudflareClear(20) is "cloudflare" then error "Cloudflare on docs.qq interstitial before Continue."
 			end if
 		end try
-		delay 0.5
+		waitTick(0.5)
 	end repeat
 	return "timeout"
 end waitForContinueReady
@@ -1277,7 +1340,7 @@ on waitForLoginForm(timeoutSec)
 				if waitForCloudflareClear(30) is "cloudflare" then return "cloudflare"
 			end if
 		end try
-		delay 0.6
+		waitTick(0.6)
 	end repeat
 	return "timeout"
 end waitForLoginForm
@@ -1303,7 +1366,7 @@ on waitForRiotLogin(timeoutSec)
 				end if
 			end if
 		end try
-		delay 0.6
+		waitTick(0.6)
 	end repeat
 	error "Timed out waiting for Riot login host after docs.qq Continue (still not on *.riotgames.com)."
 end waitForRiotLogin
@@ -1323,7 +1386,7 @@ on waitForCloudflareClear(timeoutSec)
 			end try
 			if loginPhase is not "cloudflare" then return loginPhase
 		end if
-		delay 1.2
+		waitTick(1.2)
 	end repeat
 	return "cloudflare"
 end waitForCloudflareClear
@@ -1368,7 +1431,7 @@ on waitForPostLogin(timeoutSec)
 		else
 			set loginHits to 0
 		end if
-		delay 0.35
+		waitTick(0.35)
 	end repeat
 	return "timeout"
 end waitForPostLogin
@@ -1407,7 +1470,7 @@ on ensureAccountSession(riotUser, riotPass, batchMode)
 			set formReady to waitForLoginForm(30)
 			logLine("Re-login form: " & formReady)
 			if formReady is not "ready" then
-				tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
+				safariGoTo("https://account.riotgames.com/")
 				humanDelay(1.5, 2.5)
 				set formReady to waitForLoginForm(30)
 			end if
@@ -1445,7 +1508,7 @@ on ensureAccountSession(riotUser, riotPass, batchMode)
 			end if
 		else
 			logLine("Opening account.riotgames.com to restore session…")
-			tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
+			safariGoTo("https://account.riotgames.com/")
 			humanDelay(1.2, 2.2)
 			set phaseNow to waitForPostLogin(25)
 			logLine("ensureAccountSession navigate phase: " & phaseNow)
@@ -1470,7 +1533,7 @@ on ensureAccountSession(riotUser, riotPass, batchMode)
 
 	-- Final forced open + short wait for diagnostics.
 	try
-		tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
+		safariGoTo("https://account.riotgames.com/")
 	end try
 	humanDelay(1.5, 2.5)
 	try
@@ -1487,7 +1550,7 @@ on waitForEmailField(timeoutSec)
 			set emailFieldState to safariJS(jsProbeEmailField()) as text
 		end try
 		if emailFieldState is "ready" then return "ready"
-		delay 0.35
+		waitTick(0.35)
 	end repeat
 	return "timeout"
 end waitForEmailField
@@ -1627,9 +1690,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-09w" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-09x" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-09w" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-09x" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -1650,7 +1713,7 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-09w" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-09x" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
 
 	logLine("Launching batch for " & rowCount & " account(s) from " & csvPath)
 	logLine("Using toolkit scripts: " & dir)
@@ -1685,10 +1748,12 @@ end runBatchFromCsv
 
 on fetchImapCode(prefix)
 	-- Uses fetch_riot_imap_code.py + .env IMAP_* / NEW_IMAP_* when available.
+	-- perl alarm hard-caps hung IMAP (AppleScript with timeout does not cover do shell script).
 	try
+		assertNotStopped()
 		set dir to scriptDir()
 		set py to do shell script "if [ -x " & quoted form of (dir & "/.venv/bin/python") & " ]; then echo " & quoted form of (dir & "/.venv/bin/python") & "; else command -v python3; fi"
-		set cmd to "cd " & quoted form of dir & " && TOOL_DIR=" & quoted form of dir & " " & quoted form of py & " " & quoted form of (dir & "/fetch_riot_imap_code.py") & " --prefix " & quoted form of prefix & " --timeout 90 --since-seconds 240"
+		set cmd to "cd " & quoted form of dir & " && TOOL_DIR=" & quoted form of dir & " perl -e 'alarm shift; exec @ARGV' 110 " & quoted form of py & " " & quoted form of (dir & "/fetch_riot_imap_code.py") & " --prefix " & quoted form of prefix & " --timeout 90 --since-seconds 240"
 		logLine("IMAP fetch (" & prefix & ")…")
 		set code to do shell script cmd
 		if code is not "" then
@@ -1703,11 +1768,13 @@ end fetchImapCode
 
 on fetchImapVerifyLink(prefix, sinceEpoch, recipientEmail)
 	-- Wait for a Riot email titled "Verify Your Email" and return its Verify Email URL.
+	-- perl alarm slightly above Python --timeout so a hung socket cannot pin osascript forever.
 	try
+		assertNotStopped()
 		set dir to scriptDir()
 		set py to do shell script "if [ -x " & quoted form of (dir & "/.venv/bin/python") & " ]; then echo " & quoted form of (dir & "/.venv/bin/python") & "; else command -v python3; fi"
 		set helperPath to dir & "/fetch_riot_verify_link.py"
-		set cmd to "cd " & quoted form of dir & " && TOOL_DIR=" & quoted form of dir & " NEW_EMAIL=" & quoted form of recipientEmail & " " & quoted form of py & " " & quoted form of helperPath & " --prefix " & quoted form of prefix & " --timeout 240 --since-epoch " & quoted form of sinceEpoch & " --subject " & quoted form of "Verify Your Email" & " --recipient " & quoted form of recipientEmail
+		set cmd to "cd " & quoted form of dir & " && TOOL_DIR=" & quoted form of dir & " NEW_EMAIL=" & quoted form of recipientEmail & " perl -e 'alarm shift; exec @ARGV' 260 " & quoted form of py & " " & quoted form of helperPath & " --prefix " & quoted form of prefix & " --timeout 240 --since-epoch " & quoted form of sinceEpoch & " --subject " & quoted form of "Verify Your Email" & " --recipient " & quoted form of recipientEmail
 		logLine("IMAP verify-link fetch (" & prefix & ", to=" & recipientEmail & ")…")
 		set verifyURL to do shell script cmd
 		if verifyURL is not "" then
