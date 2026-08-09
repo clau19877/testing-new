@@ -617,21 +617,24 @@ on findTasksCsvPath()
 	-- Desktop downloads often look like:
 	--   ~/Desktop/riot-email-update-safari-mac 3/data/tasks.csv
 	-- Prefer the last match alphabetically so " 3" wins over older copies.
-	-- Helper script avoids quote-escaping issues inside AppleScript strings.
+	-- Uses find_tasks_csv.sh (no backslash escapes inside AppleScript strings).
 	try
-		set helper to "find \"$HOME/Desktop\" \"$HOME/Downloads\" -type f -name tasks.csv 2>/dev/null | while IFS= read -r f; do " & ¬
-			"d=$(dirname \"$f\"); " & ¬
-			"case $(basename \"$d\") in data) root=$(dirname \"$d\");; *) root=$d;; esac; " & ¬
-			"[ -f \"$root/run_safari_batch.py\" ] || continue; " & ¬
-			"awk 'NR>1 && NF && $0 !~ /^#/ {found=1; exit} END{exit !found}' \"$f\" || continue; " & ¬
-			"echo \"$f\"; done | sort | tail -1"
-		-- Write helper to a temp file so we do not embed complex quoting in AS.
-		set tmpHelper to do shell script "mktemp /tmp/riot-find-csv.XXXXXX"
-		do shell script "printf %s " & quoted form of helper & " > " & quoted form of tmpHelper
-		set found to do shell script "/bin/bash " & quoted form of tmpHelper
+		set dir to ""
 		try
-			do shell script "rm -f " & quoted form of tmpHelper
+			set envDir to system attribute "TOOL_DIR"
+			if envDir is not "" then set dir to envDir
 		end try
+		if dir is "" then
+			set p to POSIX path of (path to me)
+			set dir to do shell script "dirname " & quoted form of p
+		end if
+		set helper to dir & "/find_tasks_csv.sh"
+		try
+			do shell script "test -x " & quoted form of helper
+		on error
+			do shell script "chmod +x " & quoted form of helper
+		end try
+		set found to do shell script "/bin/bash " & quoted form of helper
 		return found
 	on error
 		return ""
@@ -642,9 +645,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to toolkitRootFromCsv(found)
-		return "BUILD 2026-08-09c" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder."
+		return "BUILD 2026-08-09d" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder."
 	end if
-	return "BUILD 2026-08-09c" & return & return & "Put accounts in data/tasks.csv inside your Desktop folder, then in Terminal:" & return & "cd ~/Desktop/riot-email-update-safari-mac\\ 3" & return & "./run_safari_mac.sh"
+	return "BUILD 2026-08-09d" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -659,7 +662,7 @@ on runBatchFromCsv()
 
 	set dir to toolkitRootFromCsv(csvPath)
 
-	display dialog "BUILD 2026-08-09c" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-09d" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
 
 	set py to "/usr/bin/python3"
 	try

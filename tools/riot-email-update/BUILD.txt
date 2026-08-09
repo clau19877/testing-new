@@ -1,2 +1,3 @@
-BUILD 2026-08-09c
-Targets personal-information-card__emailAddress after login.
+BUILD 2026-08-09d
+No backslash escapes in AppleScript; finds Desktop … 3 folder.
+Fills personal-information-card__emailAddress.
