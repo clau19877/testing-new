@@ -71,6 +71,10 @@ body snippet). Failures in `failed.txt` append the log path as a third field.
 
 Share that `.log` file when asking for help with an error.
 
+If Script Editor reports an error about setting `line` / `st` / `key`, update to
+the latest zip (**BUILD 2026-08-09h** or newer) — those names are reserved in
+AppleScript.
+
 ## Account flow
 
 For each CSV row, the runner:

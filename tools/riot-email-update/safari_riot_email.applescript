@@ -319,7 +319,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-09g")
+	logLine("BUILD 2026-08-09h")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -332,23 +332,24 @@ end logInit
 
 on logLine(msg)
 	-- Console + durable investigation file (timestamped).
+	-- Avoid reserved AppleScript names: line, body, text, key, etc.
 	log msg
-	set body to msg as text
+	set msgText to msg as text
 	set ts to ""
 	try
 		set ts to do shell script "date '+%Y-%m-%d %H:%M:%S'"
 	end try
 	if ts is "" then
-		set line to "[safari-riot] " & body
+		set logEntry to "[safari-riot] " & msgText
 	else
-		set line to "[" & ts & "] [safari-riot] " & body
+		set logEntry to "[" & ts & "] [safari-riot] " & msgText
 	end if
 	try
-		do shell script "echo " & quoted form of line & " >&2"
+		do shell script "echo " & quoted form of logEntry & " >&2"
 	end try
 	if logFilePath is not "" then
 		try
-			do shell script "printf '%s\n' " & quoted form of line & " >> " & quoted form of logFilePath
+			do shell script "printf '%s\n' " & quoted form of logEntry & " >> " & quoted form of logFilePath
 		end try
 	end if
 end logLine
@@ -927,9 +928,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to toolkitRootFromCsv(found)
-		return "BUILD 2026-08-09g" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder."
+		return "BUILD 2026-08-09h" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder."
 	end if
-	return "BUILD 2026-08-09g" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-09h" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -944,7 +945,7 @@ on runBatchFromCsv()
 
 	set dir to toolkitRootFromCsv(csvPath)
 
-	display dialog "BUILD 2026-08-09g" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-09h" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
 
 	set py to "/usr/bin/python3"
 	try
