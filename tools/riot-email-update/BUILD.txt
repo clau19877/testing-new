@@ -1,3 +1,2 @@
-BUILD 2026-08-09b
-If Script Editor shows this build id in the dialog, you have the new script.
-Finds Desktop folders like: riot-email-update-safari-mac 3
+BUILD 2026-08-09c
+Targets personal-information-card__emailAddress after login.

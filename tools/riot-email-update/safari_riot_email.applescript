@@ -152,18 +152,42 @@ on run argv
 
 	logLine("Opening account email settings…")
 	tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
-	delay 3
-
-	-- Try to open email edit UI
-	safariJS(jsClickEmailControl())
 	delay 2
+
+	-- Wait for Riot personal-information email field
+	logLine("Waiting for personal-information-card__emailAddress…")
+	set emailReady to waitForEmailField(45)
+	logLine("Email field ready: " & emailReady)
+	if emailReady is not "ready" then
+		-- Try clicking edit/email controls once, then wait again
+		safariJS(jsClickEmailControl())
+		delay 2
+		set emailReady to waitForEmailField(30)
+		logLine("Email field ready (retry): " & emailReady)
+	end if
+	if emailReady is not "ready" then error "Could not find personal-information-card__emailAddress on account page."
+
+	-- Click the email field (focus / enable edit), then type the new address
+	logLine("Clicking email field…")
+	logLine(safariJS(jsClickEmailField()))
+	delay 0.4
 
 	logLine("Filling new email: " & newEmail)
 	set emailFill to safariJS(jsFillEmail(newEmail))
 	logLine(emailFill)
+	if emailFill does not contain "filled=1" and emailFill does not contain "ok" then
+		error "Failed to type new email into personal-information-card__emailAddress (" & emailFill & ")"
+	end if
+	delay 0.5
 
-	-- Submit email change if a save/submit button is visible
-	safariJS(jsClickSubmitEmail())
+	-- Click the email field again (as requested), then save/submit
+	logLine("Clicking email field again…")
+	logLine(safariJS(jsClickEmailField()))
+	delay 0.3
+
+	logLine("Submitting email change…")
+	set submitResult to safariJS(jsClickSubmitEmail())
+	logLine(submitResult)
 	delay 2.5
 
 	if not batchMode then
@@ -347,12 +371,20 @@ on jsSubmitCode(codeText, kindText)
 		"})(" & jsonString(codeText) & ");"
 end jsSubmitCode
 
+on emailFieldSelector()
+	-- Riot account personal info email input (type=text, not type=email).
+	return "input[data-testid=personal-information-card__emailAddress]"
+end emailFieldSelector
+
 on jsClickEmailControl()
 	return "(function () {" & ¬
-		"  const links = Array.from(document.querySelectorAll('a,button,[role=button]'));" & ¬
+		"  const sel = 'input[data-testid=personal-information-card__emailAddress]';" & ¬
+		"  const field = document.querySelector(sel);" & ¬
+		"  if (field) { field.focus(); field.click(); return 'clicked-email-field'; }" & ¬
+		"  const links = Array.from(document.querySelectorAll('a,button,[role=button], [data-testid*=email], [data-testid*=personal-information]'));" & ¬
 		"  for (const el of links) {" & ¬
-		"    const t = (el.textContent || '').toLowerCase();" & ¬
-		"    if (t.includes('email') || t.includes('change email') || t.includes('edit')) {" & ¬
+		"    const t = ((el.textContent || '') + ' ' + (el.getAttribute('data-testid') || '')).toLowerCase();" & ¬
+		"    if (t.includes('email') || t.includes('change email') || t.includes('edit') || t.includes('personal-information')) {" & ¬
 		"      el.click();" & ¬
 		"      return 'clicked:' + t.slice(0, 60);" & ¬
 		"    }" & ¬
@@ -361,40 +393,99 @@ on jsClickEmailControl()
 		"})();"
 end jsClickEmailControl
 
+on jsClickEmailField()
+	return "(function () {" & ¬
+		"  const el = document.querySelector('input[data-testid=personal-information-card__emailAddress]');" & ¬
+		"  if (!el) return 'missing-email-field';" & ¬
+		"  el.scrollIntoView({block:'center'});" & ¬
+		"  el.focus();" & ¬
+		"  el.click();" & ¬
+		"  return 'clicked-email-field value=' + String(el.value || '').slice(0, 40);" & ¬
+		"})();"
+end jsClickEmailField
+
 on jsFillEmail(emailText)
 	return "(function (email) {" & ¬
 		"  function setNative(el, value) {" & ¬
 		"    if (!el) return false;" & ¬
+		"    el.focus();" & ¬
+		"    el.click();" & ¬
 		"    const proto = window.HTMLInputElement.prototype;" & ¬
 		"    const desc = Object.getOwnPropertyDescriptor(proto, 'value');" & ¬
+		"    if (desc && desc.set) desc.set.call(el, '');" & ¬
+		"    else el.value = '';" & ¬
+		"    el.dispatchEvent(new Event('input', { bubbles: true }));" & ¬
 		"    if (desc && desc.set) desc.set.call(el, value);" & ¬
 		"    else el.value = value;" & ¬
-		"    el.dispatchEvent(new Event('input', { bubbles: true }));" & ¬
+		"    el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));" & ¬
 		"    el.dispatchEvent(new Event('change', { bubbles: true }));" & ¬
-		"    return true;" & ¬
+		"    el.dispatchEvent(new Event('blur', { bubbles: true }));" & ¬
+		"    return el.value === value;" & ¬
 		"  }" & ¬
-		"  const inputs = Array.from(document.querySelectorAll('input[type=email], input[name*=email i], input[id*=email i]'));" & ¬
-		"  let n = 0;" & ¬
-		"  for (const el of inputs) {" & ¬
-		"    if (setNative(el, email)) n++;" & ¬
+		"  const sel = 'input[data-testid=personal-information-card__emailAddress]';" & ¬
+		"  let el = document.querySelector(sel);" & ¬
+		"  if (!el) {" & ¬
+		"    const inputs = Array.from(document.querySelectorAll('input[type=email], input[type=text], input[name*=email i], input[id*=email i]'));" & ¬
+		"    el = inputs.find(function (x) {" & ¬
+		"      const id = ((x.getAttribute('data-testid') || '') + ' ' + (x.name || '') + ' ' + (x.id || '')).toLowerCase();" & ¬
+		"      return id.includes('email');" & ¬
+		"    }) || null;" & ¬
 		"  }" & ¬
-		"  return 'filled=' + n;" & ¬
+		"  if (!el) return 'filled=0 missing-field';" & ¬
+		"  const ok = setNative(el, email);" & ¬
+		"  return (ok ? 'filled=1 ok' : 'filled=0 mismatch') + ' testid=' + (el.getAttribute('data-testid') || '') + ' value=' + String(el.value || '').slice(0, 60);" & ¬
 		"})(" & jsonString(emailText) & ");"
 end jsFillEmail
 
 on jsClickSubmitEmail()
 	return "(function () {" & ¬
-		"  const buttons = Array.from(document.querySelectorAll('button, input[type=submit]'));" & ¬
+		"  const field = document.querySelector('input[data-testid=personal-information-card__emailAddress]');" & ¬
+		"  const testIdHints = ['personal-information', 'email', 'save', 'submit', 'confirm', 'continue', 'send'];" & ¬
+		"  const buttons = Array.from(document.querySelectorAll('button, input[type=submit], [role=button]'));" & ¬
+		"  function score(el) {" & ¬
+		"    const t = ((el.textContent || el.value || '') + ' ' + (el.getAttribute('data-testid') || '') + ' ' + (el.getAttribute('aria-label') || '')).toLowerCase();" & ¬
+		"    let s = 0;" & ¬
+		"    if (/save|submit|confirm|continue|send|update/.test(t)) s += 3;" & ¬
+		"    if (t.includes('email')) s += 2;" & ¬
+		"    if (t.includes('personal-information')) s += 4;" & ¬
+		"    if (el.disabled || el.getAttribute('aria-disabled') === 'true') s -= 10;" & ¬
+		"    return s;" & ¬
+		"  }" & ¬
+		"  let best = null, bestScore = 0;" & ¬
 		"  for (const el of buttons) {" & ¬
-		"    const t = ((el.textContent || el.value || '') + '').toLowerCase();" & ¬
-		"    if (/save|submit|continue|confirm|send|update|change/.test(t)) {" & ¬
-		"      el.click();" & ¬
-		"      return 'clicked:' + t.slice(0, 40);" & ¬
+		"    const sc = score(el);" & ¬
+		"    if (sc > bestScore) { bestScore = sc; best = el; }" & ¬
+		"  }" & ¬
+		"  if (best && bestScore > 0) {" & ¬
+		"    best.click();" & ¬
+		"    return 'clicked:' + ((best.getAttribute('data-testid') || best.textContent || best.value || '').toString().trim().slice(0, 60));" & ¬
+		"  }" & ¬
+		"  if (field) {" & ¬
+		"    field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));" & ¬
+		"    field.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));" & ¬
+		"    const form = field.closest('form');" & ¬
+		"    if (form) {" & ¬
+		"      if (form.requestSubmit) form.requestSubmit(); else form.submit();" & ¬
+		"      return 'submitted-form';" & ¬
 		"    }" & ¬
+		"    return 'pressed-enter';" & ¬
 		"  }" & ¬
 		"  return 'no-submit';" & ¬
 		"})();"
 end jsClickSubmitEmail
+
+on waitForEmailField(timeoutSec)
+	set deadline to (current date) + timeoutSec
+	repeat while (current date) < deadline
+		set st to "missing"
+		try
+			set st to safariJS("(function () { return document.querySelector('input[data-testid=personal-information-card__emailAddress]') ? 'ready' : 'missing'; })();") as text
+		end try
+		if st is "ready" then return "ready"
+		delay 0.5
+	end repeat
+	return "timeout"
+end waitForEmailField
 
 on waitForRiotLogin(timeoutSec)
 	set deadline to (current date) + timeoutSec
@@ -551,9 +642,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to toolkitRootFromCsv(found)
-		return "BUILD 2026-08-09b" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder."
+		return "BUILD 2026-08-09c" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder."
 	end if
-	return "BUILD 2026-08-09b" & return & return & "Put accounts in data/tasks.csv inside your Desktop folder, then in Terminal:" & return & "cd ~/Desktop/riot-email-update-safari-mac\\ 3" & return & "./run_safari_mac.sh"
+	return "BUILD 2026-08-09c" & return & return & "Put accounts in data/tasks.csv inside your Desktop folder, then in Terminal:" & return & "cd ~/Desktop/riot-email-update-safari-mac\\ 3" & return & "./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -568,7 +659,7 @@ on runBatchFromCsv()
 
 	set dir to toolkitRootFromCsv(csvPath)
 
-	display dialog "BUILD 2026-08-09b" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-09c" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
 
 	set py to "/usr/bin/python3"
 	try
