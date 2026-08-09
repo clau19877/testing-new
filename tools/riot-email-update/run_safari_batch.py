@@ -27,6 +27,13 @@ import sys
 import time
 from pathlib import Path
 
+from investigate_log import (
+    append_block,
+    extract_log_path_from_output,
+    new_log_path,
+    write_line,
+)
+
 ROOT = Path(__file__).resolve().parent
 DEFAULT_ENTRY = (
     "https://docs.qq.com/scenario/link.html?"
@@ -118,9 +125,18 @@ def append_line(path: Path, line: str) -> None:
         f.write(line.rstrip("\n") + "\n")
 
 
-def run_one(row: dict[str, str], *, entry_url: str, skip_email: bool) -> tuple[bool, str]:
+def run_one(
+    row: dict[str, str], *, entry_url: str, skip_email: bool
+) -> tuple[bool, str, str]:
+    """Returns (ok, reason, investigation_log_path)."""
     imap_host = row.get("imap_host") or derive_imap_host(row["imap_email"])
     imap_port = row.get("imap_port") or "993"
+
+    log_path = new_log_path(tag=row["riot_username"], prefix="safari")
+    write_line(log_path, f"batch start {row['riot_username']} → {row['new_email']}")
+    write_line(log_path, f"imap={row['imap_email']}@{imap_host}:{imap_port}")
+    write_line(log_path, f"entry_url={entry_url}")
+    write_line(log_path, f"skip_email_change={int(skip_email)}")
 
     env = dict(os.environ)
     env.update(
@@ -135,6 +151,7 @@ def run_one(row: dict[str, str], *, entry_url: str, skip_email: bool) -> tuple[b
             "RIOT_PASSWORD": row["riot_password"],
             "NEW_EMAIL": row["new_email"],
             "SAFARI_BATCH": "1",
+            "SAFARI_LOG_PATH": str(log_path),
         }
     )
 
@@ -168,6 +185,7 @@ def run_one(row: dict[str, str], *, entry_url: str, skip_email: bool) -> tuple[b
         f"Safari batch: {row['riot_username']} → {row['new_email']}\n"
         f"  IMAP {row['imap_email']} @ {imap_host}\n"
         f"  task-file: {task_path}\n"
+        f"  investigate log: {log_path}\n"
         f"{'=' * 60}",
         flush=True,
     )
@@ -180,10 +198,17 @@ def run_one(row: dict[str, str], *, entry_url: str, skip_email: bool) -> tuple[b
             capture_output=True,
             timeout=float(os.getenv("SAFARI_TASK_TIMEOUT") or "600"),
         )
-    except subprocess.TimeoutExpired:
-        return False, "timeout"
+    except subprocess.TimeoutExpired as exc:
+        out = ((exc.stdout or "") + "\n" + (exc.stderr or "")).strip()
+        if out:
+            append_block(log_path, "osascript (timeout)", out)
+        write_line(log_path, "RESULT: timeout", level="ERROR")
+        print(f"Investigation log: {log_path}", flush=True)
+        return False, "timeout", str(log_path)
     except FileNotFoundError:
-        return False, "osascript not found (macOS only)"
+        write_line(log_path, "RESULT: osascript not found", level="ERROR")
+        print(f"Investigation log: {log_path}", flush=True)
+        return False, "osascript not found (macOS only)", str(log_path)
     finally:
         try:
             task_path.unlink(missing_ok=True)
@@ -192,14 +217,20 @@ def run_one(row: dict[str, str], *, entry_url: str, skip_email: bool) -> tuple[b
 
     out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
     if out:
-        # Keep logs readable — last lines matter most
+        append_block(log_path, "osascript output", out)
+        # Keep console readable — last lines matter most
         lines = out.splitlines()
         print("\n".join(lines[-40:]), flush=True)
+
+    reported = extract_log_path_from_output(out)
+    if reported:
+        log_path = Path(reported)
 
     if proc.returncode == 0 and (
         "SUCCESS" in out.upper() or "done" in (proc.stdout or "").lower()
     ):
-        return True, "ok"
+        write_line(log_path, "RESULT: success")
+        return True, "ok", str(log_path)
 
     reason = "osascript_failed"
     for marker in (
@@ -219,7 +250,9 @@ def run_one(row: dict[str, str], *, entry_url: str, skip_email: bool) -> tuple[b
             break
     if proc.returncode != 0:
         reason = f"{reason}:rc={proc.returncode}"
-    return False, reason
+    write_line(log_path, f"RESULT: failed ({reason})", level="ERROR")
+    print(f"Investigation log: {log_path}", flush=True)
+    return False, reason, str(log_path)
 
 
 def main() -> int:
@@ -284,6 +317,7 @@ def main() -> int:
     print(f"Loaded {len(tasks)} task(s) from {csv_path}")
     print(f"  success → {success_path}")
     print(f"  failed  → {failed_path}")
+    print(f"  logs    → {ROOT / 'debug' / 'logs'}")
     if args.dry_run:
         for i, t in enumerate(tasks, 1):
             print(f"  {i}. {t['riot_username']} → {t['new_email']}")
@@ -293,7 +327,7 @@ def main() -> int:
     ok_n = fail_n = 0
     for i, row in enumerate(tasks, 1):
         print(f"\n>>> TASK {i}/{len(tasks)}", flush=True)
-        ok, reason = run_one(
+        ok, reason, log_path = run_one(
             row, entry_url=args.entry_url, skip_email=args.skip_email_change
         )
         line = account_line(row)
@@ -301,17 +335,22 @@ def main() -> int:
             append_line(success_path, line)
             ok_n += 1
             print(f"SUCCESS → {success_path.name}: {row['riot_username']}", flush=True)
+            if log_path:
+                print(f"  log → {log_path}", flush=True)
         else:
-            append_line(failed_path, f"{line}\t{reason}")
+            append_line(failed_path, f"{line}\t{reason}\t{log_path}")
             fail_n += 1
             print(
                 f"FAILED  → {failed_path.name}: {row['riot_username']} ({reason})",
                 flush=True,
             )
+            if log_path:
+                print(f"  investigation log → {log_path}", flush=True)
         if i < len(tasks) and args.delay > 0:
             time.sleep(args.delay)
 
     print(f"\nBatch done: {ok_n} success, {fail_n} failed (of {len(tasks)})")
+    print(f"Investigation logs: {ROOT / 'debug' / 'logs'}")
     return 0 if fail_n == 0 else 1
 
 

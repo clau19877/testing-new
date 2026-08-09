@@ -57,6 +57,20 @@ RiotUser,YourRiotPass,you@icloud.com,xxxx-xxxx-xxxx-xxxx,new@icloud.com,imap.mai
 
 Results: `success.txt` / `failed.txt` in the same folder as the scripts.
 
+## Investigation logs
+
+Each account run writes a timestamped file under `debug/logs/`:
+
+```
+debug/logs/safari_YYYYMMDD_HHMMSS_<username>.log
+```
+
+The log includes step markers (`STEP: fill_email`, …), IMAP notes, and on
+failure a Safari URL/title + page probe (email field / SAVE button / captcha /
+body snippet). Failures in `failed.txt` append the log path as a third field.
+
+Share that `.log` file when asking for help with an error.
+
 ## Account flow
 
 For each CSV row, the runner:

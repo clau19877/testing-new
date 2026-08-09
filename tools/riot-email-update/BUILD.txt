@@ -1,3 +1,4 @@
-BUILD 2026-08-09f
+BUILD 2026-08-09g
+Investigation logs: debug/logs/safari_*.log (steps + failure page probe).
 Exact Riot flow: emailAddress -> SAVE AND VERIFY -> IMAP Verify Email -> LOG OUT EVERYWHERE.
 Zip does not include data/tasks.csv.

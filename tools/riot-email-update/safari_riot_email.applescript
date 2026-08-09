@@ -16,6 +16,10 @@
 -- Note: do not embed JS with backslash-quote inside AppleScript string literals.
 -- Use the js* handlers below (single-quoted JS, AppleScript quote for dynamics).
 
+-- Per-run debug log path (set by logInit). Empty means file logging is off.
+property logFilePath : ""
+property logAccountLabel : ""
+
 
 on run argv
 	set opts to parseArgs(argv)
@@ -43,7 +47,6 @@ on run argv
 		if tfEmail is not "" then set newEmail to tfEmail
 		if tfEntry is not "" then set entryURL to tfEntry
 		if taskFileValue(taskFile, "skip_email_change") is "1" then set skipEmail to true
-		logLine("Loaded task file: " & taskFile)
 	end if
 
 	-- Fall back to env (batch runner also sets these from tasks.csv).
@@ -58,6 +61,10 @@ on run argv
 	if (not batchMode) and (envOrEmpty("SAFARI_BATCH") is "1") then
 		set batchMode to true
 	end if
+
+	-- Start a per-account debug log now that the username is resolved.
+	logInit(riotUser)
+	if taskFile is not "" then logLine("Loaded task file: " & taskFile)
 
 	-- Opened directly (Script Editor / double-click) with no account supplied:
 	-- search Desktop for data/tasks.csv (handles "riot-email-update-safari-mac 3").
@@ -81,172 +88,193 @@ on run argv
 	end if
 
 	logLine("Account: " & riotUser & " -> " & newEmail)
-	logLine("Opening Safari → docs.qq.com entry…")
+	try
+		logStep("open_entry")
+		logLine("Opening Safari → docs.qq.com entry…")
 
-	tell application "Safari"
-		activate
-		try
-			close every window
-		end try
-		make new document with properties {URL:entryURL}
-	end tell
-	delay 2.5
+		tell application "Safari"
+			activate
+			try
+				close every window
+			end try
+			make new document with properties {URL:entryURL}
+		end tell
+		delay 2.5
 
-	-- Click Continue on the Tencent Docs interstitial
-	logLine("Clicking Continue on interstitial…")
-	safariJS(jsClickContinue())
-	delay 3.5
-	waitForRiotLogin(45)
+		-- Click Continue on the Tencent Docs interstitial
+		logStep("click_continue")
+		logLine("Clicking Continue on interstitial…")
+		safariJS(jsClickContinue())
+		delay 3.5
+		waitForRiotLogin(45)
 
-	logLine("Filling Riot login form…")
-	set fillResult to safariJS(jsFillLogin(riotUser, riotPass))
-	logLine("Fill result: " & fillResult)
-	delay 0.6
+		logStep("fill_login")
+		logLine("Filling Riot login form…")
+		set fillResult to safariJS(jsFillLogin(riotUser, riotPass))
+		logLine("Fill result: " & fillResult)
+		delay 0.6
 
-	logLine("Clicking Sign in…")
-	safariJS(jsClickSignIn())
+		logStep("click_sign_in")
+		logLine("Clicking Sign in…")
+		safariJS(jsClickSignIn())
 
-	-- Wait for MFA, captcha, account, or error
-	set phase to waitForPostLogin(90)
-	logLine("Post-login phase: " & phase)
+		-- Wait for MFA, captcha, account, or error
+		set phase to waitForPostLogin(90)
+		logLine("Post-login phase: " & phase)
 
-	if phase is "captcha" then
-		if batchMode then error "hCaptcha appeared (batch mode will not wait for manual solve)"
-		display dialog "hCaptcha appeared in Safari. Solve it in the Safari window, then click OK." buttons {"OK"} default button 1
-		set phase to waitForPostLogin(120)
-		logLine("After manual captcha phase: " & phase)
-	end if
-
-	if phase is "bad_creds" then
-		error "Riot rejected username/password (Check your details and try again)."
-	end if
-
-	if phase is "mfa" then
-		if mfaCode is "" then
-			set mfaCode to fetchImapCode("IMAP")
+		if phase is "captcha" then
+			if batchMode then error "hCaptcha appeared (batch mode will not wait for manual solve)"
+			display dialog "hCaptcha appeared in Safari. Solve it in the Safari window, then click OK." buttons {"OK"} default button 1
+			set phase to waitForPostLogin(120)
+			logLine("After manual captcha phase: " & phase)
 		end if
-		if mfaCode is "" then
-			if batchMode then error "MFA required but no IMAP code (set IMAP_* / imap columns)"
-			set mfaCode to text returned of (display dialog "Enter Riot MFA / email code:" default answer "")
+
+		if phase is "bad_creds" then
+			error "Riot rejected username/password (Check your details and try again)."
 		end if
-		logLine("Submitting MFA code…")
-		safariJS(jsSubmitCode(mfaCode, "mfa"))
+
+		if phase is "mfa" then
+			logStep("mfa")
+			if mfaCode is "" then
+				set mfaCode to fetchImapCode("IMAP")
+			end if
+			if mfaCode is "" then
+				if batchMode then error "MFA required but no IMAP code (set IMAP_* / imap columns)"
+				set mfaCode to text returned of (display dialog "Enter Riot MFA / email code:" default answer "")
+			end if
+			logLine("Submitting MFA code…")
+			safariJS(jsSubmitCode(mfaCode, "mfa"))
+			delay 3
+			set phase to waitForPostLogin(60)
+			logLine("After MFA phase: " & phase)
+		end if
+
+		if phase is not "logged_in" and phase is not "account" then
+			-- One more chance: maybe already on account
+			tell application "Safari" to set cur to URL of document 1
+			if cur does not contain "account.riotgames.com" then
+				error "Login did not reach account.riotgames.com (phase=" & phase & "). Check Safari window."
+			end if
+		end if
+
+		if skipEmail then
+			logLine("Skipping email change (--skip-email-change).")
+			if not batchMode then display dialog "Logged in via Safari. Email change skipped." buttons {"OK"} default button 1
+			logLine("SUCCESS")
+			logLine("Debug log: " & logFilePath)
+			return "login_ok"
+		end if
+
+		logStep("open_account")
+		logLine("Opening account email settings…")
+		tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
+		delay 2
+
+		-- Wait for Riot personal-information email field
+		logStep("wait_email_field")
+		logLine("Waiting for personal-information-card__emailAddress…")
+		set emailReady to waitForEmailField(45)
+		logLine("Email field ready: " & emailReady)
+		if emailReady is not "ready" then
+			-- Try clicking edit/email controls once, then wait again
+			safariJS(jsClickEmailControl())
+			delay 2
+			set emailReady to waitForEmailField(30)
+			logLine("Email field ready (retry): " & emailReady)
+		end if
+		if emailReady is not "ready" then error "Could not find personal-information-card__emailAddress on account page."
+
+		-- Click the email field (focus / enable edit), then type the new address
+		logStep("fill_email")
+		logLine("Clicking email field…")
+		logLine(safariJS(jsClickEmailField()))
+		delay 0.4
+
+		logLine("Filling new email: " & newEmail)
+		set emailFill to safariJS(jsFillEmail(newEmail))
+		logLine(emailFill)
+		if emailFill does not contain "filled=1" and emailFill does not contain "ok" then
+			error "Failed to type new email into personal-information-card__emailAddress (" & emailFill & ")"
+		end if
+		delay 0.6
+
+		-- Click SAVE AND VERIFY (personal-information-card__saveChanges-btn)
+		set verifySinceEpoch to do shell script "date +%s"
+		logStep("save_and_verify")
+		logLine("Waiting for SAVE AND VERIFY button…")
+		set saveReady to waitForSaveButton(20)
+		logLine("Save button ready: " & saveReady)
+		if saveReady is not "ready" then error "SAVE AND VERIFY button did not become enabled (personal-information-card__saveChanges-btn)."
+		logLine("Clicking SAVE AND VERIFY…")
+		set submitResult to safariJS(jsClickSaveAndVerify())
+		logLine(submitResult)
+		if submitResult does not contain "clicked-save" then error "Could not click SAVE AND VERIFY (" & submitResult & ")."
 		delay 3
-		set phase to waitForPostLogin(60)
-		logLine("After MFA phase: " & phase)
-	end if
 
-	if phase is not "logged_in" and phase is not "account" then
-		-- One more chance: maybe already on account
-		tell application "Safari" to set cur to URL of document 1
-		if cur does not contain "account.riotgames.com" then
-			error "Login did not reach account.riotgames.com (phase=" & phase & "). Check Safari window."
+		-- If an hCaptcha challenge becomes visible, allow solving (skip in batch)
+		if safariJS(jsCaptchaVisible()) is "captcha" then
+			if batchMode then
+				logLine("hCaptcha challenge visible during save — waiting up to 60s for auto/solve…")
+				set waited to 0
+				repeat while waited < 60 and (safariJS(jsCaptchaVisible()) is "captcha")
+					delay 3
+					set waited to waited + 3
+				end repeat
+			else
+				display dialog "Solve the hCaptcha in Safari, then click OK." buttons {"OK"} default button 1
+			end if
 		end if
-	end if
-
-	if skipEmail then
-		logLine("Skipping email change (--skip-email-change).")
-		if not batchMode then display dialog "Logged in via Safari. Email change skipped." buttons {"OK"} default button 1
-		return "login_ok"
-	end if
-
-	logLine("Opening account email settings…")
-	tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
-	delay 2
-
-	-- Wait for Riot personal-information email field
-	logLine("Waiting for personal-information-card__emailAddress…")
-	set emailReady to waitForEmailField(45)
-	logLine("Email field ready: " & emailReady)
-	if emailReady is not "ready" then
-		-- Try clicking edit/email controls once, then wait again
-		safariJS(jsClickEmailControl())
 		delay 2
-		set emailReady to waitForEmailField(30)
-		logLine("Email field ready (retry): " & emailReady)
-	end if
-	if emailReady is not "ready" then error "Could not find personal-information-card__emailAddress on account page."
 
-	-- Click the email field (focus / enable edit), then type the new address
-	logLine("Clicking email field…")
-	logLine(safariJS(jsClickEmailField()))
-	delay 0.4
+		-- Email verification: fetch the "Verify Your Email" link via IMAP and open it.
+		logStep("imap_verify_link")
+		logLine("Fetching verification link via IMAP…")
+		set verifyLink to fetchImapVerifyLink("NEW_IMAP", verifySinceEpoch)
+		if verifyLink is "" then set verifyLink to fetchImapVerifyLink("IMAP", verifySinceEpoch)
 
-	logLine("Filling new email: " & newEmail)
-	set emailFill to safariJS(jsFillEmail(newEmail))
-	logLine(emailFill)
-	if emailFill does not contain "filled=1" and emailFill does not contain "ok" then
-		error "Failed to type new email into personal-information-card__emailAddress (" & emailFill & ")"
-	end if
-	delay 0.6
-
-	-- Click SAVE AND VERIFY (personal-information-card__saveChanges-btn)
-	set verifySinceEpoch to do shell script "date +%s"
-	logLine("Waiting for SAVE AND VERIFY button…")
-	set saveReady to waitForSaveButton(20)
-	logLine("Save button ready: " & saveReady)
-	if saveReady is not "ready" then error "SAVE AND VERIFY button did not become enabled (personal-information-card__saveChanges-btn)."
-	logLine("Clicking SAVE AND VERIFY…")
-	set submitResult to safariJS(jsClickSaveAndVerify())
-	logLine(submitResult)
-	if submitResult does not contain "clicked-save" then error "Could not click SAVE AND VERIFY (" & submitResult & ")."
-	delay 3
-
-	-- If an hCaptcha challenge becomes visible, allow solving (skip in batch)
-	if safariJS(jsCaptchaVisible()) is "captcha" then
-		if batchMode then
-			logLine("hCaptcha challenge visible during save — waiting up to 60s for auto/solve…")
-			set waited to 0
-			repeat while waited < 60 and (safariJS(jsCaptchaVisible()) is "captcha")
-				delay 3
-				set waited to waited + 3
-			end repeat
+		if verifyLink is not "" then
+			logLine("Opening verification link in Safari…")
+			tell application "Safari" to set URL of document 1 to verifyLink
+			delay 4
+			-- Some landing pages need a confirm/verify click.
+			logLine(safariJS(jsClickVerifyOnLanding()))
+			delay 2
 		else
-			display dialog "Solve the hCaptcha in Safari, then click OK." buttons {"OK"} default button 1
+			if batchMode then
+				error "No Verify Your Email link found via IMAP within timeout."
+			else
+				display dialog "No verification link found via IMAP. Verify the email manually in Safari, then click OK." buttons {"OK"} default button 1
+			end if
 		end if
-	end if
-	delay 2
 
-	-- Email verification: fetch the "Verify Your Email" link via IMAP and open it.
-	logLine("Fetching verification link via IMAP…")
-	set verifyLink to fetchImapVerifyLink("NEW_IMAP", verifySinceEpoch)
-	if verifyLink is "" then set verifyLink to fetchImapVerifyLink("IMAP", verifySinceEpoch)
-
-	if verifyLink is not "" then
-		logLine("Opening verification link in Safari…")
-		tell application "Safari" to set URL of document 1 to verifyLink
-		delay 4
-		-- Some landing pages need a confirm/verify click.
-		logLine(safariJS(jsClickVerifyOnLanding()))
+		-- Log out everywhere, then move on to the next account.
+		logStep("logout_everywhere")
+		logLine("Returning to account page to log out everywhere…")
+		tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
+		delay 3
+		set logoutReady to waitForLogoutButton(20)
+		logLine("Logout button ready: " & logoutReady)
+		if logoutReady is not "ready" then error "Could not find log-out-everywhere-button after verification."
+		logLine("Clicking LOG OUT EVERYWHERE…")
+		set logoutResult to safariJS(jsClickLogoutEverywhere())
+		logLine(logoutResult)
+		if logoutResult does not contain "clicked-logout" then error "Could not click LOG OUT EVERYWHERE (" & logoutResult & ")."
+		delay 1
+		logLine(safariJS(jsConfirmLogoutEverywhere()))
 		delay 2
-	else
-		if batchMode then
-			error "No Verify Your Email link found via IMAP within timeout."
-		else
-			display dialog "No verification link found via IMAP. Verify the email manually in Safari, then click OK." buttons {"OK"} default button 1
+
+		if not batchMode then
+			display dialog "Finished this account (email changed + verify attempted + logged out)." buttons {"OK"} default button 1
 		end if
-	end if
-
-	-- Log out everywhere, then move on to the next account.
-	logLine("Returning to account page to log out everywhere…")
-	tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
-	delay 3
-	set logoutReady to waitForLogoutButton(20)
-	logLine("Logout button ready: " & logoutReady)
-	if logoutReady is not "ready" then error "Could not find log-out-everywhere-button after verification."
-	logLine("Clicking LOG OUT EVERYWHERE…")
-	set logoutResult to safariJS(jsClickLogoutEverywhere())
-	logLine(logoutResult)
-	if logoutResult does not contain "clicked-logout" then error "Could not click LOG OUT EVERYWHERE (" & logoutResult & ")."
-	delay 1
-	logLine(safariJS(jsConfirmLogoutEverywhere()))
-	delay 2
-
-	if not batchMode then
-		display dialog "Finished this account (email changed + verify attempted + logged out)." buttons {"OK"} default button 1
-	end if
-	logLine("SUCCESS")
-	return "done"
+		logLine("SUCCESS")
+		logLine("Debug log: " & logFilePath)
+		return "done"
+	on error errMsg number errNum
+		logLine("STEP FAILED: " & errMsg & " (" & errNum & ")")
+		dumpDebug("failure")
+		logLine("Debug log: " & logFilePath)
+		error errMsg number errNum
+	end try
 end run
 
 
@@ -261,12 +289,103 @@ on backslashChar()
 	return character id 92
 end backslashChar
 
-on logLine(msg)
-	log msg
+on logSafeLabel(labelText)
+	-- Keep filename-safe account tags short.
 	try
-		do shell script "echo " & quoted form of ("[safari-riot] " & msg) & " >&2"
+		set raw to labelText as text
+		if raw is "" then set raw to "run"
+		set cmd to "printf '%s' " & quoted form of raw & " | tr -c 'A-Za-z0-9._-' '_' | cut -c1-48"
+		set safe to do shell script cmd
+		if safe is "" then return "run"
+		return safe
+	on error
+		return "run"
 	end try
+end logSafeLabel
+
+on logInit(accountLabel)
+	-- Create (or reuse) debug/logs/safari_YYYYMMDD_HHMMSS_<user>.log for error investigation.
+	set logAccountLabel to accountLabel as text
+	set existing to envOrEmpty("SAFARI_LOG_PATH")
+	if existing is not "" then
+		set logFilePath to existing
+	else
+		set dir to scriptDir() & "/debug/logs"
+		try
+			do shell script "mkdir -p " & quoted form of dir
+		end try
+		set stamp to do shell script "date +%Y%m%d_%H%M%S"
+		set safe to logSafeLabel(logAccountLabel)
+		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
+	end if
+	logLine("=== safari-riot session start ===")
+	logLine("BUILD 2026-08-09g")
+	logLine("log file → " & logFilePath)
+	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
+	try
+		logLine("tool dir=" & scriptDir())
+	end try
+	try
+		logLine("cwd=" & (do shell script "pwd"))
+	end try
+end logInit
+
+on logLine(msg)
+	-- Console + durable investigation file (timestamped).
+	log msg
+	set body to msg as text
+	set ts to ""
+	try
+		set ts to do shell script "date '+%Y-%m-%d %H:%M:%S'"
+	end try
+	if ts is "" then
+		set line to "[safari-riot] " & body
+	else
+		set line to "[" & ts & "] [safari-riot] " & body
+	end if
+	try
+		do shell script "echo " & quoted form of line & " >&2"
+	end try
+	if logFilePath is not "" then
+		try
+			do shell script "printf '%s\n' " & quoted form of line & " >> " & quoted form of logFilePath
+		end try
+	end if
 end logLine
+
+on logStep(stepName)
+	logLine("STEP: " & stepName)
+end logStep
+
+on dumpDebug(reasonLabel)
+	-- Capture Safari URL/title + DOM probes for post-mortem investigation.
+	logLine("--- debug dump (" & reasonLabel & ") ---")
+	try
+		tell application "Safari"
+			try
+				set curURL to URL of document 1
+				logLine("safari.url=" & curURL)
+			on error errMsg
+				logLine("safari.url=<unavailable> (" & errMsg & ")")
+			end try
+			try
+				set curName to name of document 1
+				logLine("safari.title=" & curName)
+			on error errMsg
+				logLine("safari.title=<unavailable> (" & errMsg & ")")
+			end try
+		end tell
+	on error errMsg
+		logLine("safari dump failed: " & errMsg)
+	end try
+	try
+		set probe to safariJS(jsDumpPageState())
+		logLine("page.probe=" & probe)
+	on error errMsg
+		logLine("page.probe=<failed> (" & errMsg & ")")
+	end try
+	logLine("--- end debug dump ---")
+end dumpDebug
 
 on jsonString(s)
 	-- Produce a JS string literal safely for embedding in do JavaScript.
@@ -598,6 +717,45 @@ on jsProbeEmailField()
 		"})();"
 end jsProbeEmailField
 
+on jsDumpPageState()
+	-- Compact page snapshot for failure investigation (no passwords).
+	-- Avoid backslash escapes in this AppleScript string (Script Editor / osascript).
+	return "(function () {" & ¬
+		"  function has(sel) { return !!document.querySelector(sel); }" & ¬
+		"  function btnState(sel) {" & ¬
+		"    var el = document.querySelector(sel);" & ¬
+		"    if (!el) return 'missing';" & ¬
+		"    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return 'disabled';" & ¬
+		"    return 'enabled';" & ¬
+		"  }" & ¬
+		"  function flat(text) {" & ¬
+		"    var out = String(text || '');" & ¬
+		"    out = out.split(String.fromCharCode(10)).join(' ');" & ¬
+		"    out = out.split(String.fromCharCode(13)).join(' ');" & ¬
+		"    out = out.split(String.fromCharCode(9)).join(' ');" & ¬
+		"    while (out.indexOf('  ') >= 0) out = out.split('  ').join(' ');" & ¬
+		"    return out.replace(/^ +| +$/g, '');" & ¬
+		"  }" & ¬
+		"  var snippet = flat((document.body && document.body.innerText) || '').slice(0, 220);" & ¬
+		"  var emailEl = document.querySelector('input[data-testid=personal-information-card__emailAddress]');" & ¬
+		"  var emailVal = emailEl ? String(emailEl.value || '').slice(0, 80) : '';" & ¬
+		"  return JSON.stringify({" & ¬
+		"    href: location.href," & ¬
+		"    ready: document.readyState," & ¬
+		"    title: document.title || ''," & ¬
+		"    emailField: has('input[data-testid=personal-information-card__emailAddress]')," & ¬
+		"    emailValue: emailVal," & ¬
+		"    saveBtn: btnState('button[data-testid=personal-information-card__saveChanges-btn]')," & ¬
+		"    logoutBtn: btnState('button[data-testid=log-out-everywhere-button]')," & ¬
+		"    captcha: has('iframe[src*=hcaptcha.com]')," & ¬
+		"    loginUser: has('input[name=username], input[autocomplete=username]')," & ¬
+		"    loginPass: has('input[name=password], input[type=password]')," & ¬
+		"    mfa: has('input[name=code], input[autocomplete=one-time-code], input[inputmode=numeric]')," & ¬
+		"    bodySnippet: snippet" & ¬
+		"  });" & ¬
+		"})();"
+end jsDumpPageState
+
 on waitForEmailField(timeoutSec)
 	set deadline to (current date) + timeoutSec
 	repeat while (current date) < deadline
@@ -769,9 +927,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to toolkitRootFromCsv(found)
-		return "BUILD 2026-08-09f" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder."
+		return "BUILD 2026-08-09g" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder."
 	end if
-	return "BUILD 2026-08-09f" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-09g" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -786,7 +944,7 @@ on runBatchFromCsv()
 
 	set dir to toolkitRootFromCsv(csvPath)
 
-	display dialog "BUILD 2026-08-09f" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-09g" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Run all now via Safari?" buttons {"Cancel", "Run all"} default button "Run all"
 
 	set py to "/usr/bin/python3"
 	try
