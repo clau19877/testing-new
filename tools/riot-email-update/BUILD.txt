@@ -1,5 +1,4 @@
-BUILD 2026-08-09i
-Fix: do not run old ~/Desktop/riotemail scripts when CSV is found there.
-Tighten bad_creds probe (avoid false "try again" on login page).
-Investigation logs: debug/logs/safari_*.log
+BUILD 2026-08-09j
+Fix AppleScript -2763 after SAVE (Safari JS empty during navigation).
+Safer dumpDebug; treat account page / email field as logged-in.
 Zip does not include data/tasks.csv.
