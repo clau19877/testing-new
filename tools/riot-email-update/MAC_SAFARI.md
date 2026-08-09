@@ -99,7 +99,7 @@ IMAP_HOST=imap.mail.me.com IMAP_USER='you@icloud.com' IMAP_PASSWORD='app-passwor
 ```
 
 If Script Editor reports an error about setting `line` / `st` / `key`, update to
-the latest zip (**BUILD 2026-08-09r** or newer) — those names are reserved in
+the latest zip (**BUILD 2026-08-09s** or newer) — those names are reserved in
 AppleScript.
 
 ## Account flow

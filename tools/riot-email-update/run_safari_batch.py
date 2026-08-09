@@ -132,7 +132,7 @@ def kill_current_task() -> None:
         except Exception:
             proc.terminate()
         try:
-            proc.wait(timeout=2)
+            proc.wait(timeout=1.5)
         except Exception:
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
@@ -145,10 +145,69 @@ def kill_current_task() -> None:
         _current_proc = None
 
 
+def kill_helper_processes() -> None:
+    """Best-effort sweep of IMAP helpers / leftover osascript for this toolkit."""
+    patterns = (
+        "safari_riot_email.applescript",
+        "fetch_riot_verify_link.py",
+        "fetch_riot_imap_code.py",
+    )
+    for pat in patterns:
+        try:
+            subprocess.run(
+                ["pkill", "-TERM", "-f", pat],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+    time.sleep(0.2)
+    for pat in patterns:
+        try:
+            subprocess.run(
+                ["pkill", "-KILL", "-f", pat],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+
+
+def hard_exit(code: int = 130) -> None:
+    """Kill children and exit immediately (do not return into the batch loop)."""
+    try:
+        kill_current_task()
+    except Exception:
+        pass
+    try:
+        kill_helper_processes()
+    except Exception:
+        pass
+    try:
+        clear_pid_file()
+    except Exception:
+        pass
+    try:
+        STOP_FLAG.write_text(f"stopped {time.time()}\n", encoding="utf-8")
+    except Exception:
+        pass
+    os._exit(code)
+
+
 def install_signal_handlers() -> None:
     def _handler(signum, _frame) -> None:
         name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
-        request_stop(name)
+        print(
+            f"\n⏹  Signal {name} — hard-stopping batch now…",
+            flush=True,
+        )
+        try:
+            request_stop(name)
+        except Exception:
+            pass
+        hard_exit(130)
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -429,6 +488,11 @@ def run_one(
 
 def main() -> int:
     load_dotenv()
+    # Prefer our own process group so STOP_BATCH can `kill -- -$PID`.
+    try:
+        os.setsid()
+    except Exception:
+        pass
     install_signal_handlers()
     clear_stop_flag()
     write_pid_file()
@@ -597,8 +661,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except KeyboardInterrupt:
-        request_stop("KeyboardInterrupt")
-        kill_current_task()
-        clear_pid_file()
         print("\nInterrupted — batch stopped.", flush=True)
-        raise SystemExit(130)
+        hard_exit(130)

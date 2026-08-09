@@ -1,6 +1,5 @@
-BUILD 2026-08-09r
-IMAP verify reliability:
-  - Prefer SUBJECT "Verify Your Email" UIDs (fix merge window bug)
-  - Also search Junk; match recipient=new_email; 240s timeout
-Session restore after password change (09q) kept.
+BUILD 2026-08-09s
+Hard-stop fix: STOP_BATCH kills the full process tree
+  (python batch, osascript, IMAP helpers) and exits immediately.
+Safari navigation is stopped best-effort.
 Zip does not include data/tasks.csv.
