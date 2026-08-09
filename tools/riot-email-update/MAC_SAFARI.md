@@ -65,11 +65,12 @@ Do **not** set `SAFARI_BATCH_DELAY` below ~15 when CF has already fired on your 
 ## CSV format
 
 ```csv
-riot_username,riot_password,imap_email,imap_app_password,new_email,imap_host,imap_port,proxy_index,email_change_url
-RiotUser,YourRiotPass,you@icloud.com,xxxx-xxxx-xxxx-xxxx,new@icloud.com,imap.mail.me.com,993,,
+riot_username,riot_password,new_password,imap_email,imap_app_password,new_email,imap_host,imap_port,proxy_index,email_change_url
+RiotUser,OldPass,NewPass,you@icloud.com,xxxx-xxxx-xxxx-xxxx,new@icloud.com,imap.mail.me.com,993,,
 ```
 
 Results: `success.txt` / `failed.txt` in the same folder as the scripts.
+`success.txt` stores the **new** password after a successful change.
 
 ## Investigation logs
 
@@ -98,7 +99,7 @@ IMAP_HOST=imap.mail.me.com IMAP_USER='you@icloud.com' IMAP_PASSWORD='app-passwor
 ```
 
 If Script Editor reports an error about setting `line` / `st` / `key`, update to
-the latest zip (**BUILD 2026-08-09h** or newer) — those names are reserved in
+the latest zip (**BUILD 2026-08-09p** or newer) — those names are reserved in
 AppleScript.
 
 ## Account flow
@@ -106,12 +107,14 @@ AppleScript.
 For each CSV row, the runner:
 
 1. Logs in and waits for `https://account.riotgames.com/`
-2. Fills `personal-information-card__emailAddress`
-3. Clicks `personal-information-card__saveChanges-btn` (**SAVE AND VERIFY**)
-4. Waits via IMAP for a **Verify Your Email** message and opens its
+2. Changes password: `password-card__currentPassword` / `newPassword` /
+   `confirmNewPassword` → `password-card__submit-btn`
+3. Fills `personal-information-card__emailAddress`
+4. Clicks `personal-information-card__saveChanges-btn` (**SAVE AND VERIFY**)
+5. Waits via IMAP for a **Verify Your Email** message and opens its
    **Verify Email** link
-5. Returns to the account page, clicks `log-out-everywhere-button`, then Confirm (`modal_close-btn`)
-6. Records the result, then starts the next CSV row
+6. Returns to the account page, clicks `log-out-everywhere-button`, then Confirm (`modal_close-btn`)
+7. Records the result, then starts the next CSV row
 
 The zip contains only `data/tasks.csv.example`; updating the scripts will not
 replace your existing `data/tasks.csv`.

@@ -10,8 +10,10 @@ Stop immediately (does not continue remaining tasks):
   - touch .safari_batch_stop in the toolkit folder
 
 CSV columns (same as data/tasks.csv.example):
-  riot_username,riot_password,imap_email,imap_app_password,new_email,
+  riot_username,riot_password,new_password,imap_email,imap_app_password,new_email,
   imap_host,imap_port,proxy_index,email_change_url
+
+Flow per account: login → change password → change email → verify → logout.
 
 Usage (on a Mac with Safari JS-from-Apple-Events enabled):
   python3 run_safari_batch.py data/tasks.csv
@@ -195,9 +197,11 @@ def read_tasks(path: Path) -> list[dict[str, str]]:
             "imap_app_password",
             "new_email",
         }
-        missing = required - {h.strip() for h in reader.fieldnames if h}
+        headers = {h.strip() for h in reader.fieldnames if h}
+        missing = required - headers
         if missing:
             raise SystemExit(f"CSV missing columns: {sorted(missing)}")
+        skip_pw = os.getenv("SKIP_PASSWORD_CHANGE", "").strip() in {"1", "true", "yes"}
         for i, raw in enumerate(reader, start=2):
             row = {((k or "").strip()): (v or "").strip() for k, v in raw.items()}
             if not row.get("riot_username") or row["riot_username"].startswith("#"):
@@ -205,16 +209,22 @@ def read_tasks(path: Path) -> list[dict[str, str]]:
             for key in required:
                 if not row.get(key):
                     raise SystemExit(f"Row {i}: missing {key}")
+            if not skip_pw and not row.get("new_password"):
+                raise SystemExit(
+                    f"Row {i}: missing new_password "
+                    f"(add column, or SKIP_PASSWORD_CHANGE=1 / --skip-password-change)"
+                )
             rows.append(row)
     return rows
 
 
 def account_line(row: dict[str, str]) -> str:
-    """Compact line written to success.txt / failed.txt."""
+    """Compact line written to success.txt / failed.txt (uses new_password when set)."""
+    final_password = row.get("new_password") or row.get("riot_password", "")
     return "\t".join(
         [
             row.get("riot_username", ""),
-            row.get("riot_password", ""),
+            final_password,
             row.get("imap_email", ""),
             row.get("imap_app_password", ""),
             row.get("new_email", ""),
@@ -230,7 +240,11 @@ def append_line(path: Path, line: str) -> None:
 
 
 def run_one(
-    row: dict[str, str], *, entry_url: str, skip_email: bool
+    row: dict[str, str],
+    *,
+    entry_url: str,
+    skip_email: bool,
+    skip_password: bool,
 ) -> tuple[bool, str, str]:
     """Returns (ok, reason, investigation_log_path)."""
     global _current_proc
@@ -240,12 +254,15 @@ def run_one(
 
     imap_host = row.get("imap_host") or derive_imap_host(row["imap_email"])
     imap_port = row.get("imap_port") or "993"
+    new_password = row.get("new_password", "")
 
     log_path = new_log_path(tag=row["riot_username"], prefix="safari")
     write_line(log_path, f"batch start {row['riot_username']} → {row['new_email']}")
     write_line(log_path, f"imap={row['imap_email']}@{imap_host}:{imap_port}")
     write_line(log_path, f"entry_url={entry_url}")
     write_line(log_path, f"skip_email_change={int(skip_email)}")
+    write_line(log_path, f"skip_password_change={int(skip_password)}")
+    write_line(log_path, f"password_change={int(bool(new_password) and not skip_password)}")
 
     env = dict(os.environ)
     env.update(
@@ -258,6 +275,7 @@ def run_one(
             "IMAP_SSL": "true",
             "RIOT_USERNAME": row["riot_username"],
             "RIOT_PASSWORD": row["riot_password"],
+            "NEW_PASSWORD": new_password,
             "NEW_EMAIL": row["new_email"],
             "SAFARI_BATCH": "1",
             "SAFARI_LOG_PATH": str(log_path),
@@ -269,6 +287,7 @@ def run_one(
     task_lines = [
         f"riot_username={row['riot_username']}",
         f"riot_password={row['riot_password']}",
+        f"new_password={new_password}",
         f"new_email={row['new_email']}",
         f"imap_email={row['imap_email']}",
         f"imap_app_password={row['imap_app_password']}",
@@ -276,6 +295,7 @@ def run_one(
         f"imap_port={imap_port}",
         f"entry_url={entry_url}",
         f"skip_email_change={'1' if skip_email else '0'}",
+        f"skip_password_change={'1' if skip_password else '0'}",
     ]
     task_path.write_text("\n".join(task_lines) + "\n", encoding="utf-8")
     env["SAFARI_TASK_FILE"] = str(task_path)
@@ -378,6 +398,8 @@ def run_one(
         "hCaptcha",
         "MFA required",
         "SAVE AND VERIFY",
+        "password-card",
+        "new_password",
         "No Verify Your Email link",
         "log-out-everywhere-button",
         "LOG OUT EVERYWHERE",
@@ -417,7 +439,12 @@ def main() -> int:
     ap.add_argument(
         "--skip-email-change",
         action="store_true",
-        help="Only login each account (still records success/fail)",
+        help="Skip email change (password change still runs unless also skipped)",
+    )
+    ap.add_argument(
+        "--skip-password-change",
+        action="store_true",
+        help="Skip password change step (login → email only)",
     )
     ap.add_argument(
         "--delay",
@@ -427,6 +454,8 @@ def main() -> int:
     )
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+    if args.skip_password_change:
+        os.environ["SKIP_PASSWORD_CHANGE"] = "1"
 
     try:
         if sys.platform != "darwin" and not args.dry_run:
@@ -485,7 +514,10 @@ def main() -> int:
             print(f"\n>>> TASK {i}/{len(tasks)}", flush=True)
             try:
                 ok, reason, log_path = run_one(
-                    row, entry_url=args.entry_url, skip_email=args.skip_email_change
+                    row,
+                    entry_url=args.entry_url,
+                    skip_email=args.skip_email_change,
+                    skip_password=args.skip_password_change,
                 )
             except KeyboardInterrupt:
                 request_stop("KeyboardInterrupt")

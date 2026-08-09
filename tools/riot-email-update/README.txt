@@ -1,6 +1,11 @@
-BUILD 2026-08-09o
+BUILD 2026-08-09p
 
 This zip DOES NOT contain data/tasks.csv. Keep your existing file.
+
+Flow: login → change password → change email → IMAP verify → logout
+
+CSV must include new_password (current password stays in riot_password).
+Skip password step only: SKIP_PASSWORD_CHANGE=1 ./run_safari_mac.sh
 
 STOP the batch immediately:
   - Ctrl+C in Terminal
@@ -12,4 +17,4 @@ Update and run:
   chmod +x *.sh *.command fetch_riot_imap_code.py fetch_riot_verify_link.py
   ./run_safari_mac.sh
 
-Confirm BUILD 2026-08-09o in debug/logs/safari_*.log
+Confirm BUILD 2026-08-09p in debug/logs/safari_*.log

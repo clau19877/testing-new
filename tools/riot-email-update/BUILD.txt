@@ -1,4 +1,8 @@
-BUILD 2026-08-09o
-Hard-stop batch: Ctrl+C or STOP_BATCH.command (kills current task, skips rest).
-Faster post-login email fill (09n) + Cloudflare warm-up (09m) kept.
+BUILD 2026-08-09p
+Password change after login, before email:
+  password-card__currentPassword / newPassword / confirmNewPassword
+  → password-card__submit-btn
+CSV requires new_password (or SKIP_PASSWORD_CHANGE=1).
+success.txt stores the NEW password.
+Hard-stop: Ctrl+C or STOP_BATCH.command.
 Zip does not include data/tasks.csv.

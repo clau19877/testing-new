@@ -27,10 +27,12 @@ on run argv
 	set entryURL to optValue(opts, "entry-url", defaultEntryURL())
 	set riotUser to optValue(opts, "username", "")
 	set riotPass to optValue(opts, "password", "")
+	set newPass to optValue(opts, "new-password", "")
 	set newEmail to optValue(opts, "new-email", "")
 	set mfaCode to optValue(opts, "mfa-code", "")
 	set verifyCode to optValue(opts, "verify-code", "")
 	set skipEmail to optFlag(opts, "skip-email-change")
+	set skipPassword to optFlag(opts, "skip-password-change")
 	set batchMode to optFlag(opts, "batch")
 
 	-- Primary source for batch: task file written from tasks.csv (reliable).
@@ -40,18 +42,22 @@ on run argv
 		set batchMode to true
 		set tfUser to taskFileValue(taskFile, "riot_username")
 		set tfPass to taskFileValue(taskFile, "riot_password")
+		set tfNewPass to taskFileValue(taskFile, "new_password")
 		set tfEmail to taskFileValue(taskFile, "new_email")
 		set tfEntry to taskFileValue(taskFile, "entry_url")
 		if tfUser is not "" then set riotUser to tfUser
 		if tfPass is not "" then set riotPass to tfPass
+		if tfNewPass is not "" then set newPass to tfNewPass
 		if tfEmail is not "" then set newEmail to tfEmail
 		if tfEntry is not "" then set entryURL to tfEntry
 		if taskFileValue(taskFile, "skip_email_change") is "1" then set skipEmail to true
+		if taskFileValue(taskFile, "skip_password_change") is "1" then set skipPassword to true
 	end if
 
 	-- Fall back to env (batch runner also sets these from tasks.csv).
 	if riotUser is "" then set riotUser to envOrEmpty("RIOT_USERNAME")
 	if riotPass is "" then set riotPass to envOrEmpty("RIOT_PASSWORD")
+	if newPass is "" then set newPass to envOrEmpty("NEW_PASSWORD")
 	if newEmail is "" then set newEmail to envOrEmpty("NEW_EMAIL")
 	if entryURL is defaultEntryURL() then
 		set envEntry to envOrEmpty("LOGIN_ENTRY_URL")
@@ -60,6 +66,9 @@ on run argv
 	end if
 	if (not batchMode) and (envOrEmpty("SAFARI_BATCH") is "1") then
 		set batchMode to true
+	end if
+	if (not skipPassword) and (envOrEmpty("SKIP_PASSWORD_CHANGE") is "1") then
+		set skipPassword to true
 	end if
 
 	-- Start a per-account debug log now that the username is resolved.
@@ -86,8 +95,16 @@ on run argv
 		if batchMode then error "batch mode: no new_email (check tasks.csv)"
 		error "No new email in the task. Check data/tasks.csv new_email column."
 	end if
+	if (not skipPassword) and newPass is "" then
+		if batchMode then error "batch mode: no new_password (add new_password column to tasks.csv, or set skip_password_change=1)"
+		error "No new password in the task. Check data/tasks.csv new_password column."
+	end if
 
-	logLine("Account: " & riotUser & " -> " & newEmail)
+	if skipPassword then
+		logLine("Account: " & riotUser & " -> " & newEmail & " (skip password change)")
+	else
+		logLine("Account: " & riotUser & " -> " & newEmail & " (will change password first)")
+	end if
 	try
 		-- Warm Safari with a normal page before hitting Riot via docs.qq (helps avoid Cloudflare).
 		logStep("warmup")
@@ -211,20 +228,75 @@ on run argv
 			logLine("Email field already visible after login — skipping account reload wait")
 		end if
 
+		-- Ensure we are on the account page before password / email edits.
+		if emailReady is not "ready" then
+			logStep("open_account")
+			logLine("Opening account settings…")
+			tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
+			humanDelay(0.8, 1.5)
+		end if
+
+		-- Password change (before email): current / new / confirm → password-card__submit-btn
+		if not skipPassword then
+			logStep("change_password")
+			logLine("Waiting for password-card fields…")
+			set pwReady to waitForPasswordFields(20)
+			logLine("Password fields ready: " & pwReady)
+			if pwReady is not "ready" then
+				tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
+				humanDelay(1.0, 1.8)
+				set pwReady to waitForPasswordFields(20)
+				logLine("Password fields ready (retry): " & pwReady)
+			end if
+			if pwReady is not "ready" then error "Could not find password-card__currentPassword / newPassword / confirmNewPassword."
+
+			logLine("Filling current + new password…")
+			set pwFill to safariJS(jsFillPasswordChange(riotPass, newPass))
+			logLine(pwFill)
+			if pwFill does not contain "filled=1" then error "Failed to fill password-card fields (" & pwFill & ")"
+			humanDelay(0.5, 1.0)
+
+			logLine("Waiting for password SAVE / submit button…")
+			set pwSaveReady to waitForPasswordSaveButton(15)
+			logLine("Password save ready: " & pwSaveReady)
+			if pwSaveReady is not "ready" then error "password-card__submit-btn did not become enabled."
+			logLine("Clicking password-card__submit-btn…")
+			set pwSaveResult to safariJS(jsClickPasswordSave())
+			logLine(pwSaveResult)
+			if pwSaveResult does not contain "clicked-password-save" then error "Could not click password-card__submit-btn (" & pwSaveResult & ")."
+			humanDelay(1.5, 2.5)
+
+			-- Password change may ask for MFA; reuse IMAP when needed.
+			set pwPhase to waitForPostLogin(25)
+			logLine("Post-password-change phase: " & pwPhase)
+			if pwPhase is "mfa" then
+				set pwMfa to fetchImapCode("IMAP")
+				if pwMfa is "" then
+					if batchMode then error "Password change MFA required but no IMAP code"
+					set pwMfa to text returned of (display dialog "Enter Riot MFA code for password change:" default answer "")
+				end if
+				if pwMfa is not "" then
+					logLine("Submitting MFA for password change…")
+					safariJS(jsSubmitCode(pwMfa, "mfa"))
+					humanDelay(2.0, 3.0)
+				end if
+			end if
+			-- Keep using the new password for the rest of this session / logging.
+			set riotPass to newPass
+			logLine("Password change submitted; continuing to email update…")
+			-- Refresh account page so email card is ready.
+			tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
+			humanDelay(0.8, 1.5)
+		else
+			logLine("Skipping password change.")
+		end if
+
 		if skipEmail then
 			logLine("Skipping email change (--skip-email-change).")
 			if not batchMode then display dialog "Logged in via Safari. Email change skipped." buttons {"OK"} default button 1
 			logLine("SUCCESS")
 			logLine("Debug log: " & logFilePath)
 			return "login_ok"
-		end if
-
-		-- Only navigate if we are not already on the account settings page with the field.
-		if emailReady is not "ready" then
-			logStep("open_account")
-			logLine("Opening account email settings…")
-			tell application "Safari" to set URL of document 1 to "https://account.riotgames.com/"
-			humanDelay(0.8, 1.5)
 		end if
 
 		logStep("wait_email_field")
@@ -393,7 +465,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-09o")
+	logLine("BUILD 2026-08-09p")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -771,6 +843,109 @@ on jsFillEmail(emailText)
 		"  return (ok ? 'filled=1 ok' : 'filled=0 mismatch') + ' testid=' + (el.getAttribute('data-testid') || '') + ' value=' + String(el.value || '').slice(0, 60);" & ¬
 		"})(" & jsonString(emailText) & ");"
 end jsFillEmail
+
+on jsProbePasswordFields()
+	return "(function () {" & ¬
+		"  var cur = document.querySelector('input[data-testid=password-card__currentPassword]');" & ¬
+		"  var neu = document.querySelector('input[data-testid=password-card__newPassword]');" & ¬
+		"  var conf = document.querySelector('input[data-testid=password-card__confirmNewPassword]');" & ¬
+		"  if (cur && neu && conf) return 'ready';" & ¬
+		"  return 'missing';" & ¬
+		"})();"
+end jsProbePasswordFields
+
+on waitForPasswordFields(timeoutSec)
+	set deadline to (current date) + timeoutSec
+	repeat while (current date) < deadline
+		set pwState to "missing"
+		try
+			set pwState to safariJS(jsProbePasswordFields()) as text
+		end try
+		if pwState is "ready" then return "ready"
+		delay 0.35
+	end repeat
+	return "timeout"
+end waitForPasswordFields
+
+on jsFillPasswordChange(currentPass, nextPass)
+	-- password-card__currentPassword / newPassword / confirmNewPassword
+	return "(function (curPass, newPass) {" & ¬
+		"  function setNative(el, value) {" & ¬
+		"    if (!el) return false;" & ¬
+		"    el.focus();" & ¬
+		"    el.click();" & ¬
+		"    const proto = window.HTMLInputElement.prototype;" & ¬
+		"    const desc = Object.getOwnPropertyDescriptor(proto, 'value');" & ¬
+		"    if (desc && desc.set) desc.set.call(el, '');" & ¬
+		"    else el.value = '';" & ¬
+		"    el.dispatchEvent(new Event('input', { bubbles: true }));" & ¬
+		"    if (desc && desc.set) desc.set.call(el, value);" & ¬
+		"    else el.value = value;" & ¬
+		"    el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));" & ¬
+		"    el.dispatchEvent(new Event('change', { bubbles: true }));" & ¬
+		"    el.dispatchEvent(new Event('blur', { bubbles: true }));" & ¬
+		"    return el.value === value;" & ¬
+		"  }" & ¬
+		"  var cur = document.querySelector('input[data-testid=password-card__currentPassword]');" & ¬
+		"  var neu = document.querySelector('input[data-testid=password-card__newPassword]');" & ¬
+		"  var conf = document.querySelector('input[data-testid=password-card__confirmNewPassword]');" & ¬
+		"  if (!cur || !neu || !conf) return 'filled=0 missing-field';" & ¬
+		"  try { cur.scrollIntoView({ block: 'center' }); } catch (e0) {}" & ¬
+		"  var okCur = setNative(cur, curPass);" & ¬
+		"  var okNew = setNative(neu, newPass);" & ¬
+		"  var okConf = setNative(conf, newPass);" & ¬
+		"  return (okCur && okNew && okConf ? 'filled=1 ok' : 'filled=0 mismatch')" & ¬
+		"    + ' cur=' + okCur + ' new=' + okNew + ' conf=' + okConf;" & ¬
+		"})(" & jsonString(currentPass) & ", " & jsonString(nextPass) & ");"
+end jsFillPasswordChange
+
+on jsProbePasswordSaveButton()
+	return "(function () {" & ¬
+		"  var btn = document.querySelector('button[data-testid=password-card__submit-btn]');" & ¬
+		"  if (!btn) {" & ¬
+		"    var cands = Array.from(document.querySelectorAll('button[type=submit], button'));" & ¬
+		"    btn = cands.find(function (b) {" & ¬
+		"      var t = ((b.getAttribute('data-testid') || '') + ' ' + (b.getAttribute('title') || '') + ' ' + (b.textContent || '')).toLowerCase();" & ¬
+		"      return t.indexOf('password-card__submit') >= 0 || (t.indexOf('save') >= 0 && t.indexOf('password') >= 0);" & ¬
+		"    }) || null;" & ¬
+		"  }" & ¬
+		"  if (!btn) return 'missing';" & ¬
+		"  if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') return 'disabled';" & ¬
+		"  return 'ready';" & ¬
+		"})();"
+end jsProbePasswordSaveButton
+
+on waitForPasswordSaveButton(timeoutSec)
+	set deadline to (current date) + timeoutSec
+	repeat while (current date) < deadline
+		set pwSaveState to "missing"
+		try
+			set pwSaveState to safariJS(jsProbePasswordSaveButton()) as text
+		end try
+		if pwSaveState is "ready" then return "ready"
+		delay 0.35
+	end repeat
+	return "timeout"
+end waitForPasswordSaveButton
+
+on jsClickPasswordSave()
+	-- Riot password save: button[data-testid=password-card__submit-btn]
+	return "(function () {" & ¬
+		"  var btn = document.querySelector('button[data-testid=password-card__submit-btn]');" & ¬
+		"  if (!btn) {" & ¬
+		"    var cands = Array.from(document.querySelectorAll('button[type=submit], button'));" & ¬
+		"    btn = cands.find(function (b) {" & ¬
+		"      var t = ((b.getAttribute('data-testid') || '') + ' ' + (b.getAttribute('title') || '') + ' ' + (b.textContent || '')).toLowerCase();" & ¬
+		"      return t.indexOf('password-card__submit') >= 0 || ((t.indexOf('save') >= 0 || t.indexOf('change password') >= 0) && t.indexOf('email') < 0);" & ¬
+		"    }) || null;" & ¬
+		"  }" & ¬
+		"  if (!btn) return 'no-password-save-button';" & ¬
+		"  if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') return 'password-save-disabled';" & ¬
+		"  try { btn.scrollIntoView({ block: 'center' }); } catch (e1) {}" & ¬
+		"  btn.click();" & ¬
+		"  return 'clicked-password-save:' + ((btn.getAttribute('title') || btn.textContent || '').trim().slice(0, 40));" & ¬
+		"})();"
+end jsClickPasswordSave
 
 on jsClickSaveAndVerify()
 	-- Riot save button appears once the email field is dirty:
@@ -1170,7 +1345,7 @@ on parseArgs(argv)
 		else if a starts with "--" then
 			-- NOTE: do not use variable name "key" — reserved in AppleScript (-10006)
 			set flagName to text 3 thru -1 of a
-			if flagName is "skip-email-change" or flagName is "batch" then
+			if flagName is "skip-email-change" or flagName is "skip-password-change" or flagName is "batch" then
 				set end of opts to {flagName, "1"}
 			else if i < (count of argv) then
 				set i to i + 1
@@ -1294,9 +1469,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-09o" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-09p" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-09o" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-09p" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -1317,7 +1492,7 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-09o" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-09p" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
 
 	set py to "/usr/bin/python3"
 	try
