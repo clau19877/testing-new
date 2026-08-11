@@ -18,9 +18,12 @@ Stop immediately (does not continue remaining tasks):
 
 CSV columns (same as data/tasks.csv.example):
   riot_username,riot_password,new_password,imap_email,imap_app_password,new_email,
-  imap_host,imap_port,proxy_index,email_change_url
+  imap_host,imap_port,proxy_index,email_change_url,change_password
 
-Flow per account: login → change password → change email → verify → logout.
+  change_password: 1 = change password after email, 0 = skip password change.
+  Missing change_password defaults to 1. Global SKIP_PASSWORD_CHANGE=1 forces off.
+
+Flow per account: login → change email → verify → (optional) change password → logout.
 
 Usage (on a Mac with Safari JS-from-Apple-Events enabled):
   python3 run_safari_batch.py data/tasks.csv
@@ -250,6 +253,24 @@ def load_dotenv() -> None:
             os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
+def _truthy_flag(value: str | None, *, default: bool = True) -> bool:
+    raw = (value or "").strip().lower()
+    if raw == "":
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def wants_password_change(row: dict[str, str]) -> bool:
+    """Per-row change_password (1/0); SKIP_PASSWORD_CHANGE=1 forces off for all."""
+    if os.getenv("SKIP_PASSWORD_CHANGE", "").strip().lower() in {"1", "true", "yes"}:
+        return False
+    return _truthy_flag(row.get("change_password"), default=True)
+
+
 def read_tasks(path: Path) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     with path.open(newline="", encoding="utf-8-sig") as f:
@@ -267,7 +288,6 @@ def read_tasks(path: Path) -> list[dict[str, str]]:
         missing = required - headers
         if missing:
             raise SystemExit(f"CSV missing columns: {sorted(missing)}")
-        skip_pw = os.getenv("SKIP_PASSWORD_CHANGE", "").strip() in {"1", "true", "yes"}
         for i, raw in enumerate(reader, start=2):
             row = {((k or "").strip()): (v or "").strip() for k, v in raw.items()}
             if not row.get("riot_username") or row["riot_username"].startswith("#"):
@@ -275,10 +295,16 @@ def read_tasks(path: Path) -> list[dict[str, str]]:
             for key in required:
                 if not row.get(key):
                     raise SystemExit(f"Row {i}: missing {key}")
-            if not skip_pw and not row.get("new_password"):
+            # Normalize per-row flag for task file / failed.txt (1/0 only).
+            row["change_password"] = (
+                "1" if _truthy_flag(row.get("change_password"), default=True) else "0"
+            )
+            # new_password required when this row would change password (SKIP forces off).
+            if wants_password_change(row) and not row.get("new_password"):
                 raise SystemExit(
                     f"Row {i}: missing new_password "
-                    f"(add column, or SKIP_PASSWORD_CHANGE=1 / --skip-password-change)"
+                    f"(required when change_password=1; set change_password=0 to skip, "
+                    f"or SKIP_PASSWORD_CHANGE=1 / --skip-password-change)"
                 )
             rows.append(row)
     return rows
@@ -295,12 +321,16 @@ TASK_CSV_FIELDS = [
     "imap_port",
     "proxy_index",
     "email_change_url",
+    "change_password",
 ]
 
 
 def account_line(row: dict[str, str]) -> str:
-    """Compact line written to success.txt (uses new_password when set)."""
-    final_password = row.get("new_password") or row.get("riot_password", "")
+    """Compact line written to success.txt (new_password only if password change ran)."""
+    if wants_password_change(row) and row.get("new_password"):
+        final_password = row["new_password"]
+    else:
+        final_password = row.get("riot_password", "")
     return "\t".join(
         [
             row.get("riot_username", ""),
@@ -319,15 +349,35 @@ def append_line(path: Path, line: str) -> None:
         f.write(line.rstrip("\n") + "\n")
 
 
-def task_csv_row_for_rerun(row: dict[str, str]) -> dict[str, str]:
+def password_change_completed(log_path: str, output: str) -> bool:
+    """True if the password step likely finished (email-first flow)."""
+    blob = output or ""
+    if log_path:
+        try:
+            blob += "\n" + Path(log_path).read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    markers = (
+        "Account session ready after password change",
+        "Password change submitted",
+        "clicked-password-save",
+    )
+    return any(marker in blob for marker in markers)
+
+
+def task_csv_row_for_rerun(
+    row: dict[str, str], *, password_changed: bool = False
+) -> dict[str, str]:
     """Build a tasks.csv-compatible row for failed.txt paste/rerun.
 
-    If new_password was set, use it as riot_password for retry — password change
-    usually already succeeded before a later email/IMAP failure.
+    With email-first flow, only swap riot_password → new_password when the
+    password step actually ran (otherwise retry would use the wrong password).
     """
     out = {key: (row.get(key) or "").strip() for key in TASK_CSV_FIELDS}
+    if not out.get("change_password"):
+        out["change_password"] = "1" if wants_password_change(row) else "0"
     new_password = out.get("new_password") or ""
-    if new_password:
+    if password_changed and new_password:
         out["riot_password"] = new_password
     out["imap_host"] = out.get("imap_host") or derive_imap_host(out.get("imap_email", ""))
     if not out.get("imap_port"):
@@ -335,7 +385,9 @@ def task_csv_row_for_rerun(row: dict[str, str]) -> dict[str, str]:
     return out
 
 
-def append_failed_csv(path: Path, row: dict[str, str]) -> None:
+def append_failed_csv(
+    path: Path, row: dict[str, str], *, password_changed: bool = False
+) -> None:
     """Append one paste-ready tasks.csv row (writes header if file is new/empty)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     write_header = (not path.exists()) or path.stat().st_size == 0
@@ -343,7 +395,7 @@ def append_failed_csv(path: Path, row: dict[str, str]) -> None:
         writer = csv.DictWriter(f, fieldnames=TASK_CSV_FIELDS, extrasaction="ignore")
         if write_header:
             writer.writeheader()
-        writer.writerow(task_csv_row_for_rerun(row))
+        writer.writerow(task_csv_row_for_rerun(row, password_changed=password_changed))
 
 
 def remove_username_from_tasks_csv(path: Path, username: str) -> bool:
@@ -402,9 +454,11 @@ def run_one(
     write_line(log_path, f"batch start {row['riot_username']} → {row['new_email']}")
     write_line(log_path, f"imap={row['imap_email']}@{imap_host}:{imap_port}")
     write_line(log_path, f"entry_url={entry_url}")
+    do_password = (not skip_password) and wants_password_change(row) and bool(new_password)
     write_line(log_path, f"skip_email_change={int(skip_email)}")
-    write_line(log_path, f"skip_password_change={int(skip_password)}")
-    write_line(log_path, f"password_change={int(bool(new_password) and not skip_password)}")
+    write_line(log_path, f"skip_password_change={int(not do_password)}")
+    write_line(log_path, f"change_password={1 if do_password else 0}")
+    write_line(log_path, f"password_change={int(do_password)}")
 
     env = dict(os.environ)
     env.update(
@@ -419,6 +473,7 @@ def run_one(
             "RIOT_PASSWORD": row["riot_password"],
             "NEW_PASSWORD": new_password,
             "NEW_EMAIL": row["new_email"],
+            "CHANGE_PASSWORD": "1" if do_password else "0",
             "SAFARI_BATCH": "1",
             "SAFARI_LOG_PATH": str(log_path),
         }
@@ -437,7 +492,8 @@ def run_one(
         f"imap_port={imap_port}",
         f"entry_url={entry_url}",
         f"skip_email_change={'1' if skip_email else '0'}",
-        f"skip_password_change={'1' if skip_password else '0'}",
+        f"skip_password_change={'0' if do_password else '1'}",
+        f"change_password={'1' if do_password else '0'}",
     ]
     task_path.write_text("\n".join(task_lines) + "\n", encoding="utf-8")
     env["SAFARI_TASK_FILE"] = str(task_path)
@@ -533,6 +589,16 @@ def run_one(
         write_line(log_path, "RESULT: success")
         return True, "ok", str(log_path)
 
+    # Stash for failed.txt password swap (email-first: only if password step ran).
+    try:
+        write_line(
+            log_path,
+            "password_step_done="
+            + str(int(password_change_completed(str(log_path), out))),
+        )
+    except Exception:
+        pass
+
     reason = "osascript_failed"
     # Prefer specific terminal errors over earlier step names that also appear in logs
     # (e.g. "password-card" / "SAVE AND VERIFY" show up even when IMAP verify fails).
@@ -598,7 +664,7 @@ def main() -> int:
     ap.add_argument(
         "--skip-password-change",
         action="store_true",
-        help="Skip password change step (login → email only)",
+        help="Force skip password change for all rows (overrides CSV change_password=1)",
     )
     ap.add_argument(
         "--delay",
@@ -678,7 +744,8 @@ def main() -> int:
                     row,
                     entry_url=args.entry_url,
                     skip_email=args.skip_email_change,
-                    skip_password=args.skip_password_change,
+                    skip_password=args.skip_password_change
+                    or not wants_password_change(row),
                 )
             except KeyboardInterrupt:
                 request_stop("KeyboardInterrupt")
@@ -712,7 +779,8 @@ def main() -> int:
                 if log_path:
                     print(f"  log → {log_path}", flush=True)
             else:
-                append_failed_csv(failed_path, row)
+                pw_done = password_change_completed(log_path or "", "")
+                append_failed_csv(failed_path, row, password_changed=pw_done)
                 append_line(
                     failed_reasons_path,
                     "\t".join(
@@ -728,11 +796,18 @@ def main() -> int:
                     f"FAILED  → {failed_path.name}: {row['riot_username']} ({reason})",
                     flush=True,
                 )
-                print(
-                    "  tip: failed.txt is CSV — copy rows into tasks.csv to rerun "
-                    "(riot_password already set to new_password when present)",
-                    flush=True,
-                )
+                if pw_done:
+                    print(
+                        "  tip: failed.txt is CSV — copy rows into tasks.csv to rerun "
+                        "(riot_password set to new_password; password step had run)",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        "  tip: failed.txt is CSV — copy rows into tasks.csv to rerun "
+                        "(riot_password unchanged; password step had not run yet)",
+                        flush=True,
+                    )
                 if log_path:
                     print(f"  investigation log → {log_path}", flush=True)
 

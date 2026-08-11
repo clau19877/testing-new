@@ -1,4 +1,4 @@
-BUILD 2026-08-09x
+BUILD 2026-08-09y
 
 This zip DOES NOT contain data/tasks.csv. Keep your existing file.
 
@@ -8,4 +8,6 @@ Prefer:
   ./run_safari_mac.sh
   or double-click RUN_ME.command
 
-Confirm BUILD 2026-08-09x in debug/logs/safari_*.log
+Flow: email first, then optional password (CSV change_password 1/0).
+
+Confirm BUILD 2026-08-09y in debug/logs/safari_*.log

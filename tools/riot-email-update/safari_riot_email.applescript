@@ -54,6 +54,13 @@ on run argv
 		if tfEntry is not "" then set entryURL to tfEntry
 		if taskFileValue(taskFile, "skip_email_change") is "1" then set skipEmail to true
 		if taskFileValue(taskFile, "skip_password_change") is "1" then set skipPassword to true
+		-- Per-row CSV column change_password: 1=on, 0=off (overrides default).
+		set changePwRaw to taskFileValue(taskFile, "change_password")
+		if changePwRaw is "0" then
+			set skipPassword to true
+		else if changePwRaw is "1" then
+			set skipPassword to false
+		end if
 	end if
 
 	-- Fall back to env (batch runner also sets these from tasks.csv).
@@ -69,8 +76,16 @@ on run argv
 	if (not batchMode) and (envOrEmpty("SAFARI_BATCH") is "1") then
 		set batchMode to true
 	end if
-	if (not skipPassword) and (envOrEmpty("SKIP_PASSWORD_CHANGE") is "1") then
+	-- Global override wins over CSV change_password.
+	if envOrEmpty("SKIP_PASSWORD_CHANGE") is "1" then
 		set skipPassword to true
+	end if
+	-- Env CHANGE_PASSWORD=0/1 also accepted for one-off runs.
+	set envChangePw to envOrEmpty("CHANGE_PASSWORD")
+	if envChangePw is "0" then
+		set skipPassword to true
+	else if envChangePw is "1" then
+		if envOrEmpty("SKIP_PASSWORD_CHANGE") is not "1" then set skipPassword to false
 	end if
 
 	-- Start a per-account debug log now that the username is resolved.
@@ -98,14 +113,14 @@ on run argv
 		error "No new email in the task. Check data/tasks.csv new_email column."
 	end if
 	if (not skipPassword) and newPass is "" then
-		if batchMode then error "batch mode: no new_password (add new_password column to tasks.csv, or set skip_password_change=1)"
-		error "No new password in the task. Check data/tasks.csv new_password column."
+		if batchMode then error "batch mode: no new_password (set new_password, or change_password=0 / SKIP_PASSWORD_CHANGE=1)"
+		error "No new password in the task. Check data/tasks.csv new_password column (or set change_password=0)."
 	end if
 
 	if skipPassword then
-		logLine("Account: " & riotUser & " -> " & newEmail & " (skip password change)")
+		logLine("Account: " & riotUser & " -> " & newEmail & " (email first; password change OFF)")
 	else
-		logLine("Account: " & riotUser & " -> " & newEmail & " (will change password first)")
+		logLine("Account: " & riotUser & " -> " & newEmail & " (email first, then password)")
 	end if
 	try
 		-- Warm Safari with a normal page before hitting Riot via docs.qq (helps avoid Cloudflare).
@@ -240,9 +255,100 @@ on run argv
 			humanDelay(0.8, 1.5)
 		end if
 
-		-- Password change (before email): current / new / confirm → password-card__submit-btn
-		if not skipPassword then
+		-- ===== Email change FIRST =====
+		if skipEmail then
+			logLine("Skipping email change (--skip-email-change / skip_email_change=1).")
+		else
+			logStep("wait_email_field")
+			ensureAccountSession(riotUser, riotPass, batchMode)
+			logLine("Waiting for personal-information-card__emailAddress…")
+			set emailReady to waitForEmailField(20)
+			logLine("Email field ready: " & emailReady)
+			if emailReady is not "ready" then
+				safariJS(jsClickEmailControl())
+				humanDelay(0.6, 1.2)
+				set emailReady to waitForEmailField(12)
+				logLine("Email field ready (retry): " & emailReady)
+			end if
+			if emailReady is not "ready" then error "Could not find personal-information-card__emailAddress on account page."
+
+			logStep("fill_email")
+			logLine("Clicking email field…")
+			logLine(safariJS(jsClickEmailField()))
+			delay 0.4
+
+			logLine("Filling new email: " & newEmail)
+			set emailFill to safariJS(jsFillEmail(newEmail))
+			logLine(emailFill)
+			if emailFill does not contain "filled=1" and emailFill does not contain "ok" then
+				error "Failed to type new email into personal-information-card__emailAddress (" & emailFill & ")"
+			end if
+			delay 0.6
+
+			set verifySinceEpoch to do shell script "date +%s"
+			logStep("save_and_verify")
+			logLine("Waiting for SAVE AND VERIFY button…")
+			set saveReady to waitForSaveButton(20)
+			logLine("Save button ready: " & saveReady)
+			if saveReady is not "ready" then error "SAVE AND VERIFY button did not become enabled (personal-information-card__saveChanges-btn)."
+			logLine("Clicking SAVE AND VERIFY…")
+			set submitResult to safariJS(jsClickSaveAndVerify())
+			logLine(submitResult)
+			if submitResult does not contain "clicked-save" then error "Could not click SAVE AND VERIFY (" & submitResult & ")."
+			delay 3
+
+			set captchaState to ""
+			try
+				set captchaState to safariJS(jsCaptchaVisible())
+			end try
+			logLine("Post-save captcha state: " & captchaState)
+			if captchaState is "captcha" then
+				if batchMode then
+					logLine("hCaptcha challenge visible during save — waiting up to 60s for auto/solve…")
+					set waited to 0
+					repeat while waited < 60
+						set captchaState to ""
+						try
+							set captchaState to safariJS(jsCaptchaVisible())
+						end try
+						if captchaState is not "captcha" then exit repeat
+						waitTick(3)
+						set waited to waited + 3
+					end repeat
+				else
+					display dialog "Solve the hCaptcha in Safari, then click OK." buttons {"OK"} default button 1
+				end if
+			end if
+			delay 2
+
+			logStep("imap_verify_link")
+			logLine("Fetching verification link via IMAP (prefer recipient=" & newEmail & ")…")
+			set verifyLink to fetchImapVerifyLink("NEW_IMAP", verifySinceEpoch, newEmail)
+			if verifyLink is "" then set verifyLink to fetchImapVerifyLink("IMAP", verifySinceEpoch, newEmail)
+
+			if verifyLink is not "" then
+				logLine("Opening verification link in Safari…")
+				safariGoTo(verifyLink)
+				waitTick(4)
+				logLine(safariJS(jsClickVerifyOnLanding()))
+				waitTick(2)
+			else
+				if batchMode then
+					error "No Verify Your Email link found via IMAP within timeout."
+				else
+					display dialog "No verification link found via IMAP. Verify the email manually in Safari, then click OK." buttons {"OK"} default button 1
+				end if
+			end if
+			logLine("Email change + verify complete.")
+		end if
+
+		-- ===== Password change SECOND (change_password=1) =====
+		if skipPassword then
+			logLine("Skipping password change (change_password=0 / SKIP_PASSWORD_CHANGE=1).")
+		else
 			logStep("change_password")
+			logLine("Returning to account page before password change…")
+			ensureAccountSession(riotUser, riotPass, batchMode)
 			logLine("Waiting for password-card fields…")
 			set pwReady to waitForPasswordFields(20)
 			logLine("Password fields ready: " & pwReady)
@@ -270,7 +376,6 @@ on run argv
 			if pwSaveResult does not contain "clicked-password-save" then error "Could not click password-card__submit-btn (" & pwSaveResult & ")."
 			humanDelay(2.0, 3.5)
 
-			-- Password change may ask for MFA; reuse IMAP when needed.
 			set pwPhase to waitForPostLogin(20)
 			logLine("Post-password-change phase: " & pwPhase)
 			if pwPhase is "mfa" then
@@ -285,8 +390,6 @@ on run argv
 					humanDelay(2.0, 3.0)
 				end if
 			end if
-			-- Riot typically invalidates the session after a password change.
-			-- Switch to the new password and re-login if Safari lands on authenticate.*.
 			set riotPass to newPass
 			logLine("Password change submitted; watching for session drop…")
 			set settleWaited to 0
@@ -305,110 +408,19 @@ on run argv
 			end repeat
 			logLine("Restoring account session with new password if needed…")
 			ensureAccountSession(riotUser, riotPass, batchMode)
-			logLine("Account session ready after password change — continuing to email update…")
-		else
-			logLine("Skipping password change.")
+			logLine("Account session ready after password change.")
 		end if
 
-		if skipEmail then
-			logLine("Skipping email change (--skip-email-change).")
-			if not batchMode then display dialog "Logged in via Safari. Email change skipped." buttons {"OK"} default button 1
+		if skipEmail and skipPassword then
+			if not batchMode then display dialog "Logged in via Safari. Email + password changes skipped." buttons {"OK"} default button 1
 			logLine("SUCCESS")
 			logLine("Debug log: " & logFilePath)
 			return "login_ok"
 		end if
 
-		logStep("wait_email_field")
-		-- Re-check session before email edit (password change / redirect can drop it).
-		ensureAccountSession(riotUser, riotPass, batchMode)
-		logLine("Waiting for personal-information-card__emailAddress…")
-		set emailReady to waitForEmailField(20)
-		logLine("Email field ready: " & emailReady)
-		if emailReady is not "ready" then
-			safariJS(jsClickEmailControl())
-			humanDelay(0.6, 1.2)
-			set emailReady to waitForEmailField(12)
-			logLine("Email field ready (retry): " & emailReady)
-		end if
-		if emailReady is not "ready" then error "Could not find personal-information-card__emailAddress on account page."
-
-		-- Click the email field (focus / enable edit), then type the new address
-		logStep("fill_email")
-		logLine("Clicking email field…")
-		logLine(safariJS(jsClickEmailField()))
-		delay 0.4
-
-		logLine("Filling new email: " & newEmail)
-		set emailFill to safariJS(jsFillEmail(newEmail))
-		logLine(emailFill)
-		if emailFill does not contain "filled=1" and emailFill does not contain "ok" then
-			error "Failed to type new email into personal-information-card__emailAddress (" & emailFill & ")"
-		end if
-		delay 0.6
-
-		-- Click SAVE AND VERIFY (personal-information-card__saveChanges-btn)
-		set verifySinceEpoch to do shell script "date +%s"
-		logStep("save_and_verify")
-		logLine("Waiting for SAVE AND VERIFY button…")
-		set saveReady to waitForSaveButton(20)
-		logLine("Save button ready: " & saveReady)
-		if saveReady is not "ready" then error "SAVE AND VERIFY button did not become enabled (personal-information-card__saveChanges-btn)."
-		logLine("Clicking SAVE AND VERIFY…")
-		set submitResult to safariJS(jsClickSaveAndVerify())
-		logLine(submitResult)
-		if submitResult does not contain "clicked-save" then error "Could not click SAVE AND VERIFY (" & submitResult & ")."
-		delay 3
-
-		-- Page often navigates after Save; JS may return empty (-2763). Keep going.
-		set captchaState to ""
-		try
-			set captchaState to safariJS(jsCaptchaVisible())
-		end try
-		logLine("Post-save captcha state: " & captchaState)
-		if captchaState is "captcha" then
-			if batchMode then
-				logLine("hCaptcha challenge visible during save — waiting up to 60s for auto/solve…")
-				set waited to 0
-				repeat while waited < 60
-					set captchaState to ""
-					try
-						set captchaState to safariJS(jsCaptchaVisible())
-					end try
-					if captchaState is not "captcha" then exit repeat
-					waitTick(3)
-					set waited to waited + 3
-				end repeat
-			else
-				display dialog "Solve the hCaptcha in Safari, then click OK." buttons {"OK"} default button 1
-			end if
-		end if
-		delay 2
-
-		-- Email verification: fetch the "Verify Your Email" link via IMAP and open it.
-		logStep("imap_verify_link")
-		logLine("Fetching verification link via IMAP (prefer recipient=" & newEmail & ")…")
-		set verifyLink to fetchImapVerifyLink("NEW_IMAP", verifySinceEpoch, newEmail)
-		if verifyLink is "" then set verifyLink to fetchImapVerifyLink("IMAP", verifySinceEpoch, newEmail)
-
-		if verifyLink is not "" then
-			logLine("Opening verification link in Safari…")
-			safariGoTo(verifyLink)
-			waitTick(4)
-			-- Some landing pages need a confirm/verify click.
-			logLine(safariJS(jsClickVerifyOnLanding()))
-			waitTick(2)
-		else
-			if batchMode then
-				error "No Verify Your Email link found via IMAP within timeout."
-			else
-				display dialog "No verification link found via IMAP. Verify the email manually in Safari, then click OK." buttons {"OK"} default button 1
-			end if
-		end if
-
-		-- Log out everywhere, then move on to the next account.
+		-- Log out everywhere after email (and optional password) changes.
 		logStep("logout_everywhere")
 		logLine("Returning to account page to log out everywhere…")
-		-- Session may have expired during the IMAP wait — re-login with current password if needed.
 		ensureAccountSession(riotUser, riotPass, batchMode)
 		set logoutReady to waitForLogoutButton(20)
 		logLine("Logout button ready: " & logoutReady)
@@ -419,7 +431,6 @@ on run argv
 		if logoutResult does not contain "clicked-logout" then error "Could not click LOG OUT EVERYWHERE (" & logoutResult & ")."
 		delay 0.8
 
-		-- Confirm modal: button[data-testid=modal_close-btn] title="Confirm"
 		logLine("Waiting for Confirm modal (modal_close-btn)…")
 		set confirmReady to waitForLogoutConfirmButton(15)
 		logLine("Confirm button ready: " & confirmReady)
@@ -431,7 +442,7 @@ on run argv
 		delay 2
 
 		if not batchMode then
-			display dialog "Finished this account (email changed + verify attempted + logged out)." buttons {"OK"} default button 1
+			display dialog "Finished this account (email first, optional password, logged out)." buttons {"OK"} default button 1
 		end if
 		logLine("SUCCESS")
 		logLine("Debug log: " & logFilePath)
@@ -489,7 +500,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-09x")
+	logLine("BUILD 2026-08-09y")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -1690,9 +1701,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-09x" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-09y" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-09x" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-09y" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -1713,7 +1724,7 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-09x" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-09y" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
 
 	logLine("Launching batch for " & rowCount & " account(s) from " & csvPath)
 	logLine("Using toolkit scripts: " & dir)

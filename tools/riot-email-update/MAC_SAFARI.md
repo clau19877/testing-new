@@ -48,7 +48,7 @@ Prefer Option A/B. The launcher prints `script folder:` and `using CSV:` so you 
 1. Safari → Settings → Advanced → Show Develop menu  
 2. Develop → Allow JavaScript from Apple Events  
 
-## Cloudflare / warm-up (BUILD 2026-08-09x+)
+## Cloudflare / warm-up (BUILD 2026-08-09y+)
 
 If Safari shows **Just a moment…** / Cloudflare:
 
@@ -65,16 +65,19 @@ Do **not** set `SAFARI_BATCH_DELAY` below ~15 when CF has already fired on your 
 ## CSV format
 
 ```csv
-riot_username,riot_password,new_password,imap_email,imap_app_password,new_email,imap_host,imap_port,proxy_index,email_change_url
-RiotUser,OldPass,NewPass,you@icloud.com,xxxx-xxxx-xxxx-xxxx,new@icloud.com,imap.mail.me.com,993,,
+riot_username,riot_password,new_password,imap_email,imap_app_password,new_email,imap_host,imap_port,proxy_index,email_change_url,change_password
+RiotUser,OldPass,NewPass,you@icloud.com,xxxx-xxxx-xxxx-xxxx,new@icloud.com,imap.mail.me.com,993,,,1
 ```
 
+`change_password`: `1` = change password **after** email verify, `0` = skip.
+Blank defaults to `1`. Whole-batch off: `SKIP_PASSWORD_CHANGE=1 ./run_safari_mac.sh`.
+
 Results in the same folder as the scripts:
-- `success.txt` — completed accounts (stores the **new** password)
+- `success.txt` — completed accounts (stores the **new** password when password change ran)
 - `tasks.csv` — successful rows are **removed automatically** as they finish
 - `failed.txt` — CSV with the same columns as `tasks.csv` (paste rows back to rerun).
-  `riot_password` is set to `new_password` when present (usual case after a
-  mid-flow failure). Reasons/logs go to `failed_reasons.txt`.
+  `riot_password` is set to `new_password` only if the password step had already
+  run. Reasons/logs go to `failed_reasons.txt`.
 
 ## Investigation logs
 
@@ -94,7 +97,7 @@ Share that `.log` file when asking for help with an error.
 
 Riot’s “Verify Your Email” messages often arrive with an iCloud-rewritten
 From address (`…riotgames_com…@icloud.com`). BUILD **2026-08-09k+** fetches
-with `BODY.PEEK[]` and accepts those senders. BUILD **2026-08-09x+** also
+with `BODY.PEEK[]` and accepts those senders. BUILD **2026-08-09y+** also
 quotes IMAP mailbox names and skips missing folders — older builds could abort
 the whole inbox poll with `SELECT … BAD Parse Error` while trying
 `Junk Folder`. Quick check on the Mac:
@@ -106,7 +109,7 @@ IMAP_HOST=imap.mail.me.com IMAP_USER='you@icloud.com' IMAP_PASSWORD='app-passwor
 ```
 
 If Script Editor reports an error about setting `line` / `st` / `key`, update to
-the latest zip (**BUILD 2026-08-09x** or newer) — those names are reserved in
+the latest zip (**BUILD 2026-08-09y** or newer) — those names are reserved in
 AppleScript.
 
 ## Account flow
@@ -114,17 +117,15 @@ AppleScript.
 For each CSV row, the runner:
 
 1. Logs in and waits for `https://account.riotgames.com/`
-2. Changes password: `password-card__currentPassword` / `newPassword` /
-   `confirmNewPassword` → `password-card__submit-btn`
-3. If Riot invalidates the session (redirect to `authenticate.riotgames.com`),
-   re-logs in with `new_password`, then continues
-4. Fills `personal-information-card__emailAddress`
-5. Clicks `personal-information-card__saveChanges-btn` (**SAVE AND VERIFY**)
-6. Waits via IMAP for a **Verify Your Email** message and opens its
+2. Fills `personal-information-card__emailAddress`
+3. Clicks `personal-information-card__saveChanges-btn` (**SAVE AND VERIFY**)
+4. Waits via IMAP for a **Verify Your Email** message and opens its
    **Verify Email** link
-7. Returns to the account page (re-login again if the IMAP wait dropped the
-   session), clicks `log-out-everywhere-button`, then Confirm (`modal_close-btn`)
-8. Records the result, then starts the next CSV row
+5. If `change_password=1`: changes password (`password-card__*` → submit),
+   re-logs in with `new_password` if the session drops
+6. Returns to the account page, clicks `log-out-everywhere-button`, then
+   Confirm (`modal_close-btn`)
+7. Records the result, then starts the next CSV row
 
 The zip contains only `data/tasks.csv.example`; updating the scripts will not
 replace your existing `data/tasks.csv`.
@@ -134,7 +135,7 @@ replace your existing `data/tasks.csv`.
 - Terminal: press **Ctrl+C**
 - Or double-click **STOP_BATCH.command**
 
-**BUILD 2026-08-09x+** hard-kills the whole tree: `run_safari_batch.py`,
+**BUILD 2026-08-09y+** hard-kills the whole tree: `run_safari_batch.py`,
 `osascript` / `safari_riot_email.applescript`, and IMAP helpers
 (`fetch_riot_verify_link.py`). Remaining CSV rows do not start. The AppleScript
 also watches `.safari_batch_stop` between wait ticks, wraps Safari Apple Events

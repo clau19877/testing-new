@@ -1,8 +1,6 @@
-BUILD 2026-08-09x
-Stop / hang hardening for Safari AppleScript:
-- with timeout around Safari Apple Events (safariJS / navigate)
-- waitTick + .safari_batch_stop checks so Stop can land in loops
-- sliced humanDelay pauses
-- perl alarm hard-cap around IMAP do shell script (AS timeout does not cover it)
-- IMAP socket timeout 45s in imap_mail.py
+BUILD 2026-08-09y
+Flow reorder: login → change email → IMAP verify → optional password → logout.
+CSV column change_password: 1=on (after email), 0=off.
+Global SKIP_PASSWORD_CHANGE=1 / --skip-password-change still forces off.
+failed.txt only swaps riot_password→new_password when password step ran.
 Zip does not include data/tasks.csv.

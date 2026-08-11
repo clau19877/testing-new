@@ -1,8 +1,8 @@
-riot_username,riot_password,new_password,imap_email,imap_app_password,new_email,imap_host,imap_port,proxy_index,email_change_url
+riot_username,riot_password,new_password,imap_email,imap_app_password,new_email,imap_host,imap_port,proxy_index,email_change_url,change_password
 # One row per account. Fill required columns; leave optional ones blank.
 #   riot_username      Riot login (username or account email)
-#   riot_password      Current Riot password (used to log in + as current password)
-#   new_password       New Riot password (changed after login, before email update)
+#   riot_password      Current Riot password (used to log in)
+#   new_password       New Riot password (required when change_password=1)
 #   imap_email         Mailbox that receives Riot MFA/verify codes
 #   imap_app_password  App-specific password for that mailbox (NOT the normal password)
 #   new_email          Email address you want to change the account to
@@ -10,18 +10,23 @@ riot_username,riot_password,new_password,imap_email,imap_app_password,new_email,
 #   imap_port          (optional) default 993
 #   proxy_index        (optional) Playwright only — ignored by Safari batch
 #   email_change_url   (optional) post-login page; blank = account.riotgames.com
+#   change_password    1 = change password AFTER email, 0 = skip password change
+#                      (blank defaults to 1)
 #
-# Flow: login → change password → change email → IMAP verify → LOG OUT EVERYWHERE
+# Flow: login → change email → IMAP verify → (optional) change password → LOG OUT EVERYWHERE
 #
 # macOS Safari batch (usually no captcha):
 #   ./run_safari_batch.sh data/tasks.csv
-#   → success.txt         (ok accounts; password column is the NEW password)
+#   → success.txt         (ok accounts; password column is NEW when change_password=1)
 #   → tasks.csv           (successful rows are removed automatically)
 #   → failed.txt          (CSV rows you can paste back into tasks.csv to rerun)
 #   → failed_reasons.txt  (username + reason + log path)
 #
-# Skip password change only:  SKIP_PASSWORD_CHANGE=1 ./run_safari_mac.sh
+# Force skip password for the whole batch:
+#   SKIP_PASSWORD_CHANGE=1 ./run_safari_mac.sh
+#   (same as change_password=0 on every row)
 #
 # iCloud app passwords: appleid.apple.com > Sign-In and Security > App-Specific Passwords
 # Gmail app passwords:  myaccount.google.com/apppasswords (requires 2FA)
-example-login@icloud.com,OldRiotPassw0rd!,NewRiotPassw0rd!,codes-inbox@icloud.com,abcd-efgh-ijkl-mnop,my-new-email@gmail.com,,,,
+example-login@icloud.com,OldRiotPassw0rd!,NewRiotPassw0rd!,codes-inbox@icloud.com,abcd-efgh-ijkl-mnop,my-new-email@gmail.com,,,,,1
+example-no-pw-change@icloud.com,SamePassw0rd!,,codes-inbox@icloud.com,abcd-efgh-ijkl-mnop,another-new@gmail.com,,,,,0
