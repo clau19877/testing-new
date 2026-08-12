@@ -358,6 +358,8 @@ def password_change_completed(log_path: str, output: str) -> bool:
         except Exception:
             pass
     markers = (
+        "Password change confirmed",
+        "Password change verification: ok",
         "Account session ready after password change",
         "Password change submitted",
         "clicked-password-save",

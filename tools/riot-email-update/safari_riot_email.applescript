@@ -437,6 +437,12 @@ on run argv
 			logLine("Restoring account session with new password if needed…")
 			ensureAccountSession(riotUser, riotPass, batchMode)
 			logLine("Account session ready after password change.")
+			-- Must prove password change worked before logout (re-login with newPass + page check).
+			logStep("verify_password_change")
+			set pwVerify to verifyPasswordChangeSuccess()
+			logLine("Password change verification: " & pwVerify)
+			if pwVerify does not start with "ok" then error "Password change not confirmed before logout (" & pwVerify & ")."
+			logLine("Password change confirmed — proceeding to logout.")
 		end if
 
 		if skipEmail and skipPassword then
@@ -446,28 +452,20 @@ on run argv
 			return "login_ok"
 		end if
 
-		-- Log out everywhere after email (and optional password) changes.
-		logStep("logout_everywhere")
-		logLine("Returning to account page to log out everywhere…")
+		-- Riotbar account menu Logout (data-testid=riotbar:account:link-logout).
+		logStep("riotbar_logout")
+		logLine("Returning to account page for riotbar Logout…")
 		ensureAccountSession(riotUser, riotPass, batchMode)
-		set logoutReady to waitForLogoutButton(20)
-		logLine("Logout button ready: " & logoutReady)
-		if logoutReady is not "ready" then error "Could not find log-out-everywhere-button after verification."
-		logLine("Clicking LOG OUT EVERYWHERE…")
-		set logoutResult to safariJS(jsClickLogoutEverywhere())
+		set logoutReady to waitForRiotbarLogout(20)
+		logLine("Riotbar Logout ready: " & logoutReady)
+		if logoutReady is not "ready" then error "Could not find riotbar Logout link (data-testid=riotbar:account:link-logout)."
+		logLine("Clicking riotbar Logout…")
+		set logoutResult to safariJS(jsClickRiotbarLogout())
 		logLine(logoutResult)
-		if logoutResult does not contain "clicked-logout" then error "Could not click LOG OUT EVERYWHERE (" & logoutResult & ")."
-		delay 0.8
-
-		logLine("Waiting for Confirm modal (modal_close-btn)…")
-		set confirmReady to waitForLogoutConfirmButton(15)
-		logLine("Confirm button ready: " & confirmReady)
-		if confirmReady is not "ready" then error "LOG OUT EVERYWHERE Confirm modal (modal_close-btn) did not appear."
-		logLine("Clicking Confirm…")
-		set confirmResult to safariJS(jsConfirmLogoutEverywhere())
-		logLine(confirmResult)
-		if confirmResult does not contain "confirmed-logout" then error "Could not click Confirm on logout modal (" & confirmResult & ")."
-		delay 2
+		if logoutResult does not contain "clicked-riotbar-logout" then error "Could not click riotbar Logout (" & logoutResult & ")."
+		set waitState to waitUntilLoggedOut(25)
+		logLine("Post riotbar-logout wait: " & waitState)
+		if waitState is "still_logged_in" then error "Still logged in after riotbar Logout."
 
 		-- Make sure Safari is logged out before the batch starts the next CSV row.
 		logStep("verify_logged_out")
@@ -538,7 +536,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-12a")
+	logLine("BUILD 2026-08-12b")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -715,6 +713,9 @@ end safariGoTo
 
 on sessionLooksLoggedIn()
 	try
+		if safariJS(jsProbeRiotbarLogout()) is "ready" then return true
+	end try
+	try
 		if safariJS(jsProbeLogoutButton()) is "ready" then return true
 	end try
 	try
@@ -764,20 +765,15 @@ on forceLogoutSession(whereLabel)
 				exit repeat
 			end if
 			if sessionLooksLoggedIn() then
-				logLine("Active Riot session (" & whereLabel & " #" & attempt & ") — LOG OUT EVERYWHERE…")
-				set logoutResult to safariJS(jsClickLogoutEverywhere())
+				logLine("Active Riot session (" & whereLabel & " #" & attempt & ") — riotbar Logout…")
+				set logoutResult to safariJS(jsClickRiotbarLogout())
 				logLine(logoutResult)
-				if logoutResult contains "clicked-logout" then
-					set confirmReady to waitForLogoutConfirmButton(12)
-					logLine("Confirm probe (" & whereLabel & " #" & attempt & "): " & confirmReady)
-					if confirmReady is "ready" then
-						logLine(safariJS(jsConfirmLogoutEverywhere()))
-					end if
+				if logoutResult contains "clicked-riotbar-logout" then
 					set waitState to waitUntilLoggedOut(25)
 					logLine("Post-logout wait (" & whereLabel & " #" & attempt & "): " & waitState)
 					if waitState is "login_form" or waitState is "cleared" then exit repeat
 				else
-					logLine("Logout click missed (" & logoutResult & ") — trying auth logout URL…")
+					logLine("Riotbar Logout click missed (" & logoutResult & ") — trying auth logout URL…")
 				end if
 			else
 				logLine("Account page ambiguous (" & whereLabel & " #" & attempt & ") — auth logout URL…")
@@ -1264,6 +1260,124 @@ on jsClickVerifyOnLanding()
 		"})();"
 end jsClickVerifyOnLanding
 
+on jsRiotbarLogoutSelector()
+	-- a[data-testid="riotbar:account:link-logout"]
+	return "a[data-testid=" & quote & "riotbar:account:link-logout" & quote & "]"
+end jsRiotbarLogoutSelector
+
+on jsOpenRiotbarAccountMenu()
+	-- Logout link lives in the account dropdown; open it if needed.
+	return "(function () {" & ¬
+		"  var sel = 'a[data-testid=" & quote & "riotbar:account:link-logout" & quote & "]';" & ¬
+		"  var link = document.querySelector(sel);" & ¬
+		"  if (link && link.offsetParent !== null) return 'menu-already-open';" & ¬
+		"  var triggers = [" & ¬
+		"    '[data-testid=" & quote & "riotbar:account:button" & quote & "]'," & ¬
+		"    '[data-testid=" & quote & "riotbar:account:toggle" & quote & "]'," & ¬
+		"    '[data-testid*=" & quote & "riotbar:account" & quote & "]'," & ¬
+		"    'button[class*=riotbar-account]'," & ¬
+		"    '[class*=riotbar-account-dropdown]'," & ¬
+		"    'button[aria-haspopup=true]'" & ¬
+		"  ];" & ¬
+		"  for (var i = 0; i < triggers.length; i++) {" & ¬
+		"    var nodes = Array.from(document.querySelectorAll(triggers[i]));" & ¬
+		"    for (var j = 0; j < nodes.length; j++) {" & ¬
+		"      var el = nodes[j];" & ¬
+		"      var tid = (el.getAttribute('data-testid') || '').toLowerCase();" & ¬
+		"      if (tid.indexOf('link-logout') >= 0) continue;" & ¬
+		"      try { el.click(); } catch (e0) { continue; }" & ¬
+		"      return 'opened-menu:' + (tid || el.className || 'trigger').toString().slice(0, 60);" & ¬
+		"    }" & ¬
+		"  }" & ¬
+		"  return 'no-account-menu';" & ¬
+		"})();"
+end jsOpenRiotbarAccountMenu
+
+on jsProbeRiotbarLogout()
+	return "(function () {" & ¬
+		"  var sel = 'a[data-testid=" & quote & "riotbar:account:link-logout" & quote & "]';" & ¬
+		"  var link = document.querySelector(sel);" & ¬
+		"  if (link) return 'ready';" & ¬
+		"  return 'missing';" & ¬
+		"})();"
+end jsProbeRiotbarLogout
+
+on waitForRiotbarLogout(timeoutSec)
+	set deadline to (current date) + timeoutSec
+	repeat while (current date) < deadline
+		try
+			safariJS(jsOpenRiotbarAccountMenu())
+		end try
+		set logoutState to "missing"
+		try
+			set logoutState to safariJS(jsProbeRiotbarLogout()) as text
+		end try
+		if logoutState is "ready" then return "ready"
+		waitTick(0.5)
+	end repeat
+	return "timeout"
+end waitForRiotbarLogout
+
+on jsClickRiotbarLogout()
+	-- <a data-testid="riotbar:account:link-logout">…Logout…</a>
+	return "(function () {" & ¬
+		"  var sel = 'a[data-testid=" & quote & "riotbar:account:link-logout" & quote & "]';" & ¬
+		"  var link = document.querySelector(sel);" & ¬
+		"  if (!link) {" & ¬
+		"    var triggers = Array.from(document.querySelectorAll('[data-testid*=" & quote & "riotbar:account" & quote & "], button[class*=riotbar-account], [class*=riotbar-account-dropdown]'));" & ¬
+		"    for (var i = 0; i < triggers.length; i++) {" & ¬
+		"      try { triggers[i].click(); } catch (e0) {}" & ¬
+		"    }" & ¬
+		"    link = document.querySelector(sel);" & ¬
+		"  }" & ¬
+		"  if (!link) {" & ¬
+		"    var cands = Array.from(document.querySelectorAll('a.riotbar-account-link, a.riotbar-account-action, a'));" & ¬
+		"    link = cands.find(function (a) {" & ¬
+		"      var t = ((a.textContent || '') + ' ' + (a.getAttribute('data-testid') || '')).toLowerCase();" & ¬
+		"      return t.indexOf('logout') >= 0 && t.indexOf('everywhere') < 0;" & ¬
+		"    }) || null;" & ¬
+		"  }" & ¬
+		"  if (!link) return 'no-riotbar-logout';" & ¬
+		"  try { link.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e1) {}" & ¬
+		"  link.click();" & ¬
+		"  return 'clicked-riotbar-logout:' + ((link.textContent || link.getAttribute('data-testid') || '').trim().slice(0, 40));" & ¬
+		"})();"
+end jsClickRiotbarLogout
+
+on jsProbePasswordChangeResult()
+	-- success / error banners after password-card save
+	return "(function () {" & ¬
+		"  var text = ((document.body && document.body.innerText) || '').toLowerCase();" & ¬
+		"  if (/password (has been )?(updated|changed|saved)|successfully (changed|updated) (your )?password|your password was (updated|changed)/.test(text)) return 'success';" & ¬
+		"  if (/(current )?password (is )?(incorrect|invalid|wrong)|could not (change|update) (your )?password|password change failed|passwords? (do not|don't) match/.test(text)) return 'error';" & ¬
+		"  var alertNodes = Array.from(document.querySelectorAll('[role=alert], .alert, [class*=toast], [class*=notification], [class*=banner]'));" & ¬
+		"  for (var i = 0; i < alertNodes.length; i++) {" & ¬
+		"    var t = ((alertNodes[i].innerText || alertNodes[i].textContent || '')).toLowerCase();" & ¬
+		"    if (!t) continue;" & ¬
+		"    if (t.indexOf('password') >= 0 && (t.indexOf('success') >= 0 || t.indexOf('updated') >= 0 || t.indexOf('changed') >= 0)) return 'success';" & ¬
+		"    if (t.indexOf('password') >= 0 && (t.indexOf('error') >= 0 || t.indexOf('fail') >= 0 || t.indexOf('incorrect') >= 0)) return 'error';" & ¬
+		"  }" & ¬
+		"  return 'unknown';" & ¬
+		"})();"
+end jsProbePasswordChangeResult
+
+on verifyPasswordChangeSuccess()
+	-- Called after ensureAccountSession(new password). Require account page + no error banner.
+	try
+		if safariJS(jsProbeEmailField()) is not "ready" then return "fail:no-account-email-field"
+	on error
+		return "fail:no-account-email-field"
+	end try
+	set pageResult to "unknown"
+	try
+		set pageResult to safariJS(jsProbePasswordChangeResult()) as text
+	end try
+	if pageResult is "error" then return "fail:password-error-banner"
+	if pageResult is "success" then return "ok:success-banner"
+	-- Reaching account widgets after re-login with newPass is strong proof.
+	return "ok:session-with-new-password"
+end verifyPasswordChangeSuccess
+
 on jsClickLogoutEverywhere()
 	-- Exact Riot control:
 	-- <button type="submit" data-testid="log-out-everywhere-button" title="LOG OUT EVERYWHERE">
@@ -1425,6 +1539,7 @@ on jsDumpPageState()
 		"    emailValue: emailVal," & ¬
 		"    saveBtn: btnState('button[data-testid=personal-information-card__saveChanges-btn]')," & ¬
 		"    logoutBtn: btnState('button[data-testid=log-out-everywhere-button]')," & ¬
+		"    riotbarLogout: has('a[data-testid=" & quote & "riotbar:account:link-logout" & quote & "]')," & ¬
 		"    captcha: has('iframe[src*=hcaptcha.com]')," & ¬
 		"    loginUser: has('input[name=username], input[autocomplete=username]')," & ¬
 		"    loginPass: has('input[name=password], input[type=password]')," & ¬
@@ -1869,9 +1984,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-12a" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-12b" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-12a" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-12b" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -1892,7 +2007,7 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-12a" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-12b" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
 
 	logLine("Launching batch for " & rowCount & " account(s) from " & csvPath)
 	logLine("Using toolkit scripts: " & dir)

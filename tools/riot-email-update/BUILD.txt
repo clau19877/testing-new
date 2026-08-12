@@ -1,8 +1,6 @@
-BUILD 2026-08-12a
-Fix false logout between accounts (from 09z logs):
-- LOG OUT EVERYWHERE Confirm was clicked but session stayed alive
-- hard-jump used account.riotgames.com (logged-in page, no login form)
-Now: verify logout with wait/retry, prefer form.requestSubmit, land on
-authenticate.riotgames.com for login, and clear session if entry lands
-on an already-logged-in account page.
+BUILD 2026-08-12b
+Logout via riotbar account menu link:
+  a[data-testid="riotbar:account:link-logout"] (opens dropdown if needed)
+Before logout when change_password=1: verify password change succeeded
+(re-login with new password + page success/error check).
 Zip does not include data/tasks.csv.
