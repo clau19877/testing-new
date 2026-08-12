@@ -127,8 +127,13 @@ on run argv
 		logStep("warmup")
 		warmupSafari()
 
+		-- Critical for batch: previous account session must not leak into this login.
+		logStep("pre_account_logout")
+		forceLogoutSession("before_account")
+
 		logStep("open_entry")
 		logLine("Opening Safari → docs.qq.com entry…")
+		ensureSafariDocument()
 		with timeout of 45 seconds
 			tell application "Safari"
 				activate
@@ -164,6 +169,15 @@ on run argv
 		logLine("Waiting for Riot login form…")
 		set formReady to waitForLoginForm(45)
 		logLine("Login form ready: " & formReady)
+		if formReady is not "ready" then
+			-- Still logged in as prior account → force logout and retry once.
+			logLine("Login form missing — checking for leftover logged-in session…")
+			forceLogoutSession("login_form_retry")
+			safariGoTo("https://authenticate.riotgames.com/")
+			humanDelay(2.0, 3.0)
+			set formReady to waitForLoginForm(30)
+			logLine("Login form ready (retry): " & formReady)
+		end if
 		if formReady is not "ready" then error "Riot login form not ready after docs.qq Continue (phase/form timeout)."
 		assertNoCloudflare("before_fill_login")
 		humanDelay(0.8, 1.8)
@@ -441,6 +455,11 @@ on run argv
 		if confirmResult does not contain "confirmed-logout" then error "Could not click Confirm on logout modal (" & confirmResult & ")."
 		delay 2
 
+		-- Make sure Safari is logged out before the batch starts the next CSV row.
+		logStep("verify_logged_out")
+		forceLogoutSession("after_success")
+		logLine("Logged out — safe to start next account.")
+
 		if not batchMode then
 			display dialog "Finished this account (email first, optional password, logged out)." buttons {"OK"} default button 1
 		end if
@@ -450,6 +469,11 @@ on run argv
 	on error errMsg number errNum
 		logLine("STEP FAILED: " & errMsg & " (" & errNum & ")")
 		dumpDebug("failure")
+		-- Best-effort logout so a failure does not leave the next account stuck.
+		try
+			logStep("logout_after_failure")
+			forceLogoutSession("after_failure")
+		end try
 		logLine("Debug log: " & logFilePath)
 		error errMsg number errNum
 	end try
@@ -500,7 +524,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-09y")
+	logLine("BUILD 2026-08-09z")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -621,6 +645,9 @@ on safariJS(js)
 	-- Always return text. During page navigations Safari often yields "no result" (-2763).
 	-- with timeout: Safari Apple Events can hang forever without this.
 	assertNotStopped()
+	try
+		ensureSafariDocument()
+	end try
 	with timeout of 30 seconds
 		tell application "Safari"
 			try
@@ -633,27 +660,89 @@ on safariJS(js)
 				end try
 			on error errMsg number errNum
 				if errNum is -1712 then error "Safari JavaScript timed out (30s)." number errNum
-				if errNum is -1728 or errMsg contains "JavaScript from Apple Events" or errMsg contains "Allow JavaScript" then
+				-- Permission errors mention Apple Events / JavaScript — not bare "document 1" missing.
+				if errMsg contains "JavaScript from Apple Events" or errMsg contains "Allow JavaScript" then
 					error "Enable Safari → Develop → Allow JavaScript from Apple Events, then re-run. (" & errMsg & ")"
 				end if
+				-- Missing/closed tab: recover as empty instead of aborting the whole account.
+				if errNum is -1728 or errMsg contains "document 1" or errMsg contains "無法取得" then return ""
 				-- -2763: expression did not return a result (page navigating / empty JS return)
 				if errNum is -2763 then return ""
 				if errMsg contains "沒有傳回結果" or errMsg contains "did not return a result" then return ""
+				if errMsg contains "尚未定義變數" or errMsg contains "is not defined" then return ""
 				error errMsg number errNum
 			end try
 		end tell
 	end timeout
 end safariJS
 
+on ensureSafariDocument()
+	-- Guarantees document 1 exists (batch failures sometimes close the only tab).
+	with timeout of 30 seconds
+		tell application "Safari"
+			activate
+			if (count of documents) is 0 then
+				make new document with properties {URL:"https://www.apple.com/"}
+			end if
+		end tell
+	end timeout
+end ensureSafariDocument
+
 on safariGoTo(destURL)
 	-- Navigate document 1 with a hard Apple Event ceiling.
 	assertNotStopped()
+	ensureSafariDocument()
 	with timeout of 45 seconds
 		tell application "Safari"
 			set URL of document 1 to destURL
 		end tell
 	end timeout
 end safariGoTo
+
+on forceLogoutSession(whereLabel)
+	-- Best-effort LOG OUT EVERYWHERE + hard clear so the next CSV row starts clean.
+	-- Never throws to the caller (warnings only) — used before login and after failure.
+	logLine("Ensuring logged out (" & whereLabel & ")…")
+	try
+		ensureSafariDocument()
+		safariGoTo("https://account.riotgames.com/")
+		humanDelay(1.5, 2.8)
+		set logoutReady to "missing"
+		try
+			set logoutReady to waitForLogoutButton(10)
+		end try
+		logLine("Logout button probe (" & whereLabel & "): " & logoutReady)
+		if logoutReady is "ready" then
+			logLine("Active Riot session found — LOG OUT EVERYWHERE…")
+			set logoutResult to safariJS(jsClickLogoutEverywhere())
+			logLine(logoutResult)
+			if logoutResult contains "clicked-logout" then
+				set confirmReady to waitForLogoutConfirmButton(12)
+				logLine("Confirm probe (" & whereLabel & "): " & confirmReady)
+				if confirmReady is "ready" then
+					logLine(safariJS(jsConfirmLogoutEverywhere()))
+					humanDelay(1.5, 2.5)
+				end if
+			end if
+		else
+			try
+				if safariJS(jsProbeLoginForm()) is "ready" then
+					logLine("Already on login form (" & whereLabel & ").")
+				end if
+			end try
+		end if
+		-- Extra hard clear for cookie/session leftovers between accounts.
+		try
+			safariGoTo("https://authenticate.riotgames.com/logout")
+			humanDelay(1.0, 1.8)
+		end try
+		safariGoTo("https://www.apple.com/")
+		humanDelay(0.8, 1.4)
+		logLine("Logout cleanup finished (" & whereLabel & ").")
+	on error errMsg
+		logLine("Logout cleanup warning (" & whereLabel & "): " & errMsg)
+	end try
+end forceLogoutSession
 
 on safariCurrentURL()
 	with timeout of 15 seconds
@@ -1282,15 +1371,12 @@ end humanDelay
 on warmupSafari()
 	-- Prime a normal Safari document before docs.qq / Riot (reduces cold-start CF hits).
 	logLine("Warming up Safari with a normal page…")
+	ensureSafariDocument()
 	with timeout of 45 seconds
 		tell application "Safari"
 			activate
 			try
-				if (count of documents) is 0 then
-					make new document with properties {URL:"https://www.apple.com/"}
-				else
-					set URL of document 1 to "https://www.apple.com/"
-				end if
+				set URL of document 1 to "https://www.apple.com/"
 			on error
 				make new document with properties {URL:"https://www.apple.com/"}
 			end try
@@ -1701,9 +1787,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-09y" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-09z" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-09y" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-09z" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -1724,7 +1810,7 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-09y" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-09z" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
 
 	logLine("Launching batch for " & rowCount & " account(s) from " & csvPath)
 	logLine("Using toolkit scripts: " & dir)

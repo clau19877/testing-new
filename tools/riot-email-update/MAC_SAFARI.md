@@ -48,7 +48,7 @@ Prefer Option A/B. The launcher prints `script folder:` and `using CSV:` so you 
 1. Safari → Settings → Advanced → Show Develop menu  
 2. Develop → Allow JavaScript from Apple Events  
 
-## Cloudflare / warm-up (BUILD 2026-08-09y+)
+## Cloudflare / warm-up (BUILD 2026-08-09z+)
 
 If Safari shows **Just a moment…** / Cloudflare:
 
@@ -97,7 +97,7 @@ Share that `.log` file when asking for help with an error.
 
 Riot’s “Verify Your Email” messages often arrive with an iCloud-rewritten
 From address (`…riotgames_com…@icloud.com`). BUILD **2026-08-09k+** fetches
-with `BODY.PEEK[]` and accepts those senders. BUILD **2026-08-09y+** also
+with `BODY.PEEK[]` and accepts those senders. BUILD **2026-08-09z+** also
 quotes IMAP mailbox names and skips missing folders — older builds could abort
 the whole inbox poll with `SELECT … BAD Parse Error` while trying
 `Junk Folder`. Quick check on the Mac:
@@ -109,17 +109,26 @@ IMAP_HOST=imap.mail.me.com IMAP_USER='you@icloud.com' IMAP_PASSWORD='app-passwor
 ```
 
 If Script Editor reports an error about setting `line` / `st` / `key`, update to
-the latest zip (**BUILD 2026-08-09y** or newer) — those names are reserved in
+the latest zip (**BUILD 2026-08-09z** or newer) — those names are reserved in
 AppleScript.
 
 ## Account flow
 
 For each CSV row, the runner:
 
-1. Logs in and waits for `https://account.riotgames.com/`
-2. Fills `personal-information-card__emailAddress`
-3. Clicks `personal-information-card__saveChanges-btn` (**SAVE AND VERIFY**)
-4. Waits via IMAP for a **Verify Your Email** message and opens its
+1. Clears any leftover Riot session (`LOG OUT EVERYWHERE` if still logged in)
+2. Logs in and waits for `https://account.riotgames.com/`
+3. Fills `personal-information-card__emailAddress`
+4. Clicks `personal-information-card__saveChanges-btn` (**SAVE AND VERIFY**)
+5. Waits via IMAP for a **Verify Your Email** message and opens its
+   **Verify Email** link
+6. If `change_password=1`: changes password (`password-card__*` → submit),
+   re-logs in with `new_password` if the session drops
+7. Returns to the account page, clicks `log-out-everywhere-button`, then
+   Confirm (`modal_close-btn`), and verifies Safari is logged out before the
+   next CSV row starts
+8. Records the result, then starts the next CSV row
+
    **Verify Email** link
 5. If `change_password=1`: changes password (`password-card__*` → submit),
    re-logs in with `new_password` if the session drops
@@ -135,7 +144,7 @@ replace your existing `data/tasks.csv`.
 - Terminal: press **Ctrl+C**
 - Or double-click **STOP_BATCH.command**
 
-**BUILD 2026-08-09y+** hard-kills the whole tree: `run_safari_batch.py`,
+**BUILD 2026-08-09z+** hard-kills the whole tree: `run_safari_batch.py`,
 `osascript` / `safari_riot_email.applescript`, and IMAP helpers
 (`fetch_riot_verify_link.py`). Remaining CSV rows do not start. The AppleScript
 also watches `.safari_batch_stop` between wait ticks, wraps Safari Apple Events

@@ -1,6 +1,8 @@
-BUILD 2026-08-09y
-Flow reorder: login → change email → IMAP verify → optional password → logout.
-CSV column change_password: 1=on (after email), 0=off.
-Global SKIP_PASSWORD_CHANGE=1 / --skip-password-change still forces off.
-failed.txt only swaps riot_password→new_password when password step ran.
+BUILD 2026-08-09z
+Force logout between accounts:
+- pre_account_logout before login (clears leftover Riot session)
+- verify_logged_out after success LOG OUT EVERYWHERE
+- logout_after_failure best-effort cleanup so next CSV row is not stuck
+- ensureSafariDocument when tab/document 1 is missing
+- do not mis-label missing document as Allow JavaScript permission error
 Zip does not include data/tasks.csv.

@@ -1,4 +1,4 @@
-BUILD 2026-08-09y
+BUILD 2026-08-09z
 
 This zip DOES NOT contain data/tasks.csv. Keep your existing file.
 
@@ -10,4 +10,4 @@ Prefer:
 
 Flow: email first, then optional password (CSV change_password 1/0).
 
-Confirm BUILD 2026-08-09y in debug/logs/safari_*.log
+Confirm BUILD 2026-08-09z in debug/logs/safari_*.log
