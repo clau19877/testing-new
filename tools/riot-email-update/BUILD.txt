@@ -1,6 +1,5 @@
-BUILD 2026-08-12b
-Logout via riotbar account menu link:
-  a[data-testid="riotbar:account:link-logout"] (opens dropdown if needed)
-Before logout when change_password=1: verify password change succeeded
-(re-login with new password + page success/error check).
+BUILD 2026-08-12c
+Background-friendly Safari: do not activate/steal focus by default.
+Clicks are JavaScript (no mouse takeover). Put Safari on another Desktop.
+Opt-in frontmost: SAFARI_STEAL_FOCUS=1 ./run_safari_mac.sh
 Zip does not include data/tasks.csv.

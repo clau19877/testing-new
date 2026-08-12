@@ -48,7 +48,7 @@ Prefer Option A/B. The launcher prints `script folder:` and `using CSV:` so you 
 1. Safari → Settings → Advanced → Show Develop menu  
 2. Develop → Allow JavaScript from Apple Events  
 
-## Cloudflare / warm-up (BUILD 2026-08-12b+)
+## Cloudflare / warm-up (BUILD 2026-08-12c+)
 
 If Safari shows **Just a moment…** / Cloudflare:
 
@@ -97,7 +97,7 @@ Share that `.log` file when asking for help with an error.
 
 Riot’s “Verify Your Email” messages often arrive with an iCloud-rewritten
 From address (`…riotgames_com…@icloud.com`). BUILD **2026-08-09k+** fetches
-with `BODY.PEEK[]` and accepts those senders. BUILD **2026-08-12b+** also
+with `BODY.PEEK[]` and accepts those senders. BUILD **2026-08-12c+** also
 quotes IMAP mailbox names and skips missing folders — older builds could abort
 the whole inbox poll with `SELECT … BAD Parse Error` while trying
 `Junk Folder`. Quick check on the Mac:
@@ -109,7 +109,7 @@ IMAP_HOST=imap.mail.me.com IMAP_USER='you@icloud.com' IMAP_PASSWORD='app-passwor
 ```
 
 If Script Editor reports an error about setting `line` / `st` / `key`, update to
-the latest zip (**BUILD 2026-08-12b** or newer) — those names are reserved in
+the latest zip (**BUILD 2026-08-12c** or newer) — those names are reserved in
 AppleScript.
 
 ## Account flow
@@ -141,12 +141,26 @@ For each CSV row, the runner:
 The zip contains only `data/tasks.csv.example`; updating the scripts will not
 replace your existing `data/tasks.csv`.
 
+
+## Run without interrupting your other work
+
+By default (**BUILD 2026-08-12c+**) the script does **not** bring Safari to the
+front. Page actions use AppleScript `do JavaScript` (not real mouse clicks), so
+you can keep typing in other apps.
+
+Tips:
+- Move the Safari window to another Desktop / Mission Control Space
+- Leave that Space alone while the batch runs
+- Do not click inside the Safari window mid-run (can steal focus back)
+- If you *want* Safari to jump to the front:  
+  `SAFARI_STEAL_FOCUS=1 ./run_safari_mac.sh`
+
 ## Stop the batch immediately
 
 - Terminal: press **Ctrl+C**
 - Or double-click **STOP_BATCH.command**
 
-**BUILD 2026-08-12b+** hard-kills the whole tree: `run_safari_batch.py`,
+**BUILD 2026-08-12c+** hard-kills the whole tree: `run_safari_batch.py`,
 `osascript` / `safari_riot_email.applescript`, and IMAP helpers
 (`fetch_riot_verify_link.py`). Remaining CSV rows do not start. The AppleScript
 also watches `.safari_batch_stop` between wait ticks, wraps Safari Apple Events

@@ -478,6 +478,8 @@ def run_one(
             "CHANGE_PASSWORD": "1" if do_password else "0",
             "SAFARI_BATCH": "1",
             "SAFARI_LOG_PATH": str(log_path),
+            # Default background: do not force Safari frontmost (see SAFARI_STEAL_FOCUS).
+            "SAFARI_STEAL_FOCUS": os.getenv("SAFARI_STEAL_FOCUS", "0"),
         }
     )
 
@@ -619,6 +621,10 @@ def run_one(
         "password-card__submit-btn",
         "Allow JavaScript from Apple Events",
         "Cloudflare challenge",
+        "Password change not confirmed",
+        "Could not find riotbar Logout",
+        "Could not click riotbar Logout",
+        "Still logged in after riotbar Logout",
         "Could not find log-out-everywhere-button",
         "Could not click LOG OUT EVERYWHERE",
         "Confirm modal",

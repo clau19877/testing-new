@@ -136,7 +136,6 @@ on run argv
 		ensureSafariDocument()
 		with timeout of 45 seconds
 			tell application "Safari"
-				activate
 				set URL of document 1 to entryURL
 			end tell
 		end timeout
@@ -536,7 +535,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-12b")
+	logLine("BUILD 2026-08-12c")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -545,6 +544,12 @@ on logInit(accountLabel)
 	try
 		logLine("cwd=" & (do shell script "pwd"))
 	end try
+	if safariShouldStealFocus() then
+		logLine("Safari focus: ON (SAFARI_STEAL_FOCUS=1) — Safari may jump to front")
+	else
+		logLine("Safari focus: OFF (background) — Safari stays behind your other work")
+		logLine("Tip: put Safari on another Desktop/Space; do not click its window while batching.")
+	end if
 end logInit
 
 on logLine(msg)
@@ -688,11 +693,34 @@ on safariJS(js)
 	end timeout
 end safariJS
 
+on safariShouldStealFocus()
+	-- Default OFF so batch can run while you use other apps.
+	-- Set SAFARI_STEAL_FOCUS=1 only if you need Safari brought to the front.
+	set flag to envOrEmpty("SAFARI_STEAL_FOCUS")
+	if flag is "1" or flag is "true" or flag is "yes" then return true
+	return false
+end safariShouldStealFocus
+
+on safariActivateIfNeeded()
+	-- launch = start Safari without forcing it frontmost (macOS).
+	-- activate = steal keyboard/mouse focus (annoying during batch).
+	with timeout of 20 seconds
+		tell application "Safari"
+			if my safariShouldStealFocus() then
+				activate
+			else
+				launch
+			end if
+		end tell
+	end timeout
+end safariActivateIfNeeded
+
 on ensureSafariDocument()
 	-- Guarantees document 1 exists (batch failures sometimes close the only tab).
+	-- Does not bring Safari to the front unless SAFARI_STEAL_FOCUS=1.
+	safariActivateIfNeeded()
 	with timeout of 30 seconds
 		tell application "Safari"
-			activate
 			if (count of documents) is 0 then
 				make new document with properties {URL:"https://www.apple.com/"}
 			end if
@@ -1571,7 +1599,6 @@ on warmupSafari()
 	ensureSafariDocument()
 	with timeout of 45 seconds
 		tell application "Safari"
-			activate
 			try
 				set URL of document 1 to "https://www.apple.com/"
 			on error
@@ -1984,9 +2011,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-12b" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-12c" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-12b" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-12c" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -2007,7 +2034,7 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-12b" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-12c" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
 
 	logLine("Launching batch for " & rowCount & " account(s) from " & csvPath)
 	logLine("Using toolkit scripts: " & dir)

@@ -1,4 +1,4 @@
-BUILD 2026-08-12b
+BUILD 2026-08-12c
 
 This zip DOES NOT contain data/tasks.csv. Keep your existing file.
 
@@ -10,4 +10,7 @@ Prefer:
 
 Flow: email first, then optional password (CSV change_password 1/0).
 
-Confirm BUILD 2026-08-12b in debug/logs/safari_*.log
+Background Safari (default): does not steal focus.
+  SAFARI_STEAL_FOCUS=1 ./run_safari_mac.sh   # only if you need frontmost
+
+Confirm BUILD 2026-08-12c in debug/logs/safari_*.log
