@@ -157,28 +157,42 @@ on run argv
 			humanDelay(1.0, 2.0)
 		end repeat
 		if continueResult does not start with "clicked:" and continueResult does not start with "goto:" then
-			logLine("Continue click missed — hard-jump fallback once…")
+			logLine("Continue click missed — hard-jump to auth login (not account page)…")
 			set continueResult to safariJS(jsClickContinue(true))
 			logLine("Continue fallback: " & continueResult)
+			if continueResult does not start with "clicked:" and continueResult does not start with "goto:" then
+				safariGoTo("https://authenticate.riotgames.com/")
+				logLine("Continue fallback: goto:https://authenticate.riotgames.com/")
+			end if
 		end if
 		humanDelay(2.5, 4.5)
 		assertNoCloudflare("after_continue")
 		waitForRiotLogin(60)
 
+		-- docs.qq ?url= points at account.riotgames.com — if still logged in, that page
+		-- has no username/password fields. Clear session before waiting on the form.
+		if sessionLooksLoggedIn() then
+			logLine("Entry landed on logged-in account page — clearing session before login…")
+			forceLogoutSession("after_entry_still_logged_in")
+		end if
+
 		logStep("fill_login")
 		logLine("Waiting for Riot login form…")
+		if not sessionLooksLoggedOut() then
+			safariGoTo("https://authenticate.riotgames.com/")
+			humanDelay(1.2, 2.0)
+		end if
 		set formReady to waitForLoginForm(45)
 		logLine("Login form ready: " & formReady)
 		if formReady is not "ready" then
-			-- Still logged in as prior account → force logout and retry once.
-			logLine("Login form missing — checking for leftover logged-in session…")
+			logLine("Login form missing — full logout + auth login retry…")
 			forceLogoutSession("login_form_retry")
 			safariGoTo("https://authenticate.riotgames.com/")
 			humanDelay(2.0, 3.0)
-			set formReady to waitForLoginForm(30)
+			set formReady to waitForLoginForm(35)
 			logLine("Login form ready (retry): " & formReady)
 		end if
-		if formReady is not "ready" then error "Riot login form not ready after docs.qq Continue (phase/form timeout)."
+		if formReady is not "ready" then error "Riot login form not ready after logout/auth entry (phase/form timeout)."
 		assertNoCloudflare("before_fill_login")
 		humanDelay(0.8, 1.8)
 		logLine("Filling Riot login form…")
@@ -524,7 +538,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-09z")
+	logLine("BUILD 2026-08-12a")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -699,46 +713,95 @@ on safariGoTo(destURL)
 	end timeout
 end safariGoTo
 
+on sessionLooksLoggedIn()
+	try
+		if safariJS(jsProbeLogoutButton()) is "ready" then return true
+	end try
+	try
+		if safariJS(jsProbeEmailField()) is "ready" then return true
+	end try
+	try
+		if safariJS(jsProbePasswordFields()) is "ready" then return true
+	end try
+	return false
+end sessionLooksLoggedIn
+
+on sessionLooksLoggedOut()
+	try
+		if safariJS(jsProbeLoginForm()) is "ready" then return true
+	end try
+	return false
+end sessionLooksLoggedOut
+
+on waitUntilLoggedOut(timeoutSec)
+	-- Stay on the current page after Confirm; do not navigate away mid-logout.
+	set deadline to (current date) + timeoutSec
+	repeat while (current date) < deadline
+		if sessionLooksLoggedOut() then return "login_form"
+		if not sessionLooksLoggedIn() then return "cleared"
+		waitTick(0.8)
+	end repeat
+	if sessionLooksLoggedOut() then return "login_form"
+	if sessionLooksLoggedIn() then return "still_logged_in"
+	return "unknown"
+end waitUntilLoggedOut
+
 on forceLogoutSession(whereLabel)
-	-- Best-effort LOG OUT EVERYWHERE + hard clear so the next CSV row starts clean.
-	-- Never throws to the caller (warnings only) — used before login and after failure.
+	-- Verify logout actually completed. Prior builds clicked Confirm then navigated
+	-- away too fast; Riot session stayed alive and the next account never saw a
+	-- login form (hard-jump to account.riotgames.com kept showing the account page).
 	logLine("Ensuring logged out (" & whereLabel & ")…")
 	try
 		ensureSafariDocument()
-		safariGoTo("https://account.riotgames.com/")
-		humanDelay(1.5, 2.8)
-		set logoutReady to "missing"
-		try
-			set logoutReady to waitForLogoutButton(10)
-		end try
-		logLine("Logout button probe (" & whereLabel & "): " & logoutReady)
-		if logoutReady is "ready" then
-			logLine("Active Riot session found — LOG OUT EVERYWHERE…")
-			set logoutResult to safariJS(jsClickLogoutEverywhere())
-			logLine(logoutResult)
-			if logoutResult contains "clicked-logout" then
-				set confirmReady to waitForLogoutConfirmButton(12)
-				logLine("Confirm probe (" & whereLabel & "): " & confirmReady)
-				if confirmReady is "ready" then
-					logLine(safariJS(jsConfirmLogoutEverywhere()))
-					humanDelay(1.5, 2.5)
-				end if
+		set attempt to 0
+		repeat while attempt < 4
+			set attempt to attempt + 1
+			assertNotStopped()
+			safariGoTo("https://account.riotgames.com/")
+			humanDelay(1.2, 2.2)
+			if sessionLooksLoggedOut() then
+				logLine("Already on login form (" & whereLabel & " #" & attempt & ").")
+				exit repeat
 			end if
-		else
-			try
-				if safariJS(jsProbeLoginForm()) is "ready" then
-					logLine("Already on login form (" & whereLabel & ").")
+			if sessionLooksLoggedIn() then
+				logLine("Active Riot session (" & whereLabel & " #" & attempt & ") — LOG OUT EVERYWHERE…")
+				set logoutResult to safariJS(jsClickLogoutEverywhere())
+				logLine(logoutResult)
+				if logoutResult contains "clicked-logout" then
+					set confirmReady to waitForLogoutConfirmButton(12)
+					logLine("Confirm probe (" & whereLabel & " #" & attempt & "): " & confirmReady)
+					if confirmReady is "ready" then
+						logLine(safariJS(jsConfirmLogoutEverywhere()))
+					end if
+					set waitState to waitUntilLoggedOut(25)
+					logLine("Post-logout wait (" & whereLabel & " #" & attempt & "): " & waitState)
+					if waitState is "login_form" or waitState is "cleared" then exit repeat
+				else
+					logLine("Logout click missed (" & logoutResult & ") — trying auth logout URL…")
 				end if
+			else
+				logLine("Account page ambiguous (" & whereLabel & " #" & attempt & ") — auth logout URL…")
+			end if
+			try
+				safariGoTo("https://authenticate.riotgames.com/logout")
+				humanDelay(1.5, 2.5)
 			end try
+			if sessionLooksLoggedOut() then
+				logLine("Login form after auth logout URL (" & whereLabel & ").")
+				exit repeat
+			end if
+		end repeat
+
+		-- Always finish on the auth login host (not account.riotgames.com).
+		safariGoTo("https://authenticate.riotgames.com/")
+		humanDelay(1.5, 2.5)
+		if sessionLooksLoggedOut() then
+			logLine("Logout verified — login form ready (" & whereLabel & ").")
+		else if sessionLooksLoggedIn() then
+			logLine("WARNING: still logged in after logout attempts (" & whereLabel & ").")
+		else
+			logLine("Logout cleanup finished (" & whereLabel & ") — waiting for form at auth host.")
 		end if
-		-- Extra hard clear for cookie/session leftovers between accounts.
-		try
-			safariGoTo("https://authenticate.riotgames.com/logout")
-			humanDelay(1.0, 1.8)
-		end try
-		safariGoTo("https://www.apple.com/")
-		humanDelay(0.8, 1.4)
-		logLine("Logout cleanup finished (" & whereLabel & ").")
 	on error errMsg
 		logLine("Logout cleanup warning (" & whereLabel & "): " & errMsg)
 	end try
@@ -779,11 +842,18 @@ on jsClickContinue(allowHardJump)
 		"    }" & ¬
 		"  }" & ¬
 		"  if (allowJump) {" & ¬
+		"    // Never hard-jump to account.riotgames.com while a prior session may still" & ¬
+		"    // be logged in — that page has no login form. Prefer the auth login host." & ¬
+		"    const authLogin = 'https://authenticate.riotgames.com/';" & ¬
 		"    try {" & ¬
 		"      const u = new URL(location.href);" & ¬
-		"      const target = u.searchParams.get('url');" & ¬
-		"      if (target) { location.href = target; return 'goto:' + target; }" & ¬
+		"      const target = u.searchParams.get('url') || '';" & ¬
+		"      if (/authenticate" & bs & ".riotgames" & bs & ".com/i.test(target)) {" & ¬
+		"        location.href = target; return 'goto:' + target;" & ¬
+		"      }" & ¬
 		"    } catch (e2) {}" & ¬
+		"    location.href = authLogin;" & ¬
+		"    return 'goto:' + authLogin;" & ¬
 		"  }" & ¬
 		"  return 'no-continue';" & ¬
 		"})(" & jumpFlag & ");"
@@ -1197,6 +1267,7 @@ end jsClickVerifyOnLanding
 on jsClickLogoutEverywhere()
 	-- Exact Riot control:
 	-- <button type="submit" data-testid="log-out-everywhere-button" title="LOG OUT EVERYWHERE">
+	-- Prefer form.requestSubmit so React/SSO logout handlers actually fire.
 	return "(function () {" & ¬
 		"  var btn = document.querySelector('button[data-testid=log-out-everywhere-button]');" & ¬
 		"  if (!btn) {" & ¬
@@ -1209,7 +1280,11 @@ on jsClickLogoutEverywhere()
 		"  if (!btn) return 'no-logout-button';" & ¬
 		"  try { btn.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e1) {}" & ¬
 		"  try { btn.focus(); } catch (e2) {}" & ¬
-		"  btn.click();" & ¬
+		"  var form = btn.form || btn.closest('form');" & ¬
+		"  try {" & ¬
+		"    if (form && typeof form.requestSubmit === 'function') form.requestSubmit(btn);" & ¬
+		"    else btn.click();" & ¬
+		"  } catch (e3) { btn.click(); }" & ¬
 		"  return 'clicked-logout:' + ((btn.getAttribute('title') || btn.textContent || '').trim().slice(0, 40));" & ¬
 		"})();"
 end jsClickLogoutEverywhere
@@ -1243,10 +1318,17 @@ end waitForLogoutConfirmButton
 on jsConfirmLogoutEverywhere()
 	-- Prefer exact Riot Confirm control: data-testid=modal_close-btn title=Confirm
 	return "(function () {" & ¬
+		"  function activate(el) {" & ¬
+		"    var form = el.form || el.closest('form');" & ¬
+		"    try {" & ¬
+		"      if (form && typeof form.requestSubmit === 'function') form.requestSubmit(el);" & ¬
+		"      else el.click();" & ¬
+		"    } catch (e0) { el.click(); }" & ¬
+		"  }" & ¬
 		"  var btn = document.querySelector('button[data-testid=modal_close-btn]');" & ¬
 		"  if (btn && !btn.disabled) {" & ¬
 		"    var label = ((btn.getAttribute('title') || '') + ' ' + (btn.textContent || '')).trim();" & ¬
-		"    btn.click();" & ¬
+		"    activate(btn);" & ¬
 		"    return 'confirmed-logout:modal_close-btn:' + label.slice(0, 40);" & ¬
 		"  }" & ¬
 		"  var roots = Array.from(document.querySelectorAll('[role=dialog], .modal, .ds-modal, [class*=modal]'));" & ¬
@@ -1256,7 +1338,7 @@ on jsConfirmLogoutEverywhere()
 		"    var el = btns[i];" & ¬
 		"    var txt = ((el.textContent || el.value || '') + ' ' + (el.getAttribute('title') || '') + ' ' + (el.getAttribute('data-testid') || '')).toLowerCase();" & ¬
 		"    if ((txt.indexOf('confirm') >= 0 || txt.indexOf('log out everywhere') >= 0) && !el.disabled) {" & ¬
-		"      el.click();" & ¬
+		"      activate(el);" & ¬
 		"      return 'confirmed-logout:fallback:' + txt.trim().slice(0, 50);" & ¬
 		"    }" & ¬
 		"  }" & ¬
@@ -1787,9 +1869,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-09z" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-12a" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-09z" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-12a" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -1810,7 +1892,7 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-09z" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-12a" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
 
 	logLine("Launching batch for " & rowCount & " account(s) from " & csvPath)
 	logLine("Using toolkit scripts: " & dir)

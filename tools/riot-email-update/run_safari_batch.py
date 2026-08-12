@@ -603,6 +603,8 @@ def run_one(
     # Prefer specific terminal errors over earlier step names that also appear in logs
     # (e.g. "password-card" / "SAVE AND VERIFY" show up even when IMAP verify fails).
     for marker in (
+        "Riot login form not ready",
+        "phase/form timeout",
         "No Verify Your Email link",
         "Could not restore account session",
         "Re-login failed after password change",
@@ -613,14 +615,12 @@ def run_one(
         "Could not find personal-information-card__emailAddress",
         "Could not find password-card",
         "password-card__submit-btn",
-        "Allow JavaScript",
-        "Cloudflare",
-        "cloudflare",
-        "log-out-everywhere-button",
-        "LOG OUT EVERYWHERE",
-        "modal_close-btn",
+        "Allow JavaScript from Apple Events",
+        "Cloudflare challenge",
+        "Could not find log-out-everywhere-button",
+        "Could not click LOG OUT EVERYWHERE",
         "Confirm modal",
-        "Timed out",
+        "Timed out waiting for Riot login host",
         "SAVE AND VERIFY",
         "password-card",
         "new_password",
