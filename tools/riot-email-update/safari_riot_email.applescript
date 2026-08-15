@@ -601,7 +601,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-12i")
+	logLine("BUILD 2026-08-12j")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -1461,18 +1461,42 @@ end jsClickRiotbarLogout
 
 on jsProbePasswordChangeResult()
 	-- success / validation-error / server-error / form-cleared after password-card save
+	-- Avoid backslash escapes in AppleScript string literals (use indexOf checks).
 	return "(function () {" & ¬
 		"  var text = ((document.body && document.body.innerText) || '').toLowerCase();" & ¬
-		"  if (/password (has been )?(updated|changed|saved)|successfully (changed|updated) (your )?password|your password was (updated|changed)|password (update|change) successful/.test(text)) return 'success';" & ¬
-		"  if (/server error|internal (server )?error|something went wrong|unexpected error|temporarily unavailable|service unavailable|try again later|please try again later|unable to (save|update|process|complete)|request failed|error code|http 5\d\d|\b500\b|\b502\b|\b503\b/.test(text)) return 'server_error';" & ¬
-		"  if (/(current )?password (is )?(incorrect|invalid|wrong)|could not (change|update) (your )?password|password change failed|passwords? (do not|don't) match|does not meet|too weak/.test(text)) return 'error';" & ¬
+		"  function hasPwSuccess(s) {" & ¬
+		"    return s.indexOf('password') >= 0 && (s.indexOf('updated') >= 0 || s.indexOf('changed') >= 0 || s.indexOf('saved') >= 0 || s.indexOf('successful') >= 0);" & ¬
+		"  }" & ¬
+		"  function hasServerError(s) {" & ¬
+		"    return s.indexOf('server error') >= 0 || s.indexOf('internal error') >= 0" & ¬
+		"      || s.indexOf('something went wrong') >= 0 || s.indexOf('unexpected error') >= 0" & ¬
+		"      || s.indexOf('temporarily unavailable') >= 0 || s.indexOf('service unavailable') >= 0" & ¬
+		"      || s.indexOf('try again later') >= 0 || s.indexOf('please try again') >= 0" & ¬
+		"      || s.indexOf('unable to save') >= 0 || s.indexOf('unable to update') >= 0" & ¬
+		"      || s.indexOf('unable to process') >= 0 || s.indexOf('unable to complete') >= 0" & ¬
+		"      || s.indexOf('request failed') >= 0 || s.indexOf('error code') >= 0" & ¬
+		"      || s.indexOf('http 500') >= 0 || s.indexOf('http 502') >= 0 || s.indexOf('http 503') >= 0" & ¬
+		"      || s.indexOf(' 500') >= 0 || s.indexOf(' 502') >= 0 || s.indexOf(' 503') >= 0;" & ¬
+		"  }" & ¬
+		"  function hasPwValidationError(s) {" & ¬
+		"    if (s.indexOf('incorrect') >= 0 || s.indexOf('invalid') >= 0 || s.indexOf('wrong') >= 0) {" & ¬
+		"      if (s.indexOf('password') >= 0 || s.indexOf('current') >= 0) return true;" & ¬
+		"    }" & ¬
+		"    if (s.indexOf('could not change') >= 0 || s.indexOf('could not update') >= 0) return true;" & ¬
+		"    if (s.indexOf('password change failed') >= 0) return true;" & ¬
+		"    if (s.indexOf('do not match') >= 0 || s.indexOf('does not meet') >= 0 || s.indexOf('too weak') >= 0) return true;" & ¬
+		"    return false;" & ¬
+		"  }" & ¬
+		"  if (hasPwSuccess(text)) return 'success';" & ¬
+		"  if (hasServerError(text)) return 'server_error';" & ¬
+		"  if (hasPwValidationError(text)) return 'error';" & ¬
 		"  var alertNodes = Array.from(document.querySelectorAll('[role=alert], [aria-live], .alert, [class*=toast], [class*=notification], [class*=banner], [class*=Snackbar], [class*=snackbar], [class*=error], [class*=Error]'));" & ¬
 		"  for (var i = 0; i < alertNodes.length; i++) {" & ¬
 		"    var t = ((alertNodes[i].innerText || alertNodes[i].textContent || '')).toLowerCase();" & ¬
 		"    if (!t) continue;" & ¬
-		"    if (t.indexOf('password') >= 0 && (t.indexOf('success') >= 0 || t.indexOf('updated') >= 0 || t.indexOf('changed') >= 0 || t.indexOf('saved') >= 0)) return 'success';" & ¬
-		"    if (/server error|something went wrong|try again|unexpected|unavailable|internal error|unable to/.test(t)) return 'server_error';" & ¬
-		"    if (t.indexOf('password') >= 0 && (t.indexOf('error') >= 0 || t.indexOf('fail') >= 0 || t.indexOf('incorrect') >= 0 || t.indexOf('invalid') >= 0)) return 'error';" & ¬
+		"    if (hasPwSuccess(t)) return 'success';" & ¬
+		"    if (hasServerError(t)) return 'server_error';" & ¬
+		"    if (hasPwValidationError(t)) return 'error';" & ¬
 		"  }" & ¬
 		"  var cur = document.querySelector('input[data-testid=password-card__currentPassword]');" & ¬
 		"  var neu = document.querySelector('input[data-testid=password-card__newPassword]');" & ¬
@@ -2235,9 +2259,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-12i" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-12j" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-12i" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-12j" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -2258,7 +2282,7 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-12i" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "FORCE STOP anytime: double-click FORCE_STOP.command" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-12j" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "FORCE STOP anytime: double-click FORCE_STOP.command" buttons {"Cancel", "Run all"} default button "Run all"
 
 	logLine("Launching batch for " & rowCount & " account(s) from " & csvPath)
 	logLine("Using toolkit scripts: " & dir)

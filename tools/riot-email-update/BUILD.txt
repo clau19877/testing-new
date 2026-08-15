@@ -1,5 +1,4 @@
-BUILD 2026-08-12i
-Password change: detect Riot server errors, refresh, retry up to 3 times.
-FORCE STOP: double-click FORCE_STOP.command (or STOP_BATCH.command).
-Faster IMAP; cool-down max 10s; account.riotgames.com direct login.
+BUILD 2026-08-12j
+Fix jsProbePasswordChangeResult for Script Editor (no \\d/\\b in AppleScript strings).
+Password server-error retry up to 3x; FORCE_STOP.command included.
 Zip does not include data/tasks.csv.

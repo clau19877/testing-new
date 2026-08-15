@@ -6,7 +6,7 @@ cd "$(dirname "$0")" || exit 1
 chmod +x run_safari_mac.sh run_safari_batch.sh fetch_riot_imap_code.py \
   RUN_ME.command STOP_BATCH.command FORCE_STOP.command stop_safari_batch.sh 2>/dev/null || true
 
-echo "BUILD 2026-08-12i"
+echo "BUILD 2026-08-12j"
 echo "Working folder: $(pwd)"
 echo
 echo "FORCE STOP anytime: double-click FORCE_STOP.command (or STOP_BATCH.command)"
