@@ -1,5 +1,4 @@
-BUILD 2026-08-12f
-Inter-account cool-down default ~8s, capped at 10s total.
-Password change: force re-login with new_password before final logout.
-Skip docs.qq — open https://account.riotgames.com/ directly.
+BUILD 2026-08-12g
+Password verify login always via account.riotgames.com (full OAuth), not bare authenticate.
+Faster logout cleanup; password save uses requestSubmit; cool-down max 10s.
 Zip does not include data/tasks.csv.

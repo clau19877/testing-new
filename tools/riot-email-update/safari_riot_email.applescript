@@ -181,10 +181,6 @@ on run argv
 		if not sessionLooksLoggedOut() then
 			safariGoTo("https://account.riotgames.com/")
 			humanDelay(1.2, 2.0)
-			if not sessionLooksLoggedOut() then
-				safariGoTo("https://authenticate.riotgames.com/")
-				humanDelay(1.2, 2.0)
-			end if
 		end if
 		set formReady to waitForLoginForm(45)
 		logLine("Login form ready: " & formReady)
@@ -193,10 +189,6 @@ on run argv
 			forceLogoutSession("login_form_retry")
 			safariGoTo("https://account.riotgames.com/")
 			humanDelay(2.0, 3.0)
-			if not sessionLooksLoggedOut() then
-				safariGoTo("https://authenticate.riotgames.com/")
-				humanDelay(1.5, 2.5)
-			end if
 			set formReady to waitForLoginForm(35)
 			logLine("Login form ready (retry): " & formReady)
 		end if
@@ -431,8 +423,21 @@ on run argv
 				end if
 			end if
 
-			set pwOutcome to waitForPasswordChangeOutcome(55)
+			set pwOutcome to waitForPasswordChangeOutcome(40)
 			logLine("Password-change outcome: " & pwOutcome)
+			if pwOutcome is "error" then error "Riot rejected the password change (error banner). Check current/new password in tasks.csv."
+			if pwOutcome is "timeout" then
+				logLine("No password UI confirmation — re-submitting SAVE CHANGES once…")
+				try
+					if safariJS(jsProbePasswordSaveButton()) is "ready" then
+						set pwSaveResult to safariJS(jsClickPasswordSave())
+						logLine("Password save retry: " & pwSaveResult)
+						humanDelay(2.5, 4.0)
+						set pwOutcome to waitForPasswordChangeOutcome(35)
+						logLine("Password-change outcome (retry): " & pwOutcome)
+					end if
+				end try
+			end if
 			if pwOutcome is "error" then error "Riot rejected the password change (error banner). Check current/new password in tasks.csv."
 			if pwOutcome is "timeout" then
 				logLine("WARNING: no explicit success banner — will hard-verify via forced re-login with new_password.")
@@ -448,6 +453,13 @@ on run argv
 			logLine("Signing in with NEW password to confirm change…")
 			set newLogin to signInWithCredentials(riotUser, newPass, batchMode)
 			logLine("New-password login result: " & newLogin)
+			-- Hang / still-on-form is often a bare-auth redirect miss — retry new password once.
+			if newLogin is "fail:still-login-form" or newLogin is "fail:no-account-after-login" or newLogin is "fail:no-login-form" then
+				logLine("New-password login inconclusive (" & newLogin & ") — retrying via account.riotgames.com…")
+				forceLogoutSession("before_new_password_retry")
+				set newLogin to signInWithCredentials(riotUser, newPass, batchMode)
+				logLine("New-password login retry result: " & newLogin)
+			end if
 			if newLogin does not start with "ok" then
 				logLine("New password login failed — checking whether old password still works…")
 				forceLogoutSession("after_new_password_fail")
@@ -455,6 +467,10 @@ on run argv
 				logLine("Old-password login result: " & oldLogin)
 				if oldLogin starts with "ok" then
 					error "Password change did not take effect (old password still works; new password rejected). Logout was blocked."
+				end if
+				-- Old rejected + new hung/rejected: password likely changed but verify login failed.
+				if oldLogin is "fail:bad_creds" and (newLogin is "fail:still-login-form" or newLogin is "fail:no-account-after-login" or newLogin is "fail:timeout") then
+					error "Password likely changed (old password rejected) but new-password login did not reach account page (" & newLogin & "). Re-run this row with riot_password=new_password."
 				end if
 				error "Password change not confirmed (cannot sign in with new_password: " & newLogin & "; old also failed: " & oldLogin & ")."
 			end if
@@ -554,7 +570,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-12f")
+	logLine("BUILD 2026-08-12g")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -801,12 +817,17 @@ on forceLogoutSession(whereLabel)
 	logLine("Ensuring logged out (" & whereLabel & ")…")
 	try
 		ensureSafariDocument()
+		-- Fast path: already on a Riot login form.
+		if sessionLooksLoggedOut() then
+			logLine("Already on login form (" & whereLabel & ").")
+			return
+		end if
 		set attempt to 0
-		repeat while attempt < 4
+		repeat while attempt < 2
 			set attempt to attempt + 1
 			assertNotStopped()
 			safariGoTo("https://account.riotgames.com/")
-			humanDelay(1.2, 2.2)
+			humanDelay(1.0, 1.6)
 			if sessionLooksLoggedOut() then
 				logLine("Already on login form (" & whereLabel & " #" & attempt & ").")
 				exit repeat
@@ -816,18 +837,24 @@ on forceLogoutSession(whereLabel)
 				set logoutResult to safariJS(jsClickRiotbarLogout())
 				logLine(logoutResult)
 				if logoutResult contains "clicked-riotbar-logout" then
-					set waitState to waitUntilLoggedOut(25)
+					set waitState to waitUntilLoggedOut(18)
 					logLine("Post-logout wait (" & whereLabel & " #" & attempt & "): " & waitState)
 					if waitState is "login_form" or waitState is "cleared" then exit repeat
 				else
 					logLine("Riotbar Logout click missed (" & logoutResult & ") — trying auth logout URL…")
 				end if
 			else
-				logLine("Account page ambiguous (" & whereLabel & " #" & attempt & ") — auth logout URL…")
+				-- Ambiguous load: wait briefly for OAuth login form before another logout hop.
+				logLine("Account page ambiguous (" & whereLabel & " #" & attempt & ") — waiting for login form…")
+				if waitForLoginForm(8) is "ready" then
+					logLine("Login form appeared (" & whereLabel & " #" & attempt & ").")
+					exit repeat
+				end if
+				logLine("Still ambiguous — auth logout URL…")
 			end if
 			try
 				safariGoTo("https://authenticate.riotgames.com/logout")
-				humanDelay(1.5, 2.5)
+				humanDelay(1.0, 1.6)
 			end try
 			if sessionLooksLoggedOut() then
 				logLine("Login form after auth logout URL (" & whereLabel & ").")
@@ -835,15 +862,20 @@ on forceLogoutSession(whereLabel)
 			end if
 		end repeat
 
-		-- Always finish on the auth login host (not account.riotgames.com).
-		safariGoTo("https://authenticate.riotgames.com/")
-		humanDelay(1.5, 2.5)
+		-- Finish on account portal so the next sign-in gets a full OAuth login URL
+		-- (bare authenticate.riotgames.com/ often hangs after Sign in).
+		safariGoTo("https://account.riotgames.com/")
+		humanDelay(1.0, 1.8)
 		if sessionLooksLoggedOut() then
 			logLine("Logout verified — login form ready (" & whereLabel & ").")
 		else if sessionLooksLoggedIn() then
 			logLine("WARNING: still logged in after logout attempts (" & whereLabel & ").")
 		else
-			logLine("Logout cleanup finished (" & whereLabel & ") — waiting for form at auth host.")
+			if waitForLoginForm(10) is "ready" then
+				logLine("Logout verified — login form ready after wait (" & whereLabel & ").")
+			else
+				logLine("Logout cleanup finished (" & whereLabel & ") — form not confirmed yet.")
+			end if
 		end if
 	on error errMsg
 		logLine("Logout cleanup warning (" & whereLabel & "): " & errMsg)
@@ -1254,7 +1286,12 @@ on jsClickPasswordSave()
 		"  if (!btn) return 'no-password-save-button';" & ¬
 		"  if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') return 'password-save-disabled';" & ¬
 		"  try { btn.scrollIntoView({ block: 'center' }); } catch (e1) {}" & ¬
-		"  btn.click();" & ¬
+		"  try { btn.focus(); } catch (e2) {}" & ¬
+		"  var form = btn.form || btn.closest('form');" & ¬
+		"  try {" & ¬
+		"    if (form && typeof form.requestSubmit === 'function') form.requestSubmit(btn);" & ¬
+		"    else btn.click();" & ¬
+		"  } catch (e3) { btn.click(); }" & ¬
 		"  return 'clicked-password-save:' + ((btn.getAttribute('title') || btn.textContent || '').trim().slice(0, 40));" & ¬
 		"})();"
 end jsClickPasswordSave
@@ -1457,78 +1494,108 @@ on verifyPasswordChangeSuccess()
 end verifyPasswordChangeSuccess
 
 on signInWithCredentials(riotUser, passText, batchMode)
-	-- Assumes session was cleared. Signs in and waits for account email field.
+	-- Assumes session was cleared. Signs in via account.riotgames.com so Riot
+	-- issues the full OAuth authorize URL (bare authenticate.riotgames.com/ hangs).
 	-- Returns "ok:…" or "fail:…" (does not throw on bad credentials).
-	logLine("signInWithCredentials: opening login…")
-	safariGoTo("https://account.riotgames.com/")
-	humanDelay(1.5, 2.5)
-	if not sessionLooksLoggedOut() then
-		safariGoTo("https://authenticate.riotgames.com/")
-		humanDelay(1.2, 2.0)
-	end if
-	set formReady to waitForLoginForm(40)
-	logLine("signInWithCredentials form: " & formReady)
-	if formReady is not "ready" then
-		forceLogoutSession("signin_form_missing")
-		safariGoTo("https://authenticate.riotgames.com/")
-		humanDelay(1.5, 2.5)
+	set attempt to 0
+	repeat while attempt < 2
+		set attempt to attempt + 1
+		logLine("signInWithCredentials attempt " & attempt & ": opening account.riotgames.com…")
+		safariGoTo("https://account.riotgames.com/")
+		humanDelay(1.8, 2.8)
+		-- Never hard-jump to bare authenticate — that drops client_id / redirect_uri.
+		if sessionLooksLoggedIn() then
+			logLine("signInWithCredentials: still logged in — riotbar Logout…")
+			try
+				logLine(safariJS(jsClickRiotbarLogout()))
+			end try
+			waitUntilLoggedOut(15)
+			safariGoTo("https://account.riotgames.com/")
+			humanDelay(1.5, 2.2)
+		end if
 		set formReady to waitForLoginForm(35)
-		logLine("signInWithCredentials form (retry): " & formReady)
-	end if
-	if formReady is not "ready" then return "fail:no-login-form"
-
-	set fillResult to safariJS(jsFillLogin(riotUser, passText))
-	logLine("signInWithCredentials fill: " & fillResult)
-	if fillResult contains "account-page" then
-		try
-			if safariJS(jsProbeEmailField()) is "ready" then return "ok:already-account"
-		end try
-	end if
-	humanDelay(0.5, 1.0)
-	safariJS(jsClickSignIn())
-	set phaseNow to waitForPostLogin(50)
-	logLine("signInWithCredentials phase: " & phaseNow)
-	if phaseNow is "bad_creds" then return "fail:bad_creds"
-	if phaseNow is "cloudflare" then
-		set phaseNow to waitForCloudflareClear(45)
-		logLine("signInWithCredentials after CF: " & phaseNow)
-	end if
-	if phaseNow is "captcha" then
-		if batchMode then return "fail:captcha"
-		display dialog "hCaptcha during password verify login. Solve it in Safari, then click OK." buttons {"OK"} default button 1
-		set phaseNow to waitForPostLogin(60)
-	end if
-	if phaseNow is "mfa" then
-		set mfaCode to fetchImapCode("IMAP")
-		if mfaCode is "" then
-			if batchMode then return "fail:mfa"
-			set mfaCode to text returned of (display dialog "Enter Riot MFA code (password verify):" default answer "")
-		end if
-		if mfaCode is not "" then
-			safariJS(jsSubmitCode(mfaCode, "mfa"))
-			humanDelay(2.0, 3.0)
+		logLine("signInWithCredentials form: " & formReady)
+		if formReady is not "ready" then
+			if attempt is 1 then
+				logLine("signInWithCredentials: no form yet — auth logout then retry account portal…")
+				try
+					safariGoTo("https://authenticate.riotgames.com/logout")
+					humanDelay(1.0, 1.6)
+				end try
+			end if
+			if attempt >= 2 then return "fail:no-login-form"
+		else
+			set fillResult to safariJS(jsFillLogin(riotUser, passText))
+			logLine("signInWithCredentials fill: " & fillResult)
+			try
+				logLine("signInWithCredentials url=" & safariCurrentURL())
+			end try
+			if fillResult contains "account-page" then
+				try
+					if safariJS(jsProbeEmailField()) is "ready" then return "ok:already-account"
+				end try
+			end if
+			humanDelay(0.5, 1.0)
+			set clickResult to safariJS(jsClickSignIn())
+			logLine("signInWithCredentials click: " & clickResult)
 			set phaseNow to waitForPostLogin(45)
-			logLine("signInWithCredentials after MFA: " & phaseNow)
-		end if
-	end if
-	if phaseNow is "bad_creds" then return "fail:bad_creds"
+			logLine("signInWithCredentials phase: " & phaseNow)
+			if phaseNow is "bad_creds" then return "fail:bad_creds"
+			if phaseNow is "cloudflare" then
+				set phaseNow to waitForCloudflareClear(45)
+				logLine("signInWithCredentials after CF: " & phaseNow)
+			end if
+			if phaseNow is "captcha" then
+				if batchMode then return "fail:captcha"
+				display dialog "hCaptcha during password verify login. Solve it in Safari, then click OK." buttons {"OK"} default button 1
+				set phaseNow to waitForPostLogin(60)
+			end if
+			if phaseNow is "mfa" then
+				set mfaCode to fetchImapCode("IMAP")
+				if mfaCode is "" then
+					if batchMode then return "fail:mfa"
+					set mfaCode to text returned of (display dialog "Enter Riot MFA code (password verify):" default answer "")
+				end if
+				if mfaCode is not "" then
+					safariJS(jsSubmitCode(mfaCode, "mfa"))
+					humanDelay(2.0, 3.0)
+					set phaseNow to waitForPostLogin(45)
+					logLine("signInWithCredentials after MFA: " & phaseNow)
+				end if
+			end if
+			if phaseNow is "bad_creds" then return "fail:bad_creds"
+			if phaseNow is "account" or phaseNow is "logged_in" then
+				set emailWait to waitForEmailField(20)
+				if emailWait is "ready" then return "ok:account"
+			end if
 
-	set emailWait to waitForEmailField(35)
-	logLine("signInWithCredentials email field: " & emailWait)
-	if emailWait is "ready" then return "ok:account"
-	try
-		if safariJS(jsProbeEmailField()) is "ready" then return "ok:account"
-	end try
-	safariGoTo("https://account.riotgames.com/")
-	humanDelay(1.5, 2.5)
-	set emailWait to waitForEmailField(25)
-	if emailWait is "ready" then return "ok:account-retry"
-	if safariJS(jsProbeLoginForm()) is "ready" then
-		set phaseRetry to safariJS(jsProbePhase()) as text
-		if phaseRetry is "bad_creds" then return "fail:bad_creds"
-		return "fail:still-login-form"
-	end if
-	return "fail:no-account-after-login"
+			set emailWait to waitForEmailField(25)
+			logLine("signInWithCredentials email field: " & emailWait)
+			if emailWait is "ready" then return "ok:account"
+			try
+				if safariJS(jsProbeEmailField()) is "ready" then return "ok:account"
+			end try
+			safariGoTo("https://account.riotgames.com/")
+			humanDelay(1.5, 2.2)
+			set emailWait to waitForEmailField(20)
+			if emailWait is "ready" then return "ok:account-retry"
+			try
+				set phaseRetry to safariJS(jsProbePhase()) as text
+				logLine("signInWithCredentials phase after account goto: " & phaseRetry)
+				if phaseRetry is "bad_creds" then return "fail:bad_creds"
+				if phaseRetry is "account" or phaseRetry is "logged_in" then
+					if safariJS(jsProbeEmailField()) is "ready" then return "ok:account-late"
+				end if
+			end try
+			if safariJS(jsProbeLoginForm()) is "ready" then
+				if attempt >= 2 then return "fail:still-login-form"
+				logLine("signInWithCredentials: still on login form — retrying full account entry…")
+			else
+				if attempt >= 2 then return "fail:no-account-after-login"
+			end if
+		end if
+	end repeat
+	return "fail:timeout"
 end signInWithCredentials
 
 on jsClickLogoutEverywhere()
@@ -2135,9 +2202,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-12f" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-12g" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-12f" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-12g" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -2158,7 +2225,7 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-12f" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-12g" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
 
 	logLine("Launching batch for " & rowCount & " account(s) from " & csvPath)
 	logLine("Using toolkit scripts: " & dir)
