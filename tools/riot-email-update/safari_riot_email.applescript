@@ -484,33 +484,46 @@ on run argv
 			logStep("verify_password_change")
 			logLine("Forcing logout before new-password verification (do not keep old session)…")
 			forceLogoutSession("before_new_password_verify")
+			-- Riot often needs a beat after password-change logout before auth accepts the new secret.
+			logLine("Settling after logout before new-password verify login…")
+			humanDelay(3.0, 4.5)
 			logLine("Signing in with NEW password to confirm change…")
 			set newLogin to signInWithCredentials(riotUser, newPass, batchMode)
 			logLine("New-password login result: " & newLogin)
 			-- Hang / still-on-form is often a bare-auth redirect miss — retry new password once.
-			if newLogin is "fail:still-login-form" or newLogin is "fail:no-account-after-login" or newLogin is "fail:no-login-form" then
+			if newLogin is "fail:still-login-form" or newLogin is "fail:no-account-after-login" or newLogin is "fail:no-login-form" or newLogin is "fail:timeout" then
 				logLine("New-password login inconclusive (" & newLogin & ") — retrying via account.riotgames.com…")
 				forceLogoutSession("before_new_password_retry")
+				humanDelay(2.0, 3.0)
 				set newLogin to signInWithCredentials(riotUser, newPass, batchMode)
 				logLine("New-password login retry result: " & newLogin)
 			end if
 			if newLogin does not start with "ok" then
 				logLine("New password login failed — checking whether old password still works…")
 				forceLogoutSession("after_new_password_fail")
+				humanDelay(1.5, 2.5)
 				set oldLogin to signInWithCredentials(riotUser, oldPassForVerify, batchMode)
 				logLine("Old-password login result: " & oldLogin)
 				if oldLogin starts with "ok" then
 					error "Password change did not take effect (old password still works; new password rejected). Logout was blocked."
 				end if
-				-- Old rejected + new hung/rejected: password likely changed but verify login failed.
-				if oldLogin is "fail:bad_creds" and (newLogin is "fail:still-login-form" or newLogin is "fail:no-account-after-login" or newLogin is "fail:timeout") then
+				set newHung to (newLogin is "fail:still-login-form" or newLogin is "fail:no-account-after-login" or newLogin is "fail:timeout" or newLogin is "fail:captcha" or newLogin is "fail:mfa")
+				set uiLooksChanged to (pwOutcome is "form_cleared" or pwOutcome starts with "success" or pwOutcome is "session_dropped")
+				-- UI already showed password form clear / success, and old password no longer works:
+				-- treat as changed even if the post-change re-login hung (common after rapid logout).
+				if uiLooksChanged and newHung and (oldLogin is "fail:bad_creds" or oldLogin is "fail:still-login-form" or oldLogin is "fail:timeout" or oldLogin is "fail:no-account-after-login") then
+					logLine("WARNING: password UI said changed (" & pwOutcome & ") and old password did not restore session (" & oldLogin & "); accepting change despite new-password verify hang (" & newLogin & ").")
+					logLine("Update tasks.csv riot_password to new_password for this account if you re-run it.")
+					set newLogin to "ok:accepted-ui-cleared"
+				else if oldLogin is "fail:bad_creds" and newHung then
 					error "Password likely changed (old password rejected) but new-password login did not reach account page (" & newLogin & "). Re-run this row with riot_password=new_password."
+				else
+					error "Password change not confirmed (cannot sign in with new_password: " & newLogin & "; old also failed: " & oldLogin & ")."
 				end if
-				error "Password change not confirmed (cannot sign in with new_password: " & newLogin & "; old also failed: " & oldLogin & ")."
 			end if
 
 			set riotPass to newPass
-			logLine("Password change confirmed via re-login with new_password — safe to logout.")
+			logLine("Password change confirmed (" & newLogin & ") — safe to logout.")
 		end if
 
 		if skipEmail and skipPassword then
@@ -604,7 +617,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-12l")
+	logLine("BUILD 2026-08-12m")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -1077,11 +1090,45 @@ on jsFillLogin(userName, passText)
 end jsFillLogin
 
 on jsClickSignIn()
+	-- Prefer Riot testid, then submit, then visible Sign in text. Enter on password as last resort.
 	return "(function () {" & ¬
-		"  const btn = document.querySelector('button[data-testid=btn-signin-submit], button[type=submit]');" & ¬
-		"  if (btn) { btn.click(); return 'clicked-signin'; }" & ¬
-		"  const form = document.querySelector('form');" & ¬
-		"  if (form) { form.requestSubmit ? form.requestSubmit() : form.submit(); return 'submitted-form'; }" & ¬
+		"  function visible(el) {" & ¬
+		"    try { if (!el) return false; if (el.disabled || el.getAttribute('aria-disabled') === 'true') return false;" & ¬
+		"      if (el.offsetParent === null && el.getClientRects().length === 0) return false; return true; } catch (e0) { return !!el; }" & ¬
+		"  }" & ¬
+		"  var btn = document.querySelector('button[data-testid=btn-signin-submit]');" & ¬
+		"  if (!visible(btn)) btn = document.querySelector('button[type=submit]');" & ¬
+		"  if (!visible(btn)) {" & ¬
+		"    var cands = Array.from(document.querySelectorAll('button, [role=button], input[type=submit]'));" & ¬
+		"    btn = cands.find(function (b) {" & ¬
+		"      var t = ((b.getAttribute('data-testid') || '') + ' ' + (b.getAttribute('aria-label') || '') + ' ' + (b.textContent || '') + ' ' + (b.value || '')).toLowerCase();" & ¬
+		"      return visible(b) && (t.indexOf('sign in') >= 0 || t.indexOf('signin') >= 0 || t.indexOf('log in') >= 0 || t.indexOf('login') >= 0);" & ¬
+		"    }) || null;" & ¬
+		"  }" & ¬
+		"  if (visible(btn)) {" & ¬
+		"    try { btn.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e1) {}" & ¬
+		"    try { btn.focus(); } catch (e2) {}" & ¬
+		"    var form = btn.form || (btn.closest && btn.closest('form'));" & ¬
+		"    try {" & ¬
+		"      if (form && typeof form.requestSubmit === 'function') form.requestSubmit(btn);" & ¬
+		"      else btn.click();" & ¬
+		"    } catch (e3) { btn.click(); }" & ¬
+		"    return 'clicked-signin:' + ((btn.getAttribute('data-testid') || btn.textContent || '').trim().slice(0, 40));" & ¬
+		"  }" & ¬
+		"  var form2 = document.querySelector('form');" & ¬
+		"  if (form2) {" & ¬
+		"    try { if (typeof form2.requestSubmit === 'function') form2.requestSubmit(); else form2.submit(); } catch (e4) { form2.submit(); }" & ¬
+		"    return 'submitted-form';" & ¬
+		"  }" & ¬
+		"  var passEl = document.querySelector('input[name=password], input[type=password]');" & ¬
+		"  if (passEl) {" & ¬
+		"    try {" & ¬
+		"      passEl.focus();" & ¬
+		"      passEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));" & ¬
+		"      passEl.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));" & ¬
+		"      return 'enter-on-password';" & ¬
+		"    } catch (e5) {}" & ¬
+		"  }" & ¬
 		"  return 'no-signin';" & ¬
 		"})();"
 end jsClickSignIn
@@ -1620,11 +1667,20 @@ on signInWithCredentials(riotUser, passText, batchMode)
 					if safariJS(jsProbeEmailField()) is "ready" then return "ok:already-account"
 				end try
 			end if
-			humanDelay(0.5, 1.0)
+			humanDelay(0.8, 1.4)
 			set clickResult to safariJS(jsClickSignIn())
 			logLine("signInWithCredentials click: " & clickResult)
-			set phaseNow to waitForPostLogin(45)
+			if clickResult is "no-signin" then
+				logLine("Sign-in control missing — brief wait and retry click…")
+				humanDelay(1.0, 1.6)
+				set clickResult to safariJS(jsClickSignIn())
+				logLine("signInWithCredentials click retry: " & clickResult)
+			end if
+			set phaseNow to waitForPostLogin(55)
 			logLine("signInWithCredentials phase: " & phaseNow)
+			try
+				logLine("signInWithCredentials post-click url=" & safariCurrentURL())
+			end try
 			if phaseNow is "bad_creds" then return "fail:bad_creds"
 			if phaseNow is "cloudflare" then
 				set phaseNow to waitForCloudflareClear(45)
@@ -2297,9 +2353,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-12l" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-12m" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-12l" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-12m" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -2320,7 +2376,7 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-12l" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "FORCE STOP anytime: double-click FORCE_STOP.command" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-12m" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "FORCE STOP anytime: double-click FORCE_STOP.command" buttons {"Cancel", "Run all"} default button "Run all"
 
 	logLine("Launching batch for " & rowCount & " account(s) from " & csvPath)
 	logLine("Using toolkit scripts: " & dir)

@@ -1,6 +1,7 @@
-BUILD 2026-08-12l
-Password-change probe: toast/alert first; no body-wide "please try again".
-Outcomes include snippet (server_error:...). Hard refresh on retry.
-Fixed empty page.probe (backslash regex). dumpDebug logs password.probe.
+BUILD 2026-08-12m
+Password change itself can succeed (form_cleared) while post-change
+re-login verify hangs (timeout / no-signin). Harden Sign in click,
+settle after logout, and accept UI-cleared when old password no longer
+restores the session.
 Do NOT open .applescript in Script Editor — use RUN_ME.command.
-FORCE_STOP.command to kill batch. Zip does not include data/tasks.csv.
+Zip does not include data/tasks.csv.
