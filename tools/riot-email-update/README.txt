@@ -1,10 +1,8 @@
-BUILD 2026-08-12j
+BUILD 2026-08-12k
 
-This zip DOES NOT contain data/tasks.csv. Keep your existing file.
+Do NOT open safari_riot_email.applescript in Script Editor.
+Use RUN_ME.command / ./run_safari_mac.sh only.
 
-START:  double-click RUN_ME.command
 FORCE STOP: double-click FORCE_STOP.command
 
-Password change retries on Riot server errors (up to 3x with refresh).
-
-Confirm BUILD 2026-08-12j in debug/logs/safari_*.log
+Confirm BUILD 2026-08-12k in debug/logs/safari_*.log

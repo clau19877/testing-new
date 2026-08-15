@@ -1,4 +1,5 @@
-BUILD 2026-08-12j
-Fix jsProbePasswordChangeResult for Script Editor (no \\d/\\b in AppleScript strings).
-Password server-error retry up to 3x; FORCE_STOP.command included.
+BUILD 2026-08-12k
+Script Editor syntax fix: password probe has no backslash escapes.
+Do NOT open .applescript in Script Editor — use RUN_ME.command.
+FORCE_STOP.command to kill batch. Password server-error retry x3.
 Zip does not include data/tasks.csv.

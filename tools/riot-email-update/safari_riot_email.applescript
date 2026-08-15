@@ -637,7 +637,7 @@ on logLine(msg)
 	end try
 	if logFilePath is not "" then
 		try
-			do shell script "printf '%s\n' " & quoted form of logEntry & " >> " & quoted form of logFilePath
+			do shell script "printf '%s' " & quoted form of (logEntry & (character id 10)) & " >> " & quoted form of logFilePath
 		end try
 	end if
 end logLine
@@ -1460,39 +1460,36 @@ on jsClickRiotbarLogout()
 end jsClickRiotbarLogout
 
 on jsProbePasswordChangeResult()
-	-- success / validation-error / server-error / form-cleared after password-card save
-	-- Avoid backslash escapes in AppleScript string literals (use indexOf checks).
+	-- Do not put regex backslash escapes in AppleScript string literals.
+	-- Script Editor error "Expected quote, found unknown token" = \\d / \\b / etc.
+	set q to quote
 	return "(function () {" & ¬
-		"  var text = ((document.body && document.body.innerText) || '').toLowerCase();" & ¬
+		"  var text = ((document.body && document.body.innerText) || " & q & q & ").toLowerCase();" & ¬
+		"  function hit(s, a) { return s.indexOf(a) >= 0; }" & ¬
 		"  function hasPwSuccess(s) {" & ¬
-		"    return s.indexOf('password') >= 0 && (s.indexOf('updated') >= 0 || s.indexOf('changed') >= 0 || s.indexOf('saved') >= 0 || s.indexOf('successful') >= 0);" & ¬
+		"    return hit(s, 'password') && (hit(s, 'updated') || hit(s, 'changed') || hit(s, 'saved') || hit(s, 'successful'));" & ¬
 		"  }" & ¬
 		"  function hasServerError(s) {" & ¬
-		"    return s.indexOf('server error') >= 0 || s.indexOf('internal error') >= 0" & ¬
-		"      || s.indexOf('something went wrong') >= 0 || s.indexOf('unexpected error') >= 0" & ¬
-		"      || s.indexOf('temporarily unavailable') >= 0 || s.indexOf('service unavailable') >= 0" & ¬
-		"      || s.indexOf('try again later') >= 0 || s.indexOf('please try again') >= 0" & ¬
-		"      || s.indexOf('unable to save') >= 0 || s.indexOf('unable to update') >= 0" & ¬
-		"      || s.indexOf('unable to process') >= 0 || s.indexOf('unable to complete') >= 0" & ¬
-		"      || s.indexOf('request failed') >= 0 || s.indexOf('error code') >= 0" & ¬
-		"      || s.indexOf('http 500') >= 0 || s.indexOf('http 502') >= 0 || s.indexOf('http 503') >= 0" & ¬
-		"      || s.indexOf(' 500') >= 0 || s.indexOf(' 502') >= 0 || s.indexOf(' 503') >= 0;" & ¬
+		"    return hit(s, 'server error') || hit(s, 'internal error') || hit(s, 'something went wrong')" & ¬
+		"      || hit(s, 'unexpected error') || hit(s, 'temporarily unavailable') || hit(s, 'service unavailable')" & ¬
+		"      || hit(s, 'try again later') || hit(s, 'please try again') || hit(s, 'unable to save')" & ¬
+		"      || hit(s, 'unable to update') || hit(s, 'unable to process') || hit(s, 'unable to complete')" & ¬
+		"      || hit(s, 'request failed') || hit(s, 'error code') || hit(s, 'http 500') || hit(s, 'http 502')" & ¬
+		"      || hit(s, 'http 503');" & ¬
 		"  }" & ¬
 		"  function hasPwValidationError(s) {" & ¬
-		"    if (s.indexOf('incorrect') >= 0 || s.indexOf('invalid') >= 0 || s.indexOf('wrong') >= 0) {" & ¬
-		"      if (s.indexOf('password') >= 0 || s.indexOf('current') >= 0) return true;" & ¬
-		"    }" & ¬
-		"    if (s.indexOf('could not change') >= 0 || s.indexOf('could not update') >= 0) return true;" & ¬
-		"    if (s.indexOf('password change failed') >= 0) return true;" & ¬
-		"    if (s.indexOf('do not match') >= 0 || s.indexOf('does not meet') >= 0 || s.indexOf('too weak') >= 0) return true;" & ¬
+		"    if ((hit(s, 'incorrect') || hit(s, 'invalid') || hit(s, 'wrong')) && (hit(s, 'password') || hit(s, 'current'))) return true;" & ¬
+		"    if (hit(s, 'could not change') || hit(s, 'could not update') || hit(s, 'password change failed')) return true;" & ¬
+		"    if (hit(s, 'do not match') || hit(s, 'does not meet') || hit(s, 'too weak')) return true;" & ¬
 		"    return false;" & ¬
 		"  }" & ¬
 		"  if (hasPwSuccess(text)) return 'success';" & ¬
 		"  if (hasServerError(text)) return 'server_error';" & ¬
 		"  if (hasPwValidationError(text)) return 'error';" & ¬
-		"  var alertNodes = Array.from(document.querySelectorAll('[role=alert], [aria-live], .alert, [class*=toast], [class*=notification], [class*=banner], [class*=Snackbar], [class*=snackbar], [class*=error], [class*=Error]'));" & ¬
+		"  var sel = '[role=alert], [aria-live], .alert, [class*=toast], [class*=notification], [class*=banner], [class*=snackbar], [class*=error]';" & ¬
+		"  var alertNodes = Array.from(document.querySelectorAll(sel));" & ¬
 		"  for (var i = 0; i < alertNodes.length; i++) {" & ¬
-		"    var t = ((alertNodes[i].innerText || alertNodes[i].textContent || '')).toLowerCase();" & ¬
+		"    var t = ((alertNodes[i].innerText || alertNodes[i].textContent || " & q & q & ")).toLowerCase();" & ¬
 		"    if (!t) continue;" & ¬
 		"    if (hasPwSuccess(t)) return 'success';" & ¬
 		"    if (hasServerError(t)) return 'server_error';" & ¬
@@ -1503,7 +1500,7 @@ on jsProbePasswordChangeResult()
 		"  var conf = document.querySelector('input[data-testid=password-card__confirmNewPassword]');" & ¬
 		"  var btn = document.querySelector('button[data-testid=password-card__submit-btn]');" & ¬
 		"  if (cur && neu && conf) {" & ¬
-		"    var empty = !(cur.value || '') && !(neu.value || '') && !(conf.value || '');" & ¬
+		"    var empty = !(cur.value || " & q & q & ") && !(neu.value || " & q & q & ") && !(conf.value || " & q & q & ");" & ¬
 		"    var disabled = !btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true';" & ¬
 		"    if (empty && disabled) return 'form_cleared';" & ¬
 		"  }" & ¬
