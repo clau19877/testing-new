@@ -1,5 +1,6 @@
-BUILD 2026-08-12k
-Script Editor syntax fix: password probe has no backslash escapes.
+BUILD 2026-08-12l
+Password-change probe: toast/alert first; no body-wide "please try again".
+Outcomes include snippet (server_error:...). Hard refresh on retry.
+Fixed empty page.probe (backslash regex). dumpDebug logs password.probe.
 Do NOT open .applescript in Script Editor — use RUN_ME.command.
-FORCE_STOP.command to kill batch. Password server-error retry x3.
-Zip does not include data/tasks.csv.
+FORCE_STOP.command to kill batch. Zip does not include data/tasks.csv.
