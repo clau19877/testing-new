@@ -1,8 +1,8 @@
-BUILD 2026-08-12n
+BUILD 2026-08-12o
 
 Do NOT open safari_riot_email.applescript in Script Editor.
 Use RUN_ME.command / ./run_safari_mac.sh only.
 
 FORCE STOP: double-click FORCE_STOP.command
 
-Confirm BUILD 2026-08-12n in debug/logs/safari_*.log
+Confirm BUILD 2026-08-12o in debug/logs/safari_*.log

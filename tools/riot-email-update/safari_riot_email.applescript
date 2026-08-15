@@ -194,71 +194,128 @@ on run argv
 		end if
 		if formReady is not "ready" then error "Riot login form not ready after logout/account entry (phase/form timeout)."
 		assertNoCloudflare("before_fill_login")
-		humanDelay(0.8, 1.8)
-		logLine("Filling Riot login form…")
-		set fillResult to safariJS(jsFillLogin(riotUser, riotPass))
-		logLine("Fill result: " & fillResult)
-		humanDelay(0.7, 1.6)
-
-		logStep("click_sign_in")
-		logLine("Clicking Sign in…")
-		safariJS(jsClickSignIn())
-
-		-- Short post-login wait: succeed as soon as account/email field appears (do not burn 2 minutes).
-		set phase to waitForPostLogin(45)
-		logLine("Post-login phase: " & phase)
-
-		if phase is "cloudflare" then
-			logLine("Cloudflare challenge detected — waiting up to 60s for Safari to pass…")
-			set phase to waitForCloudflareClear(60)
-			logLine("After Cloudflare wait phase: " & phase)
-			if phase is "cloudflare" then
-				dumpDebug("cloudflare")
-				error "Cloudflare challenge blocked login. Warm Safari manually (browse apple.com / riotgames.com), wait, then re-run. Increase SAFARI_BATCH_DELAY."
+		set loginAttempt to 0
+		set phase to "unknown"
+		set emailReady to "missing"
+		repeat while loginAttempt < 2
+			set loginAttempt to loginAttempt + 1
+			if loginAttempt > 1 then
+				logLine("Login retry " & loginAttempt & ": re-opening account OAuth entry (previous auth URL was degraded)…")
+				safariGoTo("https://account.riotgames.com/")
+				humanDelay(1.8, 2.8)
+				set formReady to waitForLoginForm(35)
+				logLine("Login form ready (retry): " & formReady)
+				if formReady is not "ready" then error "Riot login form not ready on retry."
 			end if
-		end if
+			humanDelay(0.8, 1.8)
+			logLine("Filling Riot login form…")
+			set fillResult to safariJS(jsFillLogin(riotUser, riotPass))
+			logLine("Fill result: " & fillResult)
+			try
+				logLine("Fill url=" & safeCurrentURL())
+			end try
+			humanDelay(0.7, 1.6)
 
-		if phase is "captcha" then
-			if batchMode then error "hCaptcha appeared (batch mode will not wait for manual solve)"
-			display dialog "hCaptcha appeared in Safari. Solve it in the Safari window, then click OK." buttons {"OK"} default button 1
-			set phase to waitForPostLogin(60)
-			logLine("After manual captcha phase: " & phase)
-		end if
-
-		if phase is "bad_creds" then
-			dumpDebug("bad_creds")
-			error "Riot rejected username/password (Check your details and try again). Verify riot_password in tasks.csv."
-		end if
-
-		if phase is "mfa" then
-			logStep("mfa")
-			if mfaCode is "" then
-				set mfaCode to fetchImapCode("IMAP")
+			logStep("click_sign_in")
+			logLine("Clicking Sign in…")
+			set signClick to safariJS(jsClickSignIn())
+			logLine("Sign-in click: " & signClick)
+			if signClick is "no-signin" then
+				humanDelay(1.0, 1.5)
+				set signClick to safariJS(jsClickSignIn())
+				logLine("Sign-in click retry: " & signClick)
 			end if
-			if mfaCode is "" then
-				if batchMode then error "MFA required but no IMAP code (set IMAP_* / imap columns)"
-				set mfaCode to text returned of (display dialog "Enter Riot MFA / email code:" default answer "")
-			end if
-			logLine("Submitting MFA code…")
-			safariJS(jsSubmitCode(mfaCode, "mfa"))
-			delay 2
+
 			set phase to waitForPostLogin(45)
-			logLine("After MFA phase: " & phase)
-		end if
+			logLine("Post-login phase: " & phase)
+			try
+				logLine("Post-login url=" & safeCurrentURL())
+			end try
+
+			set stuckUrl to ""
+			try
+				set stuckUrl to safariCurrentURL()
+			end try
+			if authUrlLooksBroken(stuckUrl) then
+				logLine("Degraded auth URL after Sign in (captcha GET / missing client_id): " & redactSensitiveUrl(stuckUrl))
+				if loginAttempt < 2 then
+					logLine("Recovering: fresh account.riotgames.com OAuth login…")
+					humanDelay(2.0, 3.0)
+				else
+					set phase to "captcha"
+				end if
+			else if phase is "timeout" or phase is "login" then
+				if stuckUrl contains "h-captcha-response" or stuckUrl contains "g-recaptcha-response" then
+					set phase to "captcha"
+					logLine("Post-login: captcha response fields in URL — treating as captcha.")
+				end if
+			end if
+
+			if phase is "cloudflare" then
+				logLine("Cloudflare challenge detected — waiting up to 60s for Safari to pass…")
+				set phase to waitForCloudflareClear(60)
+				logLine("After Cloudflare wait phase: " & phase)
+				if phase is "cloudflare" then
+					dumpDebug("cloudflare")
+					error "Cloudflare challenge blocked login. Warm Safari manually (browse apple.com / riotgames.com), wait, then re-run. Increase SAFARI_BATCH_DELAY."
+				end if
+			end if
+
+			if phase is "captcha" then
+				if loginAttempt < 2 and authUrlLooksBroken(stuckUrl) then
+					-- retry via fresh OAuth entry
+				else
+					if batchMode then error "hCaptcha / reCAPTCHA required at login (batch will not wait). Warm Safari / retry later, or solve once manually then re-run."
+					display dialog "hCaptcha appeared in Safari. Solve it in the Safari window, then click OK." buttons {"OK"} default button 1
+					set phase to waitForPostLogin(60)
+					logLine("After manual captcha phase: " & phase)
+				end if
+			end if
+
+			if phase is "bad_creds" then
+				dumpDebug("bad_creds")
+				error "Riot rejected username/password (Check your details and try again). Verify riot_password in tasks.csv."
+			end if
+
+			if phase is "mfa" then
+				logStep("mfa")
+				if mfaCode is "" then
+					set mfaCode to fetchImapCode("IMAP")
+				end if
+				if mfaCode is "" then
+					if batchMode then error "MFA required but no IMAP code (set IMAP_* / imap columns)"
+					set mfaCode to text returned of (display dialog "Enter Riot MFA / email code:" default answer "")
+				end if
+				logLine("Submitting MFA code…")
+				safariJS(jsSubmitCode(mfaCode, "mfa"))
+				delay 2
+				set phase to waitForPostLogin(45)
+				logLine("After MFA phase: " & phase)
+			end if
+
+			set emailReady to safariJS(jsProbeEmailField())
+			if emailReady is "ready" or phase is "account" or phase is "logged_in" then exit repeat
+			if authUrlLooksBroken(stuckUrl) and loginAttempt < 2 then
+				-- continue retry
+			else
+				exit repeat
+			end if
+		end repeat
 
 		-- Fast path: if the email field is already on screen, skip long waits / reload.
-		set emailReady to safariJS(jsProbeEmailField())
 		if emailReady is not "ready" then
 			if phase is not "logged_in" and phase is not "account" then
 				set cur to ""
 				try
 					set cur to safariCurrentURL()
 				end try
-				logLine("Post-login URL fallback: " & cur)
+				logLine("Post-login URL fallback: " & redactSensitiveUrl(cur))
+				if authUrlLooksBroken(cur) then
+					error "Login stuck on degraded captcha URL (missing OAuth client_id). Warm Safari, increase delay between accounts, then re-run."
+				end if
 				if cur contains "account.riotgames.com" and cur does not contain "log-in" then
 					logLine("Treating as logged in despite phase=" & phase)
 				else
-					-- Brief extra wait for redirects, then require account host.
 					set phase to waitForPostLogin(20)
 					logLine("Post-login extra phase: " & phase)
 					try
@@ -574,7 +631,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-12n")
+	logLine("BUILD 2026-08-12o")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -640,7 +697,7 @@ on dumpDebug(reasonLabel)
 		logLine("safari dump failed: " & errMsg)
 	end try
 	if curURL is not "" then
-		logLine("safari.url=" & curURL)
+		logLine("safari.url=" & redactSensitiveUrl(curURL))
 	else
 		logLine("safari.url=<unavailable>")
 	end if
@@ -904,6 +961,59 @@ on safariCurrentURL()
 	end timeout
 end safariCurrentURL
 
+on redactSensitiveUrl(rawUrl)
+	-- Never write passwords into debug logs. Pure AppleScript scrub of query keys.
+	set u to rawUrl as text
+	if u is "" then return ""
+	set keys to {"password=", "pass=", "passwd=", "h-captcha-response=", "g-recaptcha-response="}
+	repeat with keyName in keys
+		set keyName to keyName as text
+		repeat while u contains keyName
+			set AppleScript's text item delimiters to keyName
+			set bits to text items of u
+			set AppleScript's text item delimiters to ""
+			if (count of bits) < 2 then exit repeat
+			set head to item 1 of bits
+			set rest to item 2 of bits
+			-- If key appeared mid-string multiple times, rejoin remaining bits later.
+			if (count of bits) > 2 then
+				set tailBits to items 3 thru -1 of bits
+				set AppleScript's text item delimiters to keyName
+				set more to tailBits as text
+				set AppleScript's text item delimiters to ""
+				set rest to rest & keyName & more
+			end if
+			set amp to offset of "&" in rest
+			if amp > 0 then
+				set u to head & keyName & "REDACTED" & text amp thru -1 of rest
+			else
+				set u to head & keyName & "REDACTED"
+			end if
+		end repeat
+	end repeat
+	return u
+end redactSensitiveUrl
+
+on safeCurrentURL()
+	try
+		return redactSensitiveUrl(safariCurrentURL())
+	on error
+		return ""
+	end try
+end safeCurrentURL
+
+on authUrlLooksBroken(rawUrl)
+	-- Riot sometimes lands on authenticate?h-captcha-response=&password=… without client_id.
+	set u to rawUrl as text
+	if u is "" then return false
+	if u does not contain "authenticate.riotgames.com" then return false
+	if u contains "h-captcha-response" or u contains "g-recaptcha-response" then
+		if u does not contain "client_id=" then return true
+	end if
+	if u contains "password=" and u does not contain "client_id=" then return true
+	return false
+end authUrlLooksBroken
+
 -- JS builders: keep double-quotes out of AppleScript string literals.
 -- Use only single quotes in the JS source text below.
 
@@ -1047,35 +1157,26 @@ on jsFillLogin(userName, passText)
 end jsFillLogin
 
 on jsClickSignIn()
-	-- Prefer Riot testid, then submit, then visible Sign in text. Enter on password as last resort.
+	-- Click the Riot Sign in button only. Never form.submit()/bare requestSubmit —
+	-- that can GET-navigate to ?h-captcha-response=&password=… and drop OAuth client_id.
 	return "(function () {" & ¬
 		"  function visible(el) {" & ¬
 		"    try { if (!el) return false; if (el.disabled || el.getAttribute('aria-disabled') === 'true') return false;" & ¬
 		"      if (el.offsetParent === null && el.getClientRects().length === 0) return false; return true; } catch (e0) { return !!el; }" & ¬
 		"  }" & ¬
 		"  var btn = document.querySelector('button[data-testid=btn-signin-submit]');" & ¬
-		"  if (!visible(btn)) btn = document.querySelector('button[type=submit]');" & ¬
 		"  if (!visible(btn)) {" & ¬
-		"    var cands = Array.from(document.querySelectorAll('button, [role=button], input[type=submit]'));" & ¬
+		"    var cands = Array.from(document.querySelectorAll('button[type=submit], button, [role=button], input[type=submit]'));" & ¬
 		"    btn = cands.find(function (b) {" & ¬
 		"      var t = ((b.getAttribute('data-testid') || '') + ' ' + (b.getAttribute('aria-label') || '') + ' ' + (b.textContent || '') + ' ' + (b.value || '')).toLowerCase();" & ¬
-		"      return visible(b) && (t.indexOf('sign in') >= 0 || t.indexOf('signin') >= 0 || t.indexOf('log in') >= 0 || t.indexOf('login') >= 0);" & ¬
+		"      return visible(b) && (t.indexOf('btn-signin-submit') >= 0 || t.indexOf('sign in') >= 0 || t.indexOf('signin') >= 0);" & ¬
 		"    }) || null;" & ¬
 		"  }" & ¬
 		"  if (visible(btn)) {" & ¬
 		"    try { btn.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e1) {}" & ¬
 		"    try { btn.focus(); } catch (e2) {}" & ¬
-		"    var form = btn.form || (btn.closest && btn.closest('form'));" & ¬
-		"    try {" & ¬
-		"      if (form && typeof form.requestSubmit === 'function') form.requestSubmit(btn);" & ¬
-		"      else btn.click();" & ¬
-		"    } catch (e3) { btn.click(); }" & ¬
+		"    btn.click();" & ¬
 		"    return 'clicked-signin:' + ((btn.getAttribute('data-testid') || btn.textContent || '').trim().slice(0, 40));" & ¬
-		"  }" & ¬
-		"  var form2 = document.querySelector('form');" & ¬
-		"  if (form2) {" & ¬
-		"    try { if (typeof form2.requestSubmit === 'function') form2.requestSubmit(); else form2.submit(); } catch (e4) { form2.submit(); }" & ¬
-		"    return 'submitted-form';" & ¬
 		"  }" & ¬
 		"  var passEl = document.querySelector('input[name=password], input[type=password]');" & ¬
 		"  if (passEl) {" & ¬
@@ -1122,6 +1223,16 @@ on jsProbePhase()
 		"  if (document.querySelector('input[data-testid=personal-information-card__emailAddress]'))" & ¬
 		"    return 'account';" & ¬
 		"  if (onAccountWidgets) return 'account';" & ¬
+		"  if (href.indexOf('h-captcha-response=') >= 0 || href.indexOf('g-recaptcha-response=') >= 0)" & ¬
+		"    return 'captcha';" & ¬
+		"  if (document.querySelector('textarea[name=h-captcha-response], textarea[name=g-recaptcha-response], iframe[src*=hcaptcha.com], iframe[src*=recaptcha], [data-sitekey]')) {" & ¬
+		"    var tok = document.querySelector('textarea[name=h-captcha-response], textarea[name=g-recaptcha-response]');" & ¬
+		"    var tokVal = tok ? String(tok.value || '') : '';" & ¬
+		"    var framesAll = Array.from(document.querySelectorAll('iframe[src*=hcaptcha.com], iframe[src*=recaptcha]'));" & ¬
+		"    var hasFrame = framesAll.some(function (fr) { try { var b = fr.getBoundingClientRect(); return b.width > 20 && b.height > 20; } catch (eF) { return true; } });" & ¬
+		"    if (hasFrame || (tok && !tokVal))" & ¬
+		"      return 'captcha';" & ¬
+		"  }" & ¬
 		"  var frames = Array.from(document.querySelectorAll('iframe[src*=hcaptcha.com]'));" & ¬
 		"  for (var fi = 0; fi < frames.length; fi++) {" & ¬
 		"    var fr = frames[fi];" & ¬
@@ -1617,7 +1728,7 @@ on signInWithCredentials(riotUser, passText, batchMode)
 			set fillResult to safariJS(jsFillLogin(riotUser, passText))
 			logLine("signInWithCredentials fill: " & fillResult)
 			try
-				logLine("signInWithCredentials url=" & safariCurrentURL())
+				logLine("signInWithCredentials url=" & safeCurrentURL())
 			end try
 			if fillResult contains "account-page" then
 				try
@@ -1636,7 +1747,7 @@ on signInWithCredentials(riotUser, passText, batchMode)
 			set phaseNow to waitForPostLogin(55)
 			logLine("signInWithCredentials phase: " & phaseNow)
 			try
-				logLine("signInWithCredentials post-click url=" & safariCurrentURL())
+				logLine("signInWithCredentials post-click url=" & safeCurrentURL())
 			end try
 			if phaseNow is "bad_creds" then return "fail:bad_creds"
 			if phaseNow is "cloudflare" then
@@ -1832,6 +1943,7 @@ on jsDumpPageState()
 	-- Avoid backslash escapes in this AppleScript string (Script Editor / osascript).
 	set q to quote
 	return "(function () {" & ¬
+		"  try {" & ¬
 		"  function has(sel) { return !!document.querySelector(sel); }" & ¬
 		"  function btnState(sel) {" & ¬
 		"    var el = document.querySelector(sel);" & ¬
@@ -1849,7 +1961,12 @@ on jsDumpPageState()
 		"    while (out.length && out.charAt(out.length - 1) === ' ') out = out.slice(0, -1);" & ¬
 		"    return out;" & ¬
 		"  }" & ¬
-		"  var snippet = flat((document.body && document.body.innerText) || '').slice(0, 220);" & ¬
+		"  function scrub(u) {" & ¬
+		"    var s = String(u || '');" & ¬
+		"    s = s.split('password=').join('password=REDACTED&x=');" & ¬
+		"    return s.slice(0, 220);" & ¬
+		"  }" & ¬
+		"  var snippet = flat((document.body && document.body.innerText) || '').slice(0, 180);" & ¬
 		"  var emailEl = document.querySelector('input[data-testid=personal-information-card__emailAddress]');" & ¬
 		"  var emailVal = emailEl ? String(emailEl.value || '').slice(0, 80) : '';" & ¬
 		"  var pwCur = document.querySelector('input[data-testid=password-card__currentPassword]');" & ¬
@@ -1857,7 +1974,7 @@ on jsDumpPageState()
 		"  var pwConf = document.querySelector('input[data-testid=password-card__confirmNewPassword]');" & ¬
 		"  var pwFilled = (pwCur && (pwCur.value || '')) || (pwNew && (pwNew.value || '')) || (pwConf && (pwConf.value || '')) ? 'filled' : 'empty';" & ¬
 		"  return JSON.stringify({" & ¬
-		"    href: location.href," & ¬
+		"    href: scrub(location.href)," & ¬
 		"    ready: document.readyState," & ¬
 		"    title: document.title || ''," & ¬
 		"    emailField: has('input[data-testid=personal-information-card__emailAddress]')," & ¬
@@ -1868,12 +1985,13 @@ on jsDumpPageState()
 		"    passwordSave: btnState('button[data-testid=password-card__submit-btn]')," & ¬
 		"    logoutBtn: btnState('button[data-testid=log-out-everywhere-button]')," & ¬
 		"    riotbarLogout: has('a[data-testid=" & q & "riotbar:account:link-logout" & q & "]')," & ¬
-		"    captcha: has('iframe[src*=hcaptcha.com]')," & ¬
+		"    captcha: has('iframe[src*=hcaptcha.com], textarea[name=h-captcha-response], textarea[name=g-recaptcha-response]')," & ¬
 		"    loginUser: has('input[name=username], input[autocomplete=username]')," & ¬
 		"    loginPass: has('input[name=password], input[type=password]')," & ¬
 		"    mfa: has('input[name=code], input[autocomplete=one-time-code], input[inputmode=numeric]')," & ¬
 		"    bodySnippet: snippet" & ¬
 		"  });" & ¬
+		"  } catch (eDump) { return 'dump_err:' + eDump; }" & ¬
 		"})();"
 end jsDumpPageState
 
@@ -2040,6 +2158,13 @@ on waitForPostLogin(timeoutSec)
 		else
 			set cfHits to 0
 		end if
+		-- URL can reveal captcha GET / account redirect even when DOM JS returns empty mid-navigation.
+		try
+			set pollUrl to safariCurrentURL()
+			if authUrlLooksBroken(pollUrl) then return "captcha"
+			if pollUrl contains "h-captcha-response" or pollUrl contains "g-recaptcha-response" then return "captcha"
+			if pollUrl contains "account.riotgames.com" and pollUrl does not contain "log-in" and pollUrl does not contain "oauth2" then return "account"
+		end try
 		if loginPhase is "captcha" then return "captcha"
 		if loginPhase is "mfa" then return "mfa"
 		if loginPhase is "account" then return "account"
@@ -2310,9 +2435,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-12n" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-12o" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-12n" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-12o" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -2333,7 +2458,7 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-12n" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "FORCE STOP anytime: double-click FORCE_STOP.command" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-12o" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "FORCE STOP anytime: double-click FORCE_STOP.command" buttons {"Cancel", "Run all"} default button "Run all"
 
 	logLine("Launching batch for " & rowCount & " account(s) from " & csvPath)
 	logLine("Using toolkit scripts: " & dir)
