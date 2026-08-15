@@ -48,7 +48,7 @@ Prefer Option A/B. The launcher prints `script folder:` and `using CSV:` so you 
 1. Safari → Settings → Advanced → Show Develop menu  
 2. Develop → Allow JavaScript from Apple Events  
 
-## Cloudflare / warm-up (BUILD 2026-08-12k+)
+## Cloudflare / warm-up (BUILD 2026-08-12l+)
 
 If Safari shows **Just a moment…** / Cloudflare:
 
@@ -110,7 +110,7 @@ IMAP_HOST=imap.mail.me.com IMAP_USER='you@icloud.com' IMAP_PASSWORD='app-passwor
 ```
 
 If Script Editor reports an error about setting `line` / `st` / `key`, update to
-the latest zip (**BUILD 2026-08-12k** or newer) — those names are reserved in
+the latest zip (**BUILD 2026-08-12l** or newer) — those names are reserved in
 AppleScript.
 
 ## Account flow
@@ -138,7 +138,7 @@ replace your existing `data/tasks.csv`.
 
 ## Run without interrupting your other work
 
-By default (**BUILD 2026-08-12k+**) the script does **not** bring Safari to the
+By default (**BUILD 2026-08-12l+**) the script does **not** bring Safari to the
 front. Page actions use AppleScript `do JavaScript` (not real mouse clicks), so
 you can keep typing in other apps.
 

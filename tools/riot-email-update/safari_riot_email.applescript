@@ -369,6 +369,8 @@ on run argv
 				end if
 			end if
 			logLine("Email change + verify complete.")
+			-- Let account UI settle after IMAP verify before password-card work.
+			humanDelay(2.0, 3.0)
 		end if
 
 		-- ===== Password change SECOND (change_password=1) =====
@@ -433,14 +435,15 @@ on run argv
 				set pwOutcome to waitForPasswordChangeOutcome(40)
 				logLine("Password-change outcome: " & pwOutcome)
 
-				if pwOutcome is "server_error" then
-					logLine("Server error on password change (attempt " & pwAttempt & ") — refreshing account page and retrying…")
-					if pwAttempt >= 3 then error "Password change failed after 3 attempts (Riot server error)."
+				if pwOutcome starts with "server_error" then
+					logLine("Server error on password change (attempt " & pwAttempt & "): " & pwOutcome)
+					logLine("Refreshing account page hard and retrying…")
+					if pwAttempt >= 3 then error "Password change failed after 3 attempts (Riot server error): " & pwOutcome
 					safariGoTo("https://account.riotgames.com/")
-					humanDelay(2.0, 3.5)
+					humanDelay(2.8, 4.0)
 					-- continue repeat
-				else if pwOutcome is "error" then
-					error "Riot rejected the password change (validation error). Check current/new password in tasks.csv."
+				else if pwOutcome starts with "error" then
+					error "Riot rejected the password change (validation error): " & pwOutcome
 				else if pwOutcome is "timeout" then
 					logLine("No password UI confirmation — re-submitting SAVE CHANGES once…")
 					try
@@ -452,13 +455,13 @@ on run argv
 							logLine("Password-change outcome (retry): " & pwOutcome)
 						end if
 					end try
-					if pwOutcome is "server_error" then
-						logLine("Server error after re-submit (attempt " & pwAttempt & ") — refreshing and retrying…")
-						if pwAttempt >= 3 then error "Password change failed after 3 attempts (Riot server error)."
+					if pwOutcome starts with "server_error" then
+						logLine("Server error after re-submit (attempt " & pwAttempt & "): " & pwOutcome)
+						if pwAttempt >= 3 then error "Password change failed after 3 attempts (Riot server error): " & pwOutcome
 						safariGoTo("https://account.riotgames.com/")
-						humanDelay(2.0, 3.5)
-					else if pwOutcome is "error" then
-						error "Riot rejected the password change (validation error). Check current/new password in tasks.csv."
+						humanDelay(2.8, 4.0)
+					else if pwOutcome starts with "error" then
+						error "Riot rejected the password change (validation error): " & pwOutcome
 					else
 						-- success / form_cleared / session_dropped / timeout → hard-verify
 						exit repeat
@@ -469,7 +472,7 @@ on run argv
 				end if
 			end repeat
 
-			if pwOutcome is "server_error" then error "Password change failed after 3 attempts (Riot server error)."
+			if pwOutcome starts with "server_error" then error "Password change failed after 3 attempts (Riot server error): " & pwOutcome
 			if pwOutcome is "timeout" then
 				logLine("WARNING: no explicit success banner — will hard-verify via forced re-login with new_password.")
 			else
@@ -601,7 +604,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-12j")
+	logLine("BUILD 2026-08-12l")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -681,6 +684,12 @@ on dumpDebug(reasonLabel)
 		logLine("page.probe=" & pageProbe)
 	on error errMsg
 		logLine("page.probe=<failed> (" & errMsg & ")")
+	end try
+	try
+		set pwProbe to safariJS(jsProbePasswordChangeResult())
+		logLine("password.probe=" & pwProbe)
+	on error errMsg
+		logLine("password.probe=<failed> (" & errMsg & ")")
 	end try
 	logLine("--- end debug dump ---")
 end dumpDebug
@@ -1460,21 +1469,31 @@ on jsClickRiotbarLogout()
 end jsClickRiotbarLogout
 
 on jsProbePasswordChangeResult()
-	-- Plain indexOf checks only. Never put backslash escapes in AS string literals.
+	-- Toast/alert first. Never scan body for bare please-try-again (Riot chrome false-positives).
+	-- Never put backslash escapes in AppleScript string literals.
 	set q to quote
 	return "(function () {" & ¬
-		"  var text = ((document.body && document.body.innerText) || " & q & q & ").toLowerCase();" & ¬
-		"  function hit(s, a) { return s.indexOf(a) >= 0; }" & ¬
+		"  function hit(s, a) { return (s || '').indexOf(a) >= 0; }" & ¬
+		"  function flat(s) {" & ¬
+		"    var out = String(s || '');" & ¬
+		"    out = out.split(String.fromCharCode(10)).join(' ');" & ¬
+		"    out = out.split(String.fromCharCode(13)).join(' ');" & ¬
+		"    out = out.split(String.fromCharCode(9)).join(' ');" & ¬
+		"    while (out.indexOf('  ') >= 0) out = out.split('  ').join(' ');" & ¬
+		"    while (out.length && out.charAt(0) === ' ') out = out.slice(1);" & ¬
+		"    while (out.length && out.charAt(out.length - 1) === ' ') out = out.slice(0, -1);" & ¬
+		"    return out;" & ¬
+		"  }" & ¬
+		"  function pack(kind, s) { return kind + ':' + flat(s).slice(0, 100); }" & ¬
 		"  function hasPwSuccess(s) {" & ¬
 		"    return hit(s, 'password') && (hit(s, 'updated') || hit(s, 'changed') || hit(s, 'saved') || hit(s, 'successful'));" & ¬
 		"  }" & ¬
 		"  function hasServerError(s) {" & ¬
 		"    return hit(s, 'server error') || hit(s, 'internal error') || hit(s, 'something went wrong')" & ¬
 		"      || hit(s, 'unexpected error') || hit(s, 'temporarily unavailable') || hit(s, 'service unavailable')" & ¬
-		"      || hit(s, 'try again later') || hit(s, 'please try again') || hit(s, 'unable to save')" & ¬
-		"      || hit(s, 'unable to update') || hit(s, 'unable to process') || hit(s, 'unable to complete')" & ¬
-		"      || hit(s, 'request failed') || hit(s, 'error code') || hit(s, 'http 500') || hit(s, 'http 502')" & ¬
-		"      || hit(s, 'http 503');" & ¬
+		"      || hit(s, 'try again later') || hit(s, 'unable to save') || hit(s, 'unable to update')" & ¬
+		"      || hit(s, 'unable to process') || hit(s, 'unable to complete') || hit(s, 'request failed')" & ¬
+		"      || hit(s, 'http 500') || hit(s, 'http 502') || hit(s, 'http 503');" & ¬
 		"  }" & ¬
 		"  function hasPwValidationError(s) {" & ¬
 		"    if ((hit(s, 'incorrect') || hit(s, 'invalid') || hit(s, 'wrong')) && (hit(s, 'password') || hit(s, 'current'))) return true;" & ¬
@@ -1482,18 +1501,30 @@ on jsProbePasswordChangeResult()
 		"    if (hit(s, 'do not match') || hit(s, 'does not meet') || hit(s, 'too weak')) return true;" & ¬
 		"    return false;" & ¬
 		"  }" & ¬
-		"  if (hasPwSuccess(text)) return 'success';" & ¬
-		"  if (hasServerError(text)) return 'server_error';" & ¬
-		"  if (hasPwValidationError(text)) return 'error';" & ¬
-		"  var sel = '[role=alert], [aria-live], .alert, [class*=toast], [class*=notification], [class*=banner], [class*=snackbar], [class*=error]';" & ¬
-		"  var alertNodes = Array.from(document.querySelectorAll(sel));" & ¬
-		"  for (var i = 0; i < alertNodes.length; i++) {" & ¬
-		"    var t = ((alertNodes[i].innerText || alertNodes[i].textContent || " & q & q & ")).toLowerCase();" & ¬
-		"    if (!t) continue;" & ¬
-		"    if (hasPwSuccess(t)) return 'success';" & ¬
-		"    if (hasServerError(t)) return 'server_error';" & ¬
-		"    if (hasPwValidationError(t)) return 'error';" & ¬
+		"  function visible(el) {" & ¬
+		"    try { if (!el) return false; if (el.offsetParent === null && el.getClientRects().length === 0) return false; return true; } catch (e0) { return true; }" & ¬
 		"  }" & ¬
+		"  var card = document.querySelector('[data-testid=password-card], [class*=password-card], [class*=PasswordCard]');" & ¬
+		"  var sel = '[role=alert], [aria-live=assertive], [aria-live=polite], [class*=toast], [class*=Toast], [class*=snackbar], [class*=Snackbar], [class*=notification], [class*=Notification], [data-testid*=error], [data-testid*=Error], .error-message, [class*=error-message], [class*=ErrorMessage]';" & ¬
+		"  var alertNodes = Array.from(document.querySelectorAll(sel));" & ¬
+		"  if (card) {" & ¬
+		"    try { alertNodes = alertNodes.concat(Array.from(card.querySelectorAll('[role=alert], [class*=error], [class*=Error], [data-testid*=error]'))); } catch (e1) {}" & ¬
+		"  }" & ¬
+		"  for (var i = 0; i < alertNodes.length; i++) {" & ¬
+		"    var el = alertNodes[i];" & ¬
+		"    if (!visible(el)) continue;" & ¬
+		"    var t = flat(el.innerText || el.textContent || " & q & q & ").toLowerCase();" & ¬
+		"    if (!t || t.length < 4) continue;" & ¬
+		"    if (hasPwSuccess(t)) return pack('success', t);" & ¬
+		"    if (hasServerError(t)) return pack('server_error', t);" & ¬
+		"    if (hasPwValidationError(t)) return pack('error', t);" & ¬
+		"    if (hit(t, 'please try again') && (hit(t, 'wrong') || hit(t, 'error') || hit(t, 'failed') || hit(t, 'unable') || hit(t, 'password'))) return pack('server_error', t);" & ¬
+		"  }" & ¬
+		"  var scope = card || document.body;" & ¬
+		"  var body = flat((scope && scope.innerText) || " & q & q & ").toLowerCase();" & ¬
+		"  if (hasPwSuccess(body)) return pack('success', body);" & ¬
+		"  if (hit(body, 'server error') || hit(body, 'something went wrong') || hit(body, 'unexpected error') || hit(body, 'service unavailable') || hit(body, 'temporarily unavailable')) return pack('server_error', body);" & ¬
+		"  if (hasPwValidationError(body)) return pack('error', body);" & ¬
 		"  var cur = document.querySelector('input[data-testid=password-card__currentPassword]');" & ¬
 		"  var neu = document.querySelector('input[data-testid=password-card__newPassword]');" & ¬
 		"  var conf = document.querySelector('input[data-testid=password-card__confirmNewPassword]');" & ¬
@@ -1509,6 +1540,7 @@ end jsProbePasswordChangeResult
 
 on waitForPasswordChangeOutcome(timeoutSec)
 	-- Poll until Riot shows success/error/server_error, clears the form, or drops to login.
+	-- Outcomes may be kind or kind:snippet (snippet helps diagnose false positives).
 	set deadline to (current date) + timeoutSec
 	set minWaitUntil to (current date) + 5
 	repeat while (current date) < deadline
@@ -1520,9 +1552,9 @@ on waitForPasswordChangeOutcome(timeoutSec)
 		try
 			set pageResult to safariJS(jsProbePasswordChangeResult()) as text
 		end try
-		if pageResult is "error" then return "error"
-		if pageResult is "server_error" then return "server_error"
-		if pageResult is "success" then return "success"
+		if pageResult starts with "error" then return pageResult
+		if pageResult starts with "server_error" then return pageResult
+		if pageResult starts with "success" then return pageResult
 		if pageResult is "form_cleared" and (current date) > minWaitUntil then return "form_cleared"
 		waitTick(0.7)
 	end repeat
@@ -1540,8 +1572,8 @@ on verifyPasswordChangeSuccess()
 	try
 		set pageResult to safariJS(jsProbePasswordChangeResult()) as text
 	end try
-	if pageResult is "error" then return "fail:password-error-banner"
-	if pageResult is "success" then return "ok:success-banner"
+	if pageResult starts with "error" then return "fail:password-error-banner:" & pageResult
+	if pageResult starts with "success" then return "ok:success-banner"
 	if pageResult is "form_cleared" then return "ok:form-cleared"
 	return "fail:no-success-signal"
 end verifyPasswordChangeSuccess
@@ -1785,6 +1817,7 @@ end jsProbeEmailField
 on jsDumpPageState()
 	-- Compact page snapshot for failure investigation (no passwords).
 	-- Avoid backslash escapes in this AppleScript string (Script Editor / osascript).
+	set q to quote
 	return "(function () {" & ¬
 		"  function has(sel) { return !!document.querySelector(sel); }" & ¬
 		"  function btnState(sel) {" & ¬
@@ -1799,11 +1832,17 @@ on jsDumpPageState()
 		"    out = out.split(String.fromCharCode(13)).join(' ');" & ¬
 		"    out = out.split(String.fromCharCode(9)).join(' ');" & ¬
 		"    while (out.indexOf('  ') >= 0) out = out.split('  ').join(' ');" & ¬
-		"    return out.replace(/^ +| +$/g, '');" & ¬
+		"    while (out.length && out.charAt(0) === ' ') out = out.slice(1);" & ¬
+		"    while (out.length && out.charAt(out.length - 1) === ' ') out = out.slice(0, -1);" & ¬
+		"    return out;" & ¬
 		"  }" & ¬
 		"  var snippet = flat((document.body && document.body.innerText) || '').slice(0, 220);" & ¬
 		"  var emailEl = document.querySelector('input[data-testid=personal-information-card__emailAddress]');" & ¬
 		"  var emailVal = emailEl ? String(emailEl.value || '').slice(0, 80) : '';" & ¬
+		"  var pwCur = document.querySelector('input[data-testid=password-card__currentPassword]');" & ¬
+		"  var pwNew = document.querySelector('input[data-testid=password-card__newPassword]');" & ¬
+		"  var pwConf = document.querySelector('input[data-testid=password-card__confirmNewPassword]');" & ¬
+		"  var pwFilled = (pwCur && (pwCur.value || '')) || (pwNew && (pwNew.value || '')) || (pwConf && (pwConf.value || '')) ? 'filled' : 'empty';" & ¬
 		"  return JSON.stringify({" & ¬
 		"    href: location.href," & ¬
 		"    ready: document.readyState," & ¬
@@ -1811,8 +1850,11 @@ on jsDumpPageState()
 		"    emailField: has('input[data-testid=personal-information-card__emailAddress]')," & ¬
 		"    emailValue: emailVal," & ¬
 		"    saveBtn: btnState('button[data-testid=personal-information-card__saveChanges-btn]')," & ¬
+		"    passwordFields: has('input[data-testid=password-card__currentPassword]')," & ¬
+		"    passwordFilled: pwFilled," & ¬
+		"    passwordSave: btnState('button[data-testid=password-card__submit-btn]')," & ¬
 		"    logoutBtn: btnState('button[data-testid=log-out-everywhere-button]')," & ¬
-		"    riotbarLogout: has('a[data-testid=" & quote & "riotbar:account:link-logout" & quote & "]')," & ¬
+		"    riotbarLogout: has('a[data-testid=" & q & "riotbar:account:link-logout" & q & "]')," & ¬
 		"    captcha: has('iframe[src*=hcaptcha.com]')," & ¬
 		"    loginUser: has('input[name=username], input[autocomplete=username]')," & ¬
 		"    loginPass: has('input[name=password], input[type=password]')," & ¬
@@ -2255,9 +2297,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-12j" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-12l" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-12j" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-12l" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -2278,7 +2320,7 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-12j" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "FORCE STOP anytime: double-click FORCE_STOP.command" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-12l" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "FORCE STOP anytime: double-click FORCE_STOP.command" buttons {"Cancel", "Run all"} default button "Run all"
 
 	logLine("Launching batch for " & rowCount & " account(s) from " & csvPath)
 	logLine("Using toolkit scripts: " & dir)
