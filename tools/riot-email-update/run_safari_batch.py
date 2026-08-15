@@ -671,8 +671,8 @@ def main() -> int:
     ap.add_argument(
         "--delay",
         type=float,
-        default=float(os.getenv("SAFARI_BATCH_DELAY") or "25"),
-        help="Base seconds between accounts (jitter added; default 25 to reduce Cloudflare)",
+        default=float(os.getenv("SAFARI_BATCH_DELAY") or "8"),
+        help="Seconds between accounts (default 8; capped at 10 total including jitter)",
     )
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -814,7 +814,8 @@ def main() -> int:
                     print(f"  investigation log → {log_path}", flush=True)
 
             if i < len(tasks) and args.delay > 0:
-                pause = max(5.0, float(args.delay) + random.uniform(3.0, 12.0))
+                # Keep inter-account cool-down within 10s total (base + small jitter).
+                pause = min(10.0, max(3.0, float(args.delay) + random.uniform(0.0, 2.0)))
                 print(f"Cool-down {pause:.0f}s before next account…", flush=True)
                 if not interruptible_sleep(pause):
                     print(

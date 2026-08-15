@@ -48,20 +48,20 @@ Prefer Option A/B. The launcher prints `script folder:` and `using CSV:` so you 
 1. Safari → Settings → Advanced → Show Develop menu  
 2. Develop → Allow JavaScript from Apple Events  
 
-## Cloudflare / warm-up (BUILD 2026-08-12c+)
+## Cloudflare / warm-up (BUILD 2026-08-12f+)
 
 If Safari shows **Just a moment…** / Cloudflare:
 
 1. Stop the batch. In Safari, open `https://www.apple.com` then `https://account.riotgames.com` and wait until pages load normally (solve any CF prompt once as yourself).
-2. Re-run with a longer gap between accounts:
+2. Re-run with a longer gap between accounts only if CF keeps firing:
    ```bash
-   SAFARI_BATCH_DELAY=40 ./run_safari_mac.sh
+   SAFARI_BATCH_DELAY=10 ./run_safari_mac.sh
    ```
 3. Prefer `./run_safari_mac.sh` / `RUN_ME.command` over hammering Script Editor.
 4. The script warms Safari on apple.com, opens `account.riotgames.com`
-   directly, uses jittered delays, and backs off when CF is detected.
+   directly, and backs off when CF is detected.
 
-Do **not** set `SAFARI_BATCH_DELAY` below ~15 when CF has already fired on your IP.
+Default inter-account cool-down is **~8s (capped at 10s total)**. Raise only if Cloudflare appears.
 
 ## CSV format
 
@@ -110,7 +110,7 @@ IMAP_HOST=imap.mail.me.com IMAP_USER='you@icloud.com' IMAP_PASSWORD='app-passwor
 ```
 
 If Script Editor reports an error about setting `line` / `st` / `key`, update to
-the latest zip (**BUILD 2026-08-12e** or newer) — those names are reserved in
+the latest zip (**BUILD 2026-08-12f** or newer) — those names are reserved in
 AppleScript.
 
 ## Account flow
@@ -138,7 +138,7 @@ replace your existing `data/tasks.csv`.
 
 ## Run without interrupting your other work
 
-By default (**BUILD 2026-08-12e+**) the script does **not** bring Safari to the
+By default (**BUILD 2026-08-12f+**) the script does **not** bring Safari to the
 front. Page actions use AppleScript `do JavaScript` (not real mouse clicks), so
 you can keep typing in other apps.
 

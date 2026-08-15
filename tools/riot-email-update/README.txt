@@ -1,4 +1,4 @@
-BUILD 2026-08-12e
+BUILD 2026-08-12f
 
 This zip DOES NOT contain data/tasks.csv. Keep your existing file.
 
@@ -7,10 +7,6 @@ Prefer:
   or double-click RUN_ME.command
 
 Login opens https://account.riotgames.com/ directly (no docs.qq).
-Password change waits for confirmation, then re-logs in with new_password before logout.
-Flow: email first, then optional password (CSV change_password 1/0).
+Between accounts: ~8s cool-down (max 10s). Override: SAFARI_BATCH_DELAY=5
 
-Background Safari (default): does not steal focus.
-  SAFARI_STEAL_FOCUS=1 ./run_safari_mac.sh
-
-Confirm BUILD 2026-08-12e in debug/logs/safari_*.log
+Confirm BUILD 2026-08-12f in debug/logs/safari_*.log

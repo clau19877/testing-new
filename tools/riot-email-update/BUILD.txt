@@ -1,5 +1,5 @@
-BUILD 2026-08-12e
-Password change: wait for UI outcome, force logout, re-login with new_password before final logout.
+BUILD 2026-08-12f
+Inter-account cool-down default ~8s, capped at 10s total.
+Password change: force re-login with new_password before final logout.
 Skip docs.qq — open https://account.riotgames.com/ directly.
-Background Safari default; SAFARI_STEAL_FOCUS=1 to opt in.
 Zip does not include data/tasks.csv.
