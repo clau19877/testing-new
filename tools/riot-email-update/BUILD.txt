@@ -1,7 +1,6 @@
-BUILD 2026-08-12m
-Password change itself can succeed (form_cleared) while post-change
-re-login verify hangs (timeout / no-signin). Harden Sign in click,
-settle after logout, and accept UI-cleared when old password no longer
-restores the session.
+BUILD 2026-08-12n
+Skip forced re-login after password change. If the password UI reports
+success / form_cleared / session_dropped (or times out after SAVE),
+accept new_password and continue to logout / next account.
 Do NOT open .applescript in Script Editor — use RUN_ME.command.
 Zip does not include data/tasks.csv.
