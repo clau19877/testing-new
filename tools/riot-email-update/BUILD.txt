@@ -1,5 +1,5 @@
-BUILD 2026-08-12c
-Background-friendly Safari: do not activate/steal focus by default.
-Clicks are JavaScript (no mouse takeover). Put Safari on another Desktop.
+BUILD 2026-08-12d
+Skip docs.qq — open https://account.riotgames.com/ directly for login.
+Background-friendly Safari (no focus steal by default).
 Opt-in frontmost: SAFARI_STEAL_FOCUS=1 ./run_safari_mac.sh
 Zip does not include data/tasks.csv.

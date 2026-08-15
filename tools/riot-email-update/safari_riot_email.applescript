@@ -1,7 +1,7 @@
 -- Riot account email update via local macOS Safari.
 --
 -- Why Safari: on a real Mac Safari session, Riot often skips hCaptcha.
--- Opens docs.qq.com click-through, signs in, handles MFA, updates email.
+-- Opens account.riotgames.com directly, signs in, handles MFA, updates email.
 --
 -- Prerequisites:
 --   Safari -> Settings -> Advanced -> show Develop menu
@@ -123,7 +123,7 @@ on run argv
 		logLine("Account: " & riotUser & " -> " & newEmail & " (email first, then password)")
 	end if
 	try
-		-- Warm Safari with a normal page before hitting Riot via docs.qq (helps avoid Cloudflare).
+		-- Warm Safari with a normal page before hitting Riot (helps avoid Cloudflare).
 		logStep("warmup")
 		warmupSafari()
 
@@ -132,7 +132,7 @@ on run argv
 		forceLogoutSession("before_account")
 
 		logStep("open_entry")
-		logLine("Opening Safari → docs.qq.com entry…")
+		logLine("Opening Safari → " & entryURL)
 		ensureSafariDocument()
 		with timeout of 45 seconds
 			tell application "Safari"
@@ -141,35 +141,36 @@ on run argv
 		end timeout
 		humanDelay(2.5, 4.5)
 		assertNoCloudflare("after_entry")
-		waitForContinueReady(20)
 
-		-- Click Continue on the Tencent Docs interstitial (prefer real click; hard-jump is last resort).
-		logStep("click_continue")
-		logLine("Clicking Continue on interstitial…")
-		set continueResult to ""
-		set continueAttempt to 0
-		repeat while continueAttempt < 3
-			set continueAttempt to continueAttempt + 1
-			set continueResult to safariJS(jsClickContinue(false))
-			logLine("Continue attempt " & continueAttempt & ": " & continueResult)
-			if continueResult starts with "clicked:" or continueResult starts with "goto:" then exit repeat
-			humanDelay(1.0, 2.0)
-		end repeat
-		if continueResult does not start with "clicked:" and continueResult does not start with "goto:" then
-			logLine("Continue click missed — hard-jump to auth login (not account page)…")
-			set continueResult to safariJS(jsClickContinue(true))
-			logLine("Continue fallback: " & continueResult)
+		-- Optional legacy path: only if LOGIN_ENTRY_URL still points at docs.qq.
+		set entryHost to ""
+		try
+			set entryHost to safariJS(jsProbeHostname()) as text
+		end try
+		if entryHost contains "docs.qq.com" or entryURL contains "docs.qq.com" then
+			logLine("Legacy docs.qq entry detected — clicking Continue…")
+			waitForContinueReady(20)
+			logStep("click_continue")
+			set continueResult to ""
+			set continueAttempt to 0
+			repeat while continueAttempt < 3
+				set continueAttempt to continueAttempt + 1
+				set continueResult to safariJS(jsClickContinue(false))
+				logLine("Continue attempt " & continueAttempt & ": " & continueResult)
+				if continueResult starts with "clicked:" or continueResult starts with "goto:" then exit repeat
+				humanDelay(1.0, 2.0)
+			end repeat
 			if continueResult does not start with "clicked:" and continueResult does not start with "goto:" then
-				safariGoTo("https://authenticate.riotgames.com/")
-				logLine("Continue fallback: goto:https://authenticate.riotgames.com/")
+				logLine("Continue click missed — opening account.riotgames.com…")
+				safariGoTo("https://account.riotgames.com/")
 			end if
+			humanDelay(2.0, 3.5)
+			assertNoCloudflare("after_continue")
 		end if
-		humanDelay(2.5, 4.5)
-		assertNoCloudflare("after_continue")
+
 		waitForRiotLogin(60)
 
-		-- docs.qq ?url= points at account.riotgames.com — if still logged in, that page
-		-- has no username/password fields. Clear session before waiting on the form.
+		-- If a prior session survived logout, account.riotgames.com has no login form.
 		if sessionLooksLoggedIn() then
 			logLine("Entry landed on logged-in account page — clearing session before login…")
 			forceLogoutSession("after_entry_still_logged_in")
@@ -178,20 +179,28 @@ on run argv
 		logStep("fill_login")
 		logLine("Waiting for Riot login form…")
 		if not sessionLooksLoggedOut() then
-			safariGoTo("https://authenticate.riotgames.com/")
+			safariGoTo("https://account.riotgames.com/")
 			humanDelay(1.2, 2.0)
+			if not sessionLooksLoggedOut() then
+				safariGoTo("https://authenticate.riotgames.com/")
+				humanDelay(1.2, 2.0)
+			end if
 		end if
 		set formReady to waitForLoginForm(45)
 		logLine("Login form ready: " & formReady)
 		if formReady is not "ready" then
-			logLine("Login form missing — full logout + auth login retry…")
+			logLine("Login form missing — full logout + account.riotgames.com retry…")
 			forceLogoutSession("login_form_retry")
-			safariGoTo("https://authenticate.riotgames.com/")
+			safariGoTo("https://account.riotgames.com/")
 			humanDelay(2.0, 3.0)
+			if not sessionLooksLoggedOut() then
+				safariGoTo("https://authenticate.riotgames.com/")
+				humanDelay(1.5, 2.5)
+			end if
 			set formReady to waitForLoginForm(35)
 			logLine("Login form ready (retry): " & formReady)
 		end if
-		if formReady is not "ready" then error "Riot login form not ready after logout/auth entry (phase/form timeout)."
+		if formReady is not "ready" then error "Riot login form not ready after logout/account entry (phase/form timeout)."
 		assertNoCloudflare("before_fill_login")
 		humanDelay(0.8, 1.8)
 		logLine("Filling Riot login form…")
@@ -494,7 +503,7 @@ end run
 -- ============== helpers ==============
 
 on defaultEntryURL()
-	return "https://docs.qq.com/scenario/link.html?url=https%3A%2F%2Faccount.riotgames.com%2F&pid=300000000%24KrVGtggzglZK&cid=144115210422737002&nlc=1"
+	return "https://account.riotgames.com/"
 end defaultEntryURL
 
 on backslashChar()
@@ -535,7 +544,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-12c")
+	logLine("BUILD 2026-08-12d")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -1594,7 +1603,7 @@ on humanDelay(minSec, maxSec)
 end humanDelay
 
 on warmupSafari()
-	-- Prime a normal Safari document before docs.qq / Riot (reduces cold-start CF hits).
+	-- Prime a normal Safari document before Riot (reduces cold-start CF hits).
 	logLine("Warming up Safari with a normal page…")
 	ensureSafariDocument()
 	with timeout of 45 seconds
@@ -1667,8 +1676,7 @@ on waitForLoginForm(timeoutSec)
 end waitForLoginForm
 
 on waitForRiotLogin(timeoutSec)
-	-- IMPORTANT: match location.hostname only. The docs.qq entry URL embeds
-	-- account.riotgames.com in ?url= and must NOT count as landed.
+	-- Match location.hostname only (ignore hosts embedded in query strings).
 	set deadline to (current date) + timeoutSec
 	repeat while (current date) < deadline
 		set hostName to ""
@@ -1683,13 +1691,13 @@ on waitForRiotLogin(timeoutSec)
 			if safariJS(jsProbeChallenge()) is "cloudflare" then
 				logLine("Cloudflare while waiting for Riot host…")
 				if waitForCloudflareClear(30) is "cloudflare" then
-					error "Cloudflare challenge while opening Riot login from docs.qq."
+					error "Cloudflare challenge while opening account.riotgames.com."
 				end if
 			end if
 		end try
 		waitTick(0.6)
 	end repeat
-	error "Timed out waiting for Riot login host after docs.qq Continue (still not on *.riotgames.com)."
+	error "Timed out waiting for Riot host after opening entry (still not on *.riotgames.com)."
 end waitForRiotLogin
 
 on waitForCloudflareClear(timeoutSec)
@@ -2011,9 +2019,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-12c" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-12d" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-12c" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-12d" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -2034,7 +2042,7 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-12c" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-12d" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
 
 	logLine("Launching batch for " & rowCount & " account(s) from " & csvPath)
 	logLine("Using toolkit scripts: " & dir)

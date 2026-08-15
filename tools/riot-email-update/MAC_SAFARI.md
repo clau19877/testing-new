@@ -58,7 +58,8 @@ If Safari shows **Just a moment…** / Cloudflare:
    SAFARI_BATCH_DELAY=40 ./run_safari_mac.sh
    ```
 3. Prefer `./run_safari_mac.sh` / `RUN_ME.command` over hammering Script Editor.
-4. The script now warms Safari on apple.com, uses jittered delays, waits for the real Riot **hostname** (not the docs.qq `?url=` embed), and backs off when CF is detected.
+4. The script warms Safari on apple.com, opens `account.riotgames.com`
+   directly, uses jittered delays, and backs off when CF is detected.
 
 Do **not** set `SAFARI_BATCH_DELAY` below ~15 when CF has already fired on your IP.
 
@@ -109,15 +110,15 @@ IMAP_HOST=imap.mail.me.com IMAP_USER='you@icloud.com' IMAP_PASSWORD='app-passwor
 ```
 
 If Script Editor reports an error about setting `line` / `st` / `key`, update to
-the latest zip (**BUILD 2026-08-12c** or newer) — those names are reserved in
+the latest zip (**BUILD 2026-08-12d** or newer) — those names are reserved in
 AppleScript.
 
 ## Account flow
 
 For each CSV row, the runner:
 
-1. Clears any leftover Riot session (`LOG OUT EVERYWHERE` if still logged in),
-   waits until the login form appears, then opens `authenticate.riotgames.com`
+1. Clears any leftover Riot session (riotbar **Logout** if still logged in),
+   then opens `https://account.riotgames.com/` (login form / redirect)
 2. Logs in and waits for `https://account.riotgames.com/`
 3. Fills `personal-information-card__emailAddress`
 4. Clicks `personal-information-card__saveChanges-btn` (**SAVE AND VERIFY**)
@@ -131,20 +132,13 @@ For each CSV row, the runner:
    then verifies Safari is logged out before the next CSV row starts
 9. Records the result, then starts the next CSV row
 
-   **Verify Email** link
-5. If `change_password=1`: changes password (`password-card__*` → submit),
-   re-logs in with `new_password` if the session drops
-6. Returns to the account page, clicks `log-out-everywhere-button`, then
-   Confirm (`modal_close-btn`)
-7. Records the result, then starts the next CSV row
-
 The zip contains only `data/tasks.csv.example`; updating the scripts will not
 replace your existing `data/tasks.csv`.
 
 
 ## Run without interrupting your other work
 
-By default (**BUILD 2026-08-12c+**) the script does **not** bring Safari to the
+By default (**BUILD 2026-08-12d+**) the script does **not** bring Safari to the
 front. Page actions use AppleScript `do JavaScript` (not real mouse clicks), so
 you can keep typing in other apps.
 

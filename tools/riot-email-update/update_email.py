@@ -40,17 +40,10 @@ ACCOUNT_URL = "https://account.riotgames.com/"
 AUTH_HOST_HINT = "auth.riotgames.com"
 
 # Printed at startup so you can confirm Windows replaced the right files.
-TOOL_BUILD = "2026-07-24i-qq-continue"
+TOOL_BUILD = "2026-08-12d-direct-account"
 
-# Default entry: Tencent Docs scenario interstitial → click Continue → account.riotgames.com.
-# Opening Riot via this click-through is more reliable than deep-linking authenticate URLs.
-DEFAULT_LOGIN_ENTRY_URL = (
-    "https://docs.qq.com/scenario/link.html?"
-    "url=https%3A%2F%2Faccount.riotgames.com%2F"
-    "&pid=300000000%24KrVGtggzglZK"
-    "&cid=144115210422737002"
-    "&nlc=1"
-)
+# Default entry: open the Riot account portal directly (no docs.qq interstitial).
+DEFAULT_LOGIN_ENTRY_URL = "https://account.riotgames.com/"
 
 # Fallback: official account-portal OAuth login that includes email.edit scope.
 ACCOUNT_OAUTH_SCOPES = " ".join(
@@ -113,8 +106,8 @@ def resolve_login_url() -> str:
     """
     Entry URL opened first in the browser.
 
-    Prefer LOGIN_URL / ACCOUNT_LOGIN_URL / LOGIN_ENTRY_URL, else the docs.qq.com
-    click-through that Continues into account.riotgames.com.
+    Prefer LOGIN_URL / ACCOUNT_LOGIN_URL / LOGIN_ENTRY_URL, else
+    https://account.riotgames.com/.
     """
     for key in ("LOGIN_URL", "ACCOUNT_LOGIN_URL", "LOGIN_ENTRY_URL"):
         raw = (os.getenv(key) or "").strip()
@@ -239,11 +232,11 @@ def click_through_login_entry(page, *, timeout_ms: int = 45_000) -> bool:
 
 def open_riot_login(page, *, timeout_ms: int = 45_000) -> None:
     """
-    Open the login entry (docs.qq.com by default), then land on Riot auth.
+    Open https://account.riotgames.com/ (or LOGIN_ENTRY_URL), then land on Riot auth.
 
-    For docs.qq.com (and similar) interstitials we:
-      1) open the entry URL (keeps the intended referrer / click path)
-      2) click Continue on the interstitial (preferred — matches real browser flow)
+    If a legacy interstitial (e.g. docs.qq.com) is still configured:
+      1) open the entry URL
+      2) click Continue on the interstitial
       3) if Continue fails, follow the embedded ?url= target, then account.riotgames.com
     """
     from session_log import log

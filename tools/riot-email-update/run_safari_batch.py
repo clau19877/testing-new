@@ -52,13 +52,7 @@ from investigate_log import (
 ROOT = Path(__file__).resolve().parent
 STOP_FLAG = ROOT / ".safari_batch_stop"
 PID_FILE = ROOT / ".safari_batch.pid"
-DEFAULT_ENTRY = (
-    "https://docs.qq.com/scenario/link.html?"
-    "url=https%3A%2F%2Faccount.riotgames.com%2F"
-    "&pid=300000000%24KrVGtggzglZK"
-    "&cid=144115210422737002"
-    "&nlc=1"
-)
+DEFAULT_ENTRY = "https://account.riotgames.com/"
 
 IMAP_HINTS = {
     "gmail.com": "imap.gmail.com",
