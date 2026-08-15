@@ -1460,8 +1460,7 @@ on jsClickRiotbarLogout()
 end jsClickRiotbarLogout
 
 on jsProbePasswordChangeResult()
-	-- Do not put regex backslash escapes in AppleScript string literals.
-	-- Script Editor error "Expected quote, found unknown token" = \\d / \\b / etc.
+	-- Plain indexOf checks only. Never put backslash escapes in AS string literals.
 	set q to quote
 	return "(function () {" & ¬
 		"  var text = ((document.body && document.body.innerText) || " & q & q & ").toLowerCase();" & ¬
