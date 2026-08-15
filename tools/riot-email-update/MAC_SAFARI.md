@@ -48,7 +48,7 @@ Prefer Option A/B. The launcher prints `script folder:` and `using CSV:` so you 
 1. Safari → Settings → Advanced → Show Develop menu  
 2. Develop → Allow JavaScript from Apple Events  
 
-## Cloudflare / warm-up (BUILD 2026-08-12h+)
+## Cloudflare / warm-up (BUILD 2026-08-12i+)
 
 If Safari shows **Just a moment…** / Cloudflare:
 
@@ -110,7 +110,7 @@ IMAP_HOST=imap.mail.me.com IMAP_USER='you@icloud.com' IMAP_PASSWORD='app-passwor
 ```
 
 If Script Editor reports an error about setting `line` / `st` / `key`, update to
-the latest zip (**BUILD 2026-08-12h** or newer) — those names are reserved in
+the latest zip (**BUILD 2026-08-12i** or newer) — those names are reserved in
 AppleScript.
 
 ## Account flow
@@ -138,7 +138,7 @@ replace your existing `data/tasks.csv`.
 
 ## Run without interrupting your other work
 
-By default (**BUILD 2026-08-12h+**) the script does **not** bring Safari to the
+By default (**BUILD 2026-08-12i+**) the script does **not** bring Safari to the
 front. Page actions use AppleScript `do JavaScript` (not real mouse clicks), so
 you can keep typing in other apps.
 
@@ -149,15 +149,12 @@ Tips:
 - If you *want* Safari to jump to the front:  
   `SAFARI_STEAL_FOCUS=1 ./run_safari_mac.sh`
 
-## Stop the batch immediately
+## Stop the batch immediately (FORCE STOP)
 
-- Terminal: press **Ctrl+C**
-- Or double-click **STOP_BATCH.command**
+- Double-click **`FORCE_STOP.command`** (or **`STOP_BATCH.command`**)
+- Or in Terminal: press **Ctrl+C**
 
-**BUILD 2026-08-12c+** hard-kills the whole tree: `run_safari_batch.py`,
-`osascript` / `safari_riot_email.applescript`, and IMAP helpers
-(`fetch_riot_verify_link.py`). Remaining CSV rows do not start. The AppleScript
-also watches `.safari_batch_stop` between wait ticks, wraps Safari Apple Events
-in `with timeout`, and hard-caps IMAP `do shell script` with a perl alarm so a
-hung helper cannot pin `osascript` forever. If anything still looks stuck, run
-STOP again or quit the Terminal / Script Editor window.
+Hard-kills `run_safari_batch.py`, `osascript` / Safari script, and IMAP helpers.
+Remaining CSV rows do not start. The AppleScript also watches `.safari_batch_stop`
+between wait ticks. If anything still looks stuck, run FORCE_STOP again or quit
+the Terminal / Script Editor window.

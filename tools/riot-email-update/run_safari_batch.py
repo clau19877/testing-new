@@ -13,7 +13,7 @@ On FAILURE:
 
 Stop immediately (does not continue remaining tasks):
   - Ctrl+C / Terminal Stop
-  - double-click STOP_BATCH.command
+  - double-click FORCE_STOP.command (or STOP_BATCH.command)
   - touch .safari_batch_stop in the toolkit folder
 
 CSV columns (same as data/tasks.csv.example):
@@ -724,7 +724,7 @@ def main() -> int:
         print(f"  reasons → {failed_reasons_path}")
         print(f"  logs    → {ROOT / 'debug' / 'logs'}")
         print("  on success: row removed from tasks.csv")
-        print("  stop    → Ctrl+C  or  double-click STOP_BATCH.command")
+        print("  stop    → double-click FORCE_STOP.command  (or Ctrl+C)")
         if args.dry_run:
             for i, t in enumerate(tasks, 1):
                 print(f"  {i}. {t['riot_username']} → {t['new_email']}")

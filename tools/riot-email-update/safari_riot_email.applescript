@@ -377,69 +377,99 @@ on run argv
 		else
 			logStep("change_password")
 			set oldPassForVerify to riotPass
-			logLine("Returning to account page before password change…")
-			ensureAccountSession(riotUser, riotPass, batchMode)
-			logLine("Waiting for password-card fields…")
-			set pwReady to waitForPasswordFields(20)
-			logLine("Password fields ready: " & pwReady)
-			if pwReady is not "ready" then
-				safariGoTo("https://account.riotgames.com/")
-				humanDelay(1.0, 1.8)
+			set pwOutcome to ""
+			set pwAttempt to 0
+			repeat while pwAttempt < 3
+				set pwAttempt to pwAttempt + 1
+				assertNotStopped()
+				logLine("Password change attempt " & pwAttempt & " of 3…")
+				logLine("Returning to account page before password change…")
+				ensureAccountSession(riotUser, riotPass, batchMode)
+				logLine("Waiting for password-card fields…")
 				set pwReady to waitForPasswordFields(20)
-				logLine("Password fields ready (retry): " & pwReady)
-			end if
-			if pwReady is not "ready" then error "Could not find password-card__currentPassword / newPassword / confirmNewPassword."
-
-			logLine("Filling current + new password…")
-			set pwFill to safariJS(jsFillPasswordChange(riotPass, newPass))
-			logLine(pwFill)
-			if pwFill does not contain "filled=1" then error "Failed to fill password-card fields (" & pwFill & ")"
-			humanDelay(0.5, 1.0)
-
-			logLine("Waiting for password SAVE / submit button…")
-			set pwSaveReady to waitForPasswordSaveButton(15)
-			logLine("Password save ready: " & pwSaveReady)
-			if pwSaveReady is not "ready" then error "password-card__submit-btn did not become enabled."
-			logLine("Clicking password-card__submit-btn…")
-			set pwSaveResult to safariJS(jsClickPasswordSave())
-			logLine(pwSaveResult)
-			if pwSaveResult does not contain "clicked-password-save" then error "Could not click password-card__submit-btn (" & pwSaveResult & ")."
-
-			-- Do NOT logout yet. Wait for Riot to finish the password update.
-			logStep("wait_password_change_outcome")
-			logLine("Waiting for password-change confirmation (success / error / session drop)…")
-			humanDelay(3.0, 4.5)
-			set pwPhase to waitForPostLogin(25)
-			logLine("Post-password-change phase: " & pwPhase)
-			if pwPhase is "mfa" then
-				set pwMfa to fetchImapCode("IMAP")
-				if pwMfa is "" then
-					if batchMode then error "Password change MFA required but no IMAP code"
-					set pwMfa to text returned of (display dialog "Enter Riot MFA code for password change:" default answer "")
+				logLine("Password fields ready: " & pwReady)
+				if pwReady is not "ready" then
+					safariGoTo("https://account.riotgames.com/")
+					humanDelay(1.0, 1.8)
+					set pwReady to waitForPasswordFields(20)
+					logLine("Password fields ready (retry): " & pwReady)
 				end if
-				if pwMfa is not "" then
-					logLine("Submitting MFA for password change…")
-					safariJS(jsSubmitCode(pwMfa, "mfa"))
-					humanDelay(2.0, 3.0)
-				end if
-			end if
+				if pwReady is not "ready" then error "Could not find password-card__currentPassword / newPassword / confirmNewPassword."
 
-			set pwOutcome to waitForPasswordChangeOutcome(40)
-			logLine("Password-change outcome: " & pwOutcome)
-			if pwOutcome is "error" then error "Riot rejected the password change (error banner). Check current/new password in tasks.csv."
-			if pwOutcome is "timeout" then
-				logLine("No password UI confirmation — re-submitting SAVE CHANGES once…")
-				try
-					if safariJS(jsProbePasswordSaveButton()) is "ready" then
-						set pwSaveResult to safariJS(jsClickPasswordSave())
-						logLine("Password save retry: " & pwSaveResult)
-						humanDelay(2.5, 4.0)
-						set pwOutcome to waitForPasswordChangeOutcome(35)
-						logLine("Password-change outcome (retry): " & pwOutcome)
+				logLine("Filling current + new password…")
+				set pwFill to safariJS(jsFillPasswordChange(riotPass, newPass))
+				logLine(pwFill)
+				if pwFill does not contain "filled=1" then error "Failed to fill password-card fields (" & pwFill & ")"
+				humanDelay(0.5, 1.0)
+
+				logLine("Waiting for password SAVE / submit button…")
+				set pwSaveReady to waitForPasswordSaveButton(15)
+				logLine("Password save ready: " & pwSaveReady)
+				if pwSaveReady is not "ready" then error "password-card__submit-btn did not become enabled."
+				logLine("Clicking password-card__submit-btn…")
+				set pwSaveResult to safariJS(jsClickPasswordSave())
+				logLine(pwSaveResult)
+				if pwSaveResult does not contain "clicked-password-save" then error "Could not click password-card__submit-btn (" & pwSaveResult & ")."
+
+				-- Do NOT logout yet. Wait for Riot to finish the password update.
+				logStep("wait_password_change_outcome")
+				logLine("Waiting for password-change confirmation (success / error / session drop)…")
+				humanDelay(3.0, 4.5)
+				set pwPhase to waitForPostLogin(25)
+				logLine("Post-password-change phase: " & pwPhase)
+				if pwPhase is "mfa" then
+					set pwMfa to fetchImapCode("IMAP")
+					if pwMfa is "" then
+						if batchMode then error "Password change MFA required but no IMAP code"
+						set pwMfa to text returned of (display dialog "Enter Riot MFA code for password change:" default answer "")
 					end if
-				end try
-			end if
-			if pwOutcome is "error" then error "Riot rejected the password change (error banner). Check current/new password in tasks.csv."
+					if pwMfa is not "" then
+						logLine("Submitting MFA for password change…")
+						safariJS(jsSubmitCode(pwMfa, "mfa"))
+						humanDelay(2.0, 3.0)
+					end if
+				end if
+
+				set pwOutcome to waitForPasswordChangeOutcome(40)
+				logLine("Password-change outcome: " & pwOutcome)
+
+				if pwOutcome is "server_error" then
+					logLine("Server error on password change (attempt " & pwAttempt & ") — refreshing account page and retrying…")
+					if pwAttempt >= 3 then error "Password change failed after 3 attempts (Riot server error)."
+					safariGoTo("https://account.riotgames.com/")
+					humanDelay(2.0, 3.5)
+					-- continue repeat
+				else if pwOutcome is "error" then
+					error "Riot rejected the password change (validation error). Check current/new password in tasks.csv."
+				else if pwOutcome is "timeout" then
+					logLine("No password UI confirmation — re-submitting SAVE CHANGES once…")
+					try
+						if safariJS(jsProbePasswordSaveButton()) is "ready" then
+							set pwSaveResult to safariJS(jsClickPasswordSave())
+							logLine("Password save retry: " & pwSaveResult)
+							humanDelay(2.5, 4.0)
+							set pwOutcome to waitForPasswordChangeOutcome(35)
+							logLine("Password-change outcome (retry): " & pwOutcome)
+						end if
+					end try
+					if pwOutcome is "server_error" then
+						logLine("Server error after re-submit (attempt " & pwAttempt & ") — refreshing and retrying…")
+						if pwAttempt >= 3 then error "Password change failed after 3 attempts (Riot server error)."
+						safariGoTo("https://account.riotgames.com/")
+						humanDelay(2.0, 3.5)
+					else if pwOutcome is "error" then
+						error "Riot rejected the password change (validation error). Check current/new password in tasks.csv."
+					else
+						-- success / form_cleared / session_dropped / timeout → hard-verify
+						exit repeat
+					end if
+				else
+					-- success / form_cleared / session_dropped
+					exit repeat
+				end if
+			end repeat
+
+			if pwOutcome is "server_error" then error "Password change failed after 3 attempts (Riot server error)."
 			if pwOutcome is "timeout" then
 				logLine("WARNING: no explicit success banner — will hard-verify via forced re-login with new_password.")
 			else
@@ -571,7 +601,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-12h")
+	logLine("BUILD 2026-08-12i")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -1430,16 +1460,18 @@ on jsClickRiotbarLogout()
 end jsClickRiotbarLogout
 
 on jsProbePasswordChangeResult()
-	-- success / error / form-cleared after password-card save
+	-- success / validation-error / server-error / form-cleared after password-card save
 	return "(function () {" & ¬
 		"  var text = ((document.body && document.body.innerText) || '').toLowerCase();" & ¬
 		"  if (/password (has been )?(updated|changed|saved)|successfully (changed|updated) (your )?password|your password was (updated|changed)|password (update|change) successful/.test(text)) return 'success';" & ¬
+		"  if (/server error|internal (server )?error|something went wrong|unexpected error|temporarily unavailable|service unavailable|try again later|please try again later|unable to (save|update|process|complete)|request failed|error code|http 5\d\d|\b500\b|\b502\b|\b503\b/.test(text)) return 'server_error';" & ¬
 		"  if (/(current )?password (is )?(incorrect|invalid|wrong)|could not (change|update) (your )?password|password change failed|passwords? (do not|don't) match|does not meet|too weak/.test(text)) return 'error';" & ¬
-		"  var alertNodes = Array.from(document.querySelectorAll('[role=alert], [aria-live], .alert, [class*=toast], [class*=notification], [class*=banner], [class*=Snackbar], [class*=snackbar]'));" & ¬
+		"  var alertNodes = Array.from(document.querySelectorAll('[role=alert], [aria-live], .alert, [class*=toast], [class*=notification], [class*=banner], [class*=Snackbar], [class*=snackbar], [class*=error], [class*=Error]'));" & ¬
 		"  for (var i = 0; i < alertNodes.length; i++) {" & ¬
 		"    var t = ((alertNodes[i].innerText || alertNodes[i].textContent || '')).toLowerCase();" & ¬
 		"    if (!t) continue;" & ¬
 		"    if (t.indexOf('password') >= 0 && (t.indexOf('success') >= 0 || t.indexOf('updated') >= 0 || t.indexOf('changed') >= 0 || t.indexOf('saved') >= 0)) return 'success';" & ¬
+		"    if (/server error|something went wrong|try again|unexpected|unavailable|internal error|unable to/.test(t)) return 'server_error';" & ¬
 		"    if (t.indexOf('password') >= 0 && (t.indexOf('error') >= 0 || t.indexOf('fail') >= 0 || t.indexOf('incorrect') >= 0 || t.indexOf('invalid') >= 0)) return 'error';" & ¬
 		"  }" & ¬
 		"  var cur = document.querySelector('input[data-testid=password-card__currentPassword]');" & ¬
@@ -1456,8 +1488,7 @@ on jsProbePasswordChangeResult()
 end jsProbePasswordChangeResult
 
 on waitForPasswordChangeOutcome(timeoutSec)
-	-- Poll until Riot shows success/error, clears the form, or drops to login.
-	-- Never treat "still logged in on account page" alone as success.
+	-- Poll until Riot shows success/error/server_error, clears the form, or drops to login.
 	set deadline to (current date) + timeoutSec
 	set minWaitUntil to (current date) + 5
 	repeat while (current date) < deadline
@@ -1470,6 +1501,7 @@ on waitForPasswordChangeOutcome(timeoutSec)
 			set pageResult to safariJS(jsProbePasswordChangeResult()) as text
 		end try
 		if pageResult is "error" then return "error"
+		if pageResult is "server_error" then return "server_error"
 		if pageResult is "success" then return "success"
 		if pageResult is "form_cleared" and (current date) > minWaitUntil then return "form_cleared"
 		waitTick(0.7)
@@ -2203,9 +2235,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-12h" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-12i" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-12h" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-12i" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -2226,13 +2258,13 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-12h" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-12i" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "FORCE STOP anytime: double-click FORCE_STOP.command" buttons {"Cancel", "Run all"} default button "Run all"
 
 	logLine("Launching batch for " & rowCount & " account(s) from " & csvPath)
 	logLine("Using toolkit scripts: " & dir)
 	-- Launch via shell helper (avoid backslash-quote inside AppleScript string literals).
 	try
-		do shell script "chmod +x " & quoted form of (dir & "/launch_safari_batch.sh") & " " & quoted form of (dir & "/stop_safari_batch.sh") & " " & quoted form of (dir & "/STOP_BATCH.command")
+		do shell script "chmod +x " & quoted form of (dir & "/launch_safari_batch.sh") & " " & quoted form of (dir & "/stop_safari_batch.sh") & " " & quoted form of (dir & "/STOP_BATCH.command") & " " & quoted form of (dir & "/FORCE_STOP.command")
 	end try
 	try
 		do shell script "/bin/bash " & quoted form of (dir & "/launch_safari_batch.sh") & " " & quoted form of csvPath
@@ -2250,7 +2282,7 @@ on runBatchFromCsv()
 	end try
 	logLine(batchOut)
 
-	set summary to "Batch finished (or stopped). See success.txt / failed.txt in:" & return & dir & return & return & "Hard-stop anytime with STOP_BATCH.command"
+	set summary to "Batch finished (or stopped). See success.txt / failed.txt in:" & return & dir & return & return & "FORCE STOP anytime with FORCE_STOP.command"
 	try
 		set tailOut to do shell script "tail -n 6 " & quoted form of (dir & "/failed.txt") & " 2>/dev/null || true"
 		if tailOut is not "" then set summary to summary & return & return & "Recent failures:" & return & tailOut

@@ -1,12 +1,15 @@
-BUILD 2026-08-12h
+BUILD 2026-08-12i
 
 This zip DOES NOT contain data/tasks.csv. Keep your existing file.
 
-Prefer:
-  ./run_safari_mac.sh
-  or double-click RUN_ME.command
+START:
+  double-click RUN_ME.command
+  or ./run_safari_mac.sh
 
-IMAP verify waits up to ~90s with faster polling (was 240s).
-Between accounts: ~8s cool-down (max 10s).
+FORCE STOP (kills batch immediately):
+  double-click FORCE_STOP.command
+  (same as STOP_BATCH.command / Ctrl+C)
 
-Confirm BUILD 2026-08-12h in debug/logs/safari_*.log
+Password change retries on Riot server errors (up to 3x with refresh).
+
+Confirm BUILD 2026-08-12i in debug/logs/safari_*.log

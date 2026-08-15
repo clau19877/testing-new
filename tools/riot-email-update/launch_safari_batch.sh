@@ -20,6 +20,7 @@ fi
 chmod +x \
   "$ROOT/stop_safari_batch.sh" \
   "$ROOT/STOP_BATCH.command" \
+  "$ROOT/FORCE_STOP.command" \
   "$ROOT/run_safari_mac.sh" \
   "$ROOT/run_safari_batch.py" \
   2>/dev/null || true

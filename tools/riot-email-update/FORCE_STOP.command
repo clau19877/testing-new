@@ -1,6 +1,8 @@
 #!/bin/bash
-# Double-click to FORCE STOP the Safari batch immediately (no more accounts).
-# Alias: FORCE_STOP.command (same action).
+# ============================================================
+#  FORCE STOP — double-click this to kill the Safari batch NOW
+# ============================================================
+# Same as STOP_BATCH.command. Stops all accounts immediately.
 cd "$(dirname "$0")" || exit 1
 chmod +x stop_safari_batch.sh STOP_BATCH.command FORCE_STOP.command 2>/dev/null || true
 

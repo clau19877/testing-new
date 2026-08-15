@@ -1,4 +1,5 @@
-BUILD 2026-08-12h
-Faster IMAP: one login per wait, poll ~1.5s, INBOX-first, verify timeout 90s (was 240s).
-Password-verify via account.riotgames.com OAuth; cool-down max 10s.
+BUILD 2026-08-12i
+Password change: detect Riot server errors, refresh, retry up to 3 times.
+FORCE STOP: double-click FORCE_STOP.command (or STOP_BATCH.command).
+Faster IMAP; cool-down max 10s; account.riotgames.com direct login.
 Zip does not include data/tasks.csv.
