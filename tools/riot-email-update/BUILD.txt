@@ -1,6 +1,6 @@
-BUILD 2026-08-12n
-Skip forced re-login after password change. If the password UI reports
-success / form_cleared / session_dropped (or times out after SAVE),
-accept new_password and continue to logout / next account.
+BUILD 2026-08-12o
+Login fix: Sign in must not form.submit (GET URL with empty captcha +
+password, missing OAuth client_id). Detect degraded auth URL, retry via
+fresh account.riotgames.com OAuth once. Redact password from logged URLs.
 Do NOT open .applescript in Script Editor — use RUN_ME.command.
 Zip does not include data/tasks.csv.
