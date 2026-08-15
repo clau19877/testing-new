@@ -40,7 +40,7 @@ ACCOUNT_URL = "https://account.riotgames.com/"
 AUTH_HOST_HINT = "auth.riotgames.com"
 
 # Printed at startup so you can confirm Windows replaced the right files.
-TOOL_BUILD = "2026-08-12g-direct-account"
+TOOL_BUILD = "2026-08-12h-direct-account"
 
 # Default entry: open the Riot account portal directly (no docs.qq interstitial).
 DEFAULT_LOGIN_ENTRY_URL = "https://account.riotgames.com/"

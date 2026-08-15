@@ -1,4 +1,4 @@
-BUILD 2026-08-12g
-Password verify login always via account.riotgames.com (full OAuth), not bare authenticate.
-Faster logout cleanup; password save uses requestSubmit; cool-down max 10s.
+BUILD 2026-08-12h
+Faster IMAP: one login per wait, poll ~1.5s, INBOX-first, verify timeout 90s (was 240s).
+Password-verify via account.riotgames.com OAuth; cool-down max 10s.
 Zip does not include data/tasks.csv.

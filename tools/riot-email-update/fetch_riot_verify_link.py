@@ -71,7 +71,11 @@ def _pick_link(
 def main() -> int:
     _load_dotenv()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--timeout", type=float, default=240.0)
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=float(os.getenv("IMAP_VERIFY_TIMEOUT") or "90"),
+    )
     parser.add_argument("--since-seconds", type=float, default=300.0)
     parser.add_argument(
         "--since-epoch",
@@ -84,6 +88,12 @@ def main() -> int:
         "--recipient",
         default="",
         help="Prefer verify mail addressed to / mentioning this email (new_email)",
+    )
+    parser.add_argument(
+        "--poll",
+        type=float,
+        default=float(os.getenv("IMAP_POLL_INTERVAL") or "1.5"),
+        help="Seconds between IMAP polls (default 1.5)",
     )
     args = parser.parse_args()
     if not args.recipient:
@@ -114,56 +124,85 @@ def main() -> int:
     deadline = time.time() + args.timeout
     wanted_subject = args.subject.casefold().strip()
     recipient = args.recipient
+    poll = max(0.75, float(args.poll))
     print(
         f'waiting for Riot "{args.subject}" link on {config.user} @{config.host}'
         + (f" for {recipient}" if recipient else "")
-        + "…",
+        + f" (timeout {args.timeout:.0f}s, poll {poll:.1f}s)…",
         file=sys.stderr,
     )
 
-    # After a short recipient-only window, allow a timed fallback. Hide My Email
-    # usually puts the alias in To ("Hide My Email <alias@icloud.com>"); when it
-    # does not, the newest mail after SAVE is the next-best signal.
-    any_fallback_after = time.time() + min(45.0, max(20.0, args.timeout * 0.2))
+    # After a short recipient-only window, allow a timed fallback.
+    any_fallback_after = time.time() + min(18.0, max(10.0, args.timeout * 0.15))
     last_diag = ""
-    while time.time() < deadline:
-        try:
-            messages = inbox.fetch_recent_riot_mail(since_epoch=since)
-        except Exception as exc:
-            print(f"imap poll: {exc}", file=sys.stderr)
-            messages = []
-
-        verify_msgs = [
-            m
-            for m in messages
-            if "verify" in (m.subject or "").casefold() or m.verify_link
-        ]
-        diag = (
-            f"imap seen={len(messages)} verifyish={len(verify_msgs)} "
-            f"with_link={sum(1 for m in verify_msgs if m.verify_link)}"
-        )
-        if diag != last_diag:
-            print(diag, file=sys.stderr)
-            last_diag = diag
-
-        allow_any = (not recipient) or (time.time() >= any_fallback_after)
-        picked, how = _pick_link(
-            messages,
-            wanted_subject=wanted_subject,
-            recipient=recipient,
-            allow_any=allow_any,
-            fallback_min_received=fallback_min_received if recipient else None,
-        )
-        if picked and picked.verify_link:
-            if how and how != "recipient":
-                print(
-                    f"recipient filter missed; using {how} Verify Your Email link",
-                    file=sys.stderr,
+    client = None
+    folders = None
+    started = time.time()
+    try:
+        client = inbox._login()
+        folders = inbox._iter_folders(client)
+        while time.time() < deadline:
+            try:
+                use_folders = folders[:1] if (time.time() - started) < 15.0 else folders
+                messages = inbox.fetch_recent_riot_mail(
+                    since_epoch=since,
+                    client=client,
+                    folders=use_folders,
                 )
-            print(f'found verify link in "{picked.subject}"', file=sys.stderr)
-            print(picked.verify_link)
-            return 0
-        time.sleep(3)
+            except Exception as exc:
+                print(f"imap poll: {exc}", file=sys.stderr)
+                messages = []
+                # Reconnect once after a broken session.
+                try:
+                    if client is not None:
+                        try:
+                            client.logout()
+                        except Exception:
+                            pass
+                    client = inbox._login()
+                    folders = inbox._iter_folders(client)
+                except Exception as reconnect_exc:
+                    print(f"imap reconnect: {reconnect_exc}", file=sys.stderr)
+                    time.sleep(poll)
+                    continue
+
+            verify_msgs = [
+                m
+                for m in messages
+                if "verify" in (m.subject or "").casefold() or m.verify_link
+            ]
+            diag = (
+                f"imap seen={len(messages)} verifyish={len(verify_msgs)} "
+                f"with_link={sum(1 for m in verify_msgs if m.verify_link)}"
+            )
+            if diag != last_diag:
+                print(diag, file=sys.stderr)
+                last_diag = diag
+
+            allow_any = (not recipient) or (time.time() >= any_fallback_after)
+            picked, how = _pick_link(
+                messages,
+                wanted_subject=wanted_subject,
+                recipient=recipient,
+                allow_any=allow_any,
+                fallback_min_received=fallback_min_received if recipient else None,
+            )
+            if picked and picked.verify_link:
+                if how and how != "recipient":
+                    print(
+                        f"recipient filter missed; using {how} Verify Your Email link",
+                        file=sys.stderr,
+                    )
+                print(f'found verify link in "{picked.subject}"', file=sys.stderr)
+                print(picked.verify_link)
+                return 0
+            time.sleep(poll)
+    finally:
+        if client is not None:
+            try:
+                client.logout()
+            except Exception:
+                pass
 
     print(f'timeout waiting for "{args.subject}" verification link', file=sys.stderr)
     if last_diag:

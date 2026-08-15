@@ -351,8 +351,9 @@ on run argv
 
 			logStep("imap_verify_link")
 			logLine("Fetching verification link via IMAP (prefer recipient=" & newEmail & ")…")
-			set verifyLink to fetchImapVerifyLink("NEW_IMAP", verifySinceEpoch, newEmail)
-			if verifyLink is "" then set verifyLink to fetchImapVerifyLink("IMAP", verifySinceEpoch, newEmail)
+			-- Prefer primary IMAP first (NEW_IMAP is usually unset and only wastes a spawn).
+			set verifyLink to fetchImapVerifyLink("IMAP", verifySinceEpoch, newEmail)
+			if verifyLink is "" then set verifyLink to fetchImapVerifyLink("NEW_IMAP", verifySinceEpoch, newEmail)
 
 			if verifyLink is not "" then
 				logLine("Opening verification link in Safari…")
@@ -570,7 +571,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-12g")
+	logLine("BUILD 2026-08-12h")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -2202,9 +2203,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-12g" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-12h" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-12g" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-12h" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -2225,7 +2226,7 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-12g" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-12h" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
 
 	logLine("Launching batch for " & rowCount & " account(s) from " & csvPath)
 	logLine("Using toolkit scripts: " & dir)
@@ -2265,7 +2266,7 @@ on fetchImapCode(prefix)
 		assertNotStopped()
 		set dir to scriptDir()
 		set py to do shell script "if [ -x " & quoted form of (dir & "/.venv/bin/python") & " ]; then echo " & quoted form of (dir & "/.venv/bin/python") & "; else command -v python3; fi"
-		set cmd to "cd " & quoted form of dir & " && TOOL_DIR=" & quoted form of dir & " perl -e 'alarm shift; exec @ARGV' 110 " & quoted form of py & " " & quoted form of (dir & "/fetch_riot_imap_code.py") & " --prefix " & quoted form of prefix & " --timeout 90 --since-seconds 240"
+		set cmd to "cd " & quoted form of dir & " && TOOL_DIR=" & quoted form of dir & " perl -e 'alarm shift; exec @ARGV' 90 " & quoted form of py & " " & quoted form of (dir & "/fetch_riot_imap_code.py") & " --prefix " & quoted form of prefix & " --timeout 75 --since-seconds 240"
 		logLine("IMAP fetch (" & prefix & ")…")
 		set code to do shell script cmd
 		if code is not "" then
@@ -2280,13 +2281,13 @@ end fetchImapCode
 
 on fetchImapVerifyLink(prefix, sinceEpoch, recipientEmail)
 	-- Wait for a Riot email titled "Verify Your Email" and return its Verify Email URL.
-	-- perl alarm slightly above Python --timeout so a hung socket cannot pin osascript forever.
+	-- One IMAP login + ~1.5s polls (INBOX first). Cap ~90s (was 240s).
 	try
 		assertNotStopped()
 		set dir to scriptDir()
 		set py to do shell script "if [ -x " & quoted form of (dir & "/.venv/bin/python") & " ]; then echo " & quoted form of (dir & "/.venv/bin/python") & "; else command -v python3; fi"
 		set helperPath to dir & "/fetch_riot_verify_link.py"
-		set cmd to "cd " & quoted form of dir & " && TOOL_DIR=" & quoted form of dir & " NEW_EMAIL=" & quoted form of recipientEmail & " perl -e 'alarm shift; exec @ARGV' 260 " & quoted form of py & " " & quoted form of helperPath & " --prefix " & quoted form of prefix & " --timeout 240 --since-epoch " & quoted form of sinceEpoch & " --subject " & quoted form of "Verify Your Email" & " --recipient " & quoted form of recipientEmail
+		set cmd to "cd " & quoted form of dir & " && TOOL_DIR=" & quoted form of dir & " NEW_EMAIL=" & quoted form of recipientEmail & " perl -e 'alarm shift; exec @ARGV' 100 " & quoted form of py & " " & quoted form of helperPath & " --prefix " & quoted form of prefix & " --timeout 90 --poll 1.5 --since-epoch " & quoted form of sinceEpoch & " --subject " & quoted form of "Verify Your Email" & " --recipient " & quoted form of recipientEmail
 		logLine("IMAP verify-link fetch (" & prefix & ", to=" & recipientEmail & ")…")
 		set verifyURL to do shell script cmd
 		if verifyURL is not "" then

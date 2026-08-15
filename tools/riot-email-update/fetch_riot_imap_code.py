@@ -39,9 +39,10 @@ def _load_dotenv() -> None:
 def main() -> int:
     _load_dotenv()
     ap = argparse.ArgumentParser()
-    ap.add_argument("--timeout", type=float, default=120.0)
+    ap.add_argument("--timeout", type=float, default=75.0)
     ap.add_argument("--since-seconds", type=float, default=180.0)
     ap.add_argument("--prefix", default="IMAP", help="Env prefix (IMAP or NEW_IMAP)")
+    ap.add_argument("--poll", type=float, default=2.0)
     args = ap.parse_args()
 
     sys.path.insert(0, str(ROOT))
@@ -54,23 +55,25 @@ def main() -> int:
 
     inbox = ImapInbox(cfg)
     since = time.time() - args.since_seconds
-    deadline = time.time() + args.timeout
-    used: set[str] = set()
-    print(f"waiting for Riot code on {cfg.user} @{cfg.host}…", file=sys.stderr)
-    while time.time() < deadline:
-        try:
-            mails = inbox.fetch_recent_riot_mail(since_epoch=since)
-        except Exception as exc:
-            print(f"imap poll: {exc}", file=sys.stderr)
-            mails = []
-        for mail in mails:
-            if mail.code and mail.code not in used:
-                print(f"found code in “{mail.subject}”", file=sys.stderr)
-                print(mail.code)  # stdout only — AppleScript reads this
-                return 0
-        time.sleep(4)
-    print("timeout waiting for code", file=sys.stderr)
-    return 1
+    print(
+        f"waiting for Riot code on {cfg.user} @{cfg.host} "
+        f"(timeout {args.timeout:.0f}s)…",
+        file=sys.stderr,
+    )
+    try:
+        code = inbox.wait_for_code(
+            since_epoch=since,
+            timeout=args.timeout,
+            poll_interval=max(0.75, float(args.poll)),
+        )
+    except TimeoutError:
+        print("timeout waiting for code", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"imap error: {exc}", file=sys.stderr)
+        return 1
+    print(code)  # stdout only — AppleScript reads this
+    return 0
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from __future__ import annotations
 import email
 import html
 import imaplib
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -217,7 +218,10 @@ class ImapInbox:
 
     def _login(self) -> imaplib.IMAP4:
         # Socket timeout so a stalled IMAP server cannot pin the Safari helper forever.
-        sock_timeout = 45.0
+        try:
+            sock_timeout = float(os.getenv("IMAP_SOCKET_TIMEOUT") or "20")
+        except Exception:
+            sock_timeout = 20.0
         if self.config.use_ssl:
             client: imaplib.IMAP4 = imaplib.IMAP4_SSL(
                 self.config.host, self.config.port, timeout=sock_timeout
@@ -361,90 +365,116 @@ class ImapInbox:
             if any(token in lower for token in ("junk", "spam", "bulk")):
                 junk_like.append(name)
                 seen.add(lower)
-        # Fallbacks only when LIST did not expose a junk/spam mailbox.
-        if not junk_like:
-            for name in ("Junk", "Spam", "Bulk Mail", "Junk Folder"):
+        # Only guess common junk names when LIST returned nothing junk-like.
+        # Trying many missing mailboxes costs a full round-trip each poll.
+        if not junk_like and client is not None and not listed:
+            for name in ("Junk", "Spam"):
                 if name.casefold() not in seen:
                     junk_like.append(name)
                     seen.add(name.casefold())
         out.extend(junk_like)
         return out
 
-    def fetch_recent_riot_mail(self, *, since_epoch: float) -> list[RiotMail]:
+    def _fetch_folder_mails(
+        self,
+        client: imaplib.IMAP4,
+        folder: str,
+        *,
+        since_epoch: float,
+        min_received: float,
+        seen_uids: set[str],
+        found: list[RiotMail],
+    ) -> None:
+        try:
+            typ, _ = client.select(_imap_quote_mailbox(folder))
+        except Exception:
+            return
+        if typ != "OK":
+            return
+        for uid in self._search_uids(client, since_epoch):
+            raw = self._fetch_message_bytes(client, uid)
+            if not raw:
+                continue
+            msg = email.message_from_bytes(raw)
+            sender = _decode_mime(msg.get("From"))
+            subject = _decode_mime(msg.get("Subject"))
+            if not _is_riot_mail(sender, subject):
+                continue
+            received = _message_received_epoch(msg)
+            if received < min_received:
+                continue
+            body = _body_text(msg)
+            blob = f"{subject}\n{body}"
+            uid_s = uid.decode() if isinstance(uid, bytes) else str(uid)
+            key = f"{folder}:{uid_s}"
+            if key in seen_uids:
+                continue
+            seen_uids.add(key)
+            found.append(
+                RiotMail(
+                    uid=uid_s,
+                    subject=subject,
+                    sender=sender,
+                    code=_extract_code(blob),
+                    verify_link=_extract_verify_link(blob),
+                    received_epoch=received,
+                    recipients=_recipient_blob(msg, body),
+                )
+            )
+
+    def fetch_recent_riot_mail(
+        self,
+        *,
+        since_epoch: float,
+        client: imaplib.IMAP4 | None = None,
+        folders: list[str] | None = None,
+        inbox_only: bool = False,
+    ) -> list[RiotMail]:
+        """
+        Fetch recent Riot mail. Pass an open `client` to avoid re-login every poll.
+        `inbox_only=True` skips junk/spam folders (faster early polls).
+        """
         found: list[RiotMail] = []
         seen_uids: set[str] = set()
         # Allow modest clock skew between Mac and IMAP Date headers.
         min_received = since_epoch - 120
+        owns_client = client is None
         login_error: Exception | None = None
 
-        # One login to discover folders, then per-folder sessions.
-        folders: list[str] = [self.config.folder or "INBOX"]
-        discover = None
         try:
-            discover = self._login()
-            folders = self._iter_folders(discover)
+            if client is None:
+                client = self._login()
+        except Exception as exc:
+            raise exc
+
+        assert client is not None
+        try:
+            if folders is None:
+                if inbox_only:
+                    folders = [self.config.folder or "INBOX"]
+                else:
+                    folders = self._iter_folders(client)
+            for folder in folders:
+                try:
+                    self._fetch_folder_mails(
+                        client,
+                        folder,
+                        since_epoch=since_epoch,
+                        min_received=min_received,
+                        seen_uids=seen_uids,
+                        found=found,
+                    )
+                except Exception:
+                    # Keep polling other folders; connection may still be usable.
+                    continue
         except Exception as exc:
             login_error = exc
         finally:
-            if discover is not None:
+            if owns_client and client is not None:
                 try:
-                    discover.logout()
+                    client.logout()
                 except Exception:
                     pass
-        if login_error is not None:
-            raise login_error
-
-        for folder in folders:
-            client = None
-            try:
-                client = self._login()
-            except Exception as exc:
-                login_error = exc
-                break
-            try:
-                # Important: quote mailbox; bad / missing folders must not abort.
-                try:
-                    typ, _ = client.select(_imap_quote_mailbox(folder))
-                except Exception:
-                    continue
-                if typ != "OK":
-                    continue
-                for uid in self._search_uids(client, since_epoch):
-                    raw = self._fetch_message_bytes(client, uid)
-                    if not raw:
-                        continue
-                    msg = email.message_from_bytes(raw)
-                    sender = _decode_mime(msg.get("From"))
-                    subject = _decode_mime(msg.get("Subject"))
-                    if not _is_riot_mail(sender, subject):
-                        continue
-                    received = _message_received_epoch(msg)
-                    if received < min_received:
-                        continue
-                    body = _body_text(msg)
-                    blob = f"{subject}\n{body}"
-                    uid_s = uid.decode() if isinstance(uid, bytes) else str(uid)
-                    key = f"{folder}:{uid_s}"
-                    if key in seen_uids:
-                        continue
-                    seen_uids.add(key)
-                    found.append(
-                        RiotMail(
-                            uid=uid_s,
-                            subject=subject,
-                            sender=sender,
-                            code=_extract_code(blob),
-                            verify_link=_extract_verify_link(blob),
-                            received_epoch=received,
-                            recipients=_recipient_blob(msg, body),
-                        )
-                    )
-            finally:
-                if client is not None:
-                    try:
-                        client.logout()
-                    except Exception:
-                        pass
         if login_error is not None and not found:
             raise login_error
         found.sort(key=lambda m: m.received_epoch, reverse=True)
@@ -454,8 +484,8 @@ class ImapInbox:
         self,
         *,
         since_epoch: float,
-        timeout: float = 180.0,
-        poll_interval: float = 5.0,
+        timeout: float = 120.0,
+        poll_interval: float = 2.0,
         used_codes: Iterable[str] | None = None,
     ) -> str:
         used = set(used_codes or [])
@@ -464,13 +494,30 @@ class ImapInbox:
             f"  IMAP: waiting for Riot code in {self.config.user} "
             f"(timeout {timeout:.0f}s)…"
         )
-        while time.time() < deadline:
-            mails = self.fetch_recent_riot_mail(since_epoch=since_epoch)
-            for mail in mails:
-                if mail.code and mail.code not in used:
-                    print(f"  IMAP: found code in “{mail.subject}”")
-                    return mail.code
-            time.sleep(poll_interval)
+        client = None
+        folders: list[str] | None = None
+        try:
+            client = self._login()
+            folders = self._iter_folders(client)
+            started = time.time()
+            while time.time() < deadline:
+                use_folders = folders[:1] if (time.time() - started) < 12.0 else folders
+                mails = self.fetch_recent_riot_mail(
+                    since_epoch=since_epoch,
+                    client=client,
+                    folders=use_folders,
+                )
+                for mail in mails:
+                    if mail.code and mail.code not in used:
+                        print(f"  IMAP: found code in “{mail.subject}”")
+                        return mail.code
+                time.sleep(poll_interval)
+        finally:
+            if client is not None:
+                try:
+                    client.logout()
+                except Exception:
+                    pass
         raise TimeoutError(
             f"No Riot verification code in {self.config.user} within {timeout:.0f}s"
         )
@@ -479,22 +526,38 @@ class ImapInbox:
         self,
         *,
         since_epoch: float,
-        timeout: float = 180.0,
-        poll_interval: float = 5.0,
+        timeout: float = 90.0,
+        poll_interval: float = 1.5,
     ) -> str:
         deadline = time.time() + timeout
         print(
             f"  IMAP: waiting for Riot verify link in {self.config.user} "
             f"(timeout {timeout:.0f}s)…"
         )
-        while time.time() < deadline:
-            mails = self.fetch_recent_riot_mail(since_epoch=since_epoch)
-            for mail in mails:
-                if mail.verify_link:
-                    print(f"  IMAP: found verify link in “{mail.subject}”")
-                    return mail.verify_link
-                # Some flows only include a code; caller can fall back.
-            time.sleep(poll_interval)
+        client = None
+        folders: list[str] | None = None
+        try:
+            client = self._login()
+            folders = self._iter_folders(client)
+            started = time.time()
+            while time.time() < deadline:
+                use_folders = folders[:1] if (time.time() - started) < 15.0 else folders
+                mails = self.fetch_recent_riot_mail(
+                    since_epoch=since_epoch,
+                    client=client,
+                    folders=use_folders,
+                )
+                for mail in mails:
+                    if mail.verify_link:
+                        print(f"  IMAP: found verify link in “{mail.subject}”")
+                        return mail.verify_link
+                time.sleep(poll_interval)
+        finally:
+            if client is not None:
+                try:
+                    client.logout()
+                except Exception:
+                    pass
         raise TimeoutError(
             f"No Riot verify link in {self.config.user} within {timeout:.0f}s"
         )
