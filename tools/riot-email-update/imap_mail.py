@@ -526,7 +526,7 @@ class ImapInbox:
         self,
         *,
         since_epoch: float,
-        timeout: float = 90.0,
+        timeout: float = 120.0,
         poll_interval: float = 1.5,
     ) -> str:
         deadline = time.time() + timeout

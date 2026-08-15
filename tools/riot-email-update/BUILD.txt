@@ -1,6 +1,4 @@
-BUILD 2026-08-12o
-Login fix: Sign in must not form.submit (GET URL with empty captcha +
-password, missing OAuth client_id). Detect degraded auth URL, retry via
-fresh account.riotgames.com OAuth once. Redact password from logged URLs.
+BUILD 2026-08-12p
+IMAP verify-link wait increased to 120s (perl alarm 140s).
 Do NOT open .applescript in Script Editor — use RUN_ME.command.
 Zip does not include data/tasks.csv.

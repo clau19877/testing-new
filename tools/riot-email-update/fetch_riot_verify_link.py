@@ -74,7 +74,7 @@ def main() -> int:
     parser.add_argument(
         "--timeout",
         type=float,
-        default=float(os.getenv("IMAP_VERIFY_TIMEOUT") or "90"),
+        default=float(os.getenv("IMAP_VERIFY_TIMEOUT") or "120"),
     )
     parser.add_argument("--since-seconds", type=float, default=300.0)
     parser.add_argument(
