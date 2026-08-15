@@ -1,5 +1,5 @@
-BUILD 2026-08-12d
-Skip docs.qq — open https://account.riotgames.com/ directly for login.
-Background-friendly Safari (no focus steal by default).
-Opt-in frontmost: SAFARI_STEAL_FOCUS=1 ./run_safari_mac.sh
+BUILD 2026-08-12e
+Password change: wait for UI outcome, force logout, re-login with new_password before final logout.
+Skip docs.qq — open https://account.riotgames.com/ directly.
+Background Safari default; SAFARI_STEAL_FOCUS=1 to opt in.
 Zip does not include data/tasks.csv.

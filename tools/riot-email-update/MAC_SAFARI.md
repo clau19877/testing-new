@@ -110,7 +110,7 @@ IMAP_HOST=imap.mail.me.com IMAP_USER='you@icloud.com' IMAP_PASSWORD='app-passwor
 ```
 
 If Script Editor reports an error about setting `line` / `st` / `key`, update to
-the latest zip (**BUILD 2026-08-12d** or newer) — those names are reserved in
+the latest zip (**BUILD 2026-08-12e** or newer) — those names are reserved in
 AppleScript.
 
 ## Account flow
@@ -125,9 +125,9 @@ For each CSV row, the runner:
 5. Waits via IMAP for a **Verify Your Email** message and opens its
    **Verify Email** link
 6. If `change_password=1`: changes password (`password-card__*` → submit),
-   re-logs in with `new_password` if the session drops
-7. If password was changed: verifies success (session restored with new
-   password / no error banner) before logout
+   waits for success/error/session-drop, **force-logs out**, then re-logs in
+   with `new_password` to confirm before any final logout
+7. If password was changed: only after that re-login succeeds, proceeds to logout
 8. Clicks riotbar **Logout** (`data-testid=riotbar:account:link-logout`),
    then verifies Safari is logged out before the next CSV row starts
 9. Records the result, then starts the next CSV row
@@ -138,7 +138,7 @@ replace your existing `data/tasks.csv`.
 
 ## Run without interrupting your other work
 
-By default (**BUILD 2026-08-12d+**) the script does **not** bring Safari to the
+By default (**BUILD 2026-08-12e+**) the script does **not** bring Safari to the
 front. Page actions use AppleScript `do JavaScript` (not real mouse clicks), so
 you can keep typing in other apps.
 

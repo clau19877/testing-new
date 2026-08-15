@@ -383,6 +383,7 @@ on run argv
 			logLine("Skipping password change (change_password=0 / SKIP_PASSWORD_CHANGE=1).")
 		else
 			logStep("change_password")
+			set oldPassForVerify to riotPass
 			logLine("Returning to account page before password change…")
 			ensureAccountSession(riotUser, riotPass, batchMode)
 			logLine("Waiting for password-card fields…")
@@ -410,9 +411,12 @@ on run argv
 			set pwSaveResult to safariJS(jsClickPasswordSave())
 			logLine(pwSaveResult)
 			if pwSaveResult does not contain "clicked-password-save" then error "Could not click password-card__submit-btn (" & pwSaveResult & ")."
-			humanDelay(2.0, 3.5)
 
-			set pwPhase to waitForPostLogin(20)
+			-- Do NOT logout yet. Wait for Riot to finish the password update.
+			logStep("wait_password_change_outcome")
+			logLine("Waiting for password-change confirmation (success / error / session drop)…")
+			humanDelay(3.0, 4.5)
+			set pwPhase to waitForPostLogin(25)
 			logLine("Post-password-change phase: " & pwPhase)
 			if pwPhase is "mfa" then
 				set pwMfa to fetchImapCode("IMAP")
@@ -426,31 +430,37 @@ on run argv
 					humanDelay(2.0, 3.0)
 				end if
 			end if
-			set riotPass to newPass
-			logLine("Password change submitted; watching for session drop…")
-			set settleWaited to 0
-			repeat while settleWaited < 12
-				try
-					if safariJS(jsProbeEmailField()) is "ready" then exit repeat
-				end try
-				try
-					if safariJS(jsProbeLoginForm()) is "ready" then
-						logLine("Login form appeared after password change (session dropped).")
-						exit repeat
-					end if
-				end try
-				waitTick(0.8)
-				set settleWaited to settleWaited + 1
-			end repeat
-			logLine("Restoring account session with new password if needed…")
-			ensureAccountSession(riotUser, riotPass, batchMode)
-			logLine("Account session ready after password change.")
-			-- Must prove password change worked before logout (re-login with newPass + page check).
+
+			set pwOutcome to waitForPasswordChangeOutcome(55)
+			logLine("Password-change outcome: " & pwOutcome)
+			if pwOutcome is "error" then error "Riot rejected the password change (error banner). Check current/new password in tasks.csv."
+			if pwOutcome is "timeout" then
+				logLine("WARNING: no explicit success banner — will hard-verify via forced re-login with new_password.")
+			else
+				logLine("Password UI outcome accepted (" & pwOutcome & "); hard-verifying with new password before logout…")
+			end if
+
+			-- HARD VERIFY: end the current session, then prove new_password works.
+			-- Prior builds treated "still on account page" as success and logged out too early.
 			logStep("verify_password_change")
-			set pwVerify to verifyPasswordChangeSuccess()
-			logLine("Password change verification: " & pwVerify)
-			if pwVerify does not start with "ok" then error "Password change not confirmed before logout (" & pwVerify & ")."
-			logLine("Password change confirmed — proceeding to logout.")
+			logLine("Forcing logout before new-password verification (do not keep old session)…")
+			forceLogoutSession("before_new_password_verify")
+			logLine("Signing in with NEW password to confirm change…")
+			set newLogin to signInWithCredentials(riotUser, newPass, batchMode)
+			logLine("New-password login result: " & newLogin)
+			if newLogin does not start with "ok" then
+				logLine("New password login failed — checking whether old password still works…")
+				forceLogoutSession("after_new_password_fail")
+				set oldLogin to signInWithCredentials(riotUser, oldPassForVerify, batchMode)
+				logLine("Old-password login result: " & oldLogin)
+				if oldLogin starts with "ok" then
+					error "Password change did not take effect (old password still works; new password rejected). Logout was blocked."
+				end if
+				error "Password change not confirmed (cannot sign in with new_password: " & newLogin & "; old also failed: " & oldLogin & ")."
+			end if
+
+			set riotPass to newPass
+			logLine("Password change confirmed via re-login with new_password — safe to logout.")
 		end if
 
 		if skipEmail and skipPassword then
@@ -544,7 +554,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-12d")
+	logLine("BUILD 2026-08-12e")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -1382,24 +1392,55 @@ on jsClickRiotbarLogout()
 end jsClickRiotbarLogout
 
 on jsProbePasswordChangeResult()
-	-- success / error banners after password-card save
+	-- success / error / form-cleared after password-card save
 	return "(function () {" & ¬
 		"  var text = ((document.body && document.body.innerText) || '').toLowerCase();" & ¬
-		"  if (/password (has been )?(updated|changed|saved)|successfully (changed|updated) (your )?password|your password was (updated|changed)/.test(text)) return 'success';" & ¬
-		"  if (/(current )?password (is )?(incorrect|invalid|wrong)|could not (change|update) (your )?password|password change failed|passwords? (do not|don't) match/.test(text)) return 'error';" & ¬
-		"  var alertNodes = Array.from(document.querySelectorAll('[role=alert], .alert, [class*=toast], [class*=notification], [class*=banner]'));" & ¬
+		"  if (/password (has been )?(updated|changed|saved)|successfully (changed|updated) (your )?password|your password was (updated|changed)|password (update|change) successful/.test(text)) return 'success';" & ¬
+		"  if (/(current )?password (is )?(incorrect|invalid|wrong)|could not (change|update) (your )?password|password change failed|passwords? (do not|don't) match|does not meet|too weak/.test(text)) return 'error';" & ¬
+		"  var alertNodes = Array.from(document.querySelectorAll('[role=alert], [aria-live], .alert, [class*=toast], [class*=notification], [class*=banner], [class*=Snackbar], [class*=snackbar]'));" & ¬
 		"  for (var i = 0; i < alertNodes.length; i++) {" & ¬
 		"    var t = ((alertNodes[i].innerText || alertNodes[i].textContent || '')).toLowerCase();" & ¬
 		"    if (!t) continue;" & ¬
-		"    if (t.indexOf('password') >= 0 && (t.indexOf('success') >= 0 || t.indexOf('updated') >= 0 || t.indexOf('changed') >= 0)) return 'success';" & ¬
-		"    if (t.indexOf('password') >= 0 && (t.indexOf('error') >= 0 || t.indexOf('fail') >= 0 || t.indexOf('incorrect') >= 0)) return 'error';" & ¬
+		"    if (t.indexOf('password') >= 0 && (t.indexOf('success') >= 0 || t.indexOf('updated') >= 0 || t.indexOf('changed') >= 0 || t.indexOf('saved') >= 0)) return 'success';" & ¬
+		"    if (t.indexOf('password') >= 0 && (t.indexOf('error') >= 0 || t.indexOf('fail') >= 0 || t.indexOf('incorrect') >= 0 || t.indexOf('invalid') >= 0)) return 'error';" & ¬
+		"  }" & ¬
+		"  var cur = document.querySelector('input[data-testid=password-card__currentPassword]');" & ¬
+		"  var neu = document.querySelector('input[data-testid=password-card__newPassword]');" & ¬
+		"  var conf = document.querySelector('input[data-testid=password-card__confirmNewPassword]');" & ¬
+		"  var btn = document.querySelector('button[data-testid=password-card__submit-btn]');" & ¬
+		"  if (cur && neu && conf) {" & ¬
+		"    var empty = !(cur.value || '') && !(neu.value || '') && !(conf.value || '');" & ¬
+		"    var disabled = !btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true';" & ¬
+		"    if (empty && disabled) return 'form_cleared';" & ¬
 		"  }" & ¬
 		"  return 'unknown';" & ¬
 		"})();"
 end jsProbePasswordChangeResult
 
+on waitForPasswordChangeOutcome(timeoutSec)
+	-- Poll until Riot shows success/error, clears the form, or drops to login.
+	-- Never treat "still logged in on account page" alone as success.
+	set deadline to (current date) + timeoutSec
+	set minWaitUntil to (current date) + 5
+	repeat while (current date) < deadline
+		assertNotStopped()
+		try
+			if safariJS(jsProbeLoginForm()) is "ready" then return "session_dropped"
+		end try
+		set pageResult to "unknown"
+		try
+			set pageResult to safariJS(jsProbePasswordChangeResult()) as text
+		end try
+		if pageResult is "error" then return "error"
+		if pageResult is "success" then return "success"
+		if pageResult is "form_cleared" and (current date) > minWaitUntil then return "form_cleared"
+		waitTick(0.7)
+	end repeat
+	return "timeout"
+end waitForPasswordChangeOutcome
+
 on verifyPasswordChangeSuccess()
-	-- Called after ensureAccountSession(new password). Require account page + no error banner.
+	-- Legacy helper — hard verify now uses signInWithCredentials after forced logout.
 	try
 		if safariJS(jsProbeEmailField()) is not "ready" then return "fail:no-account-email-field"
 	on error
@@ -1411,9 +1452,84 @@ on verifyPasswordChangeSuccess()
 	end try
 	if pageResult is "error" then return "fail:password-error-banner"
 	if pageResult is "success" then return "ok:success-banner"
-	-- Reaching account widgets after re-login with newPass is strong proof.
-	return "ok:session-with-new-password"
+	if pageResult is "form_cleared" then return "ok:form-cleared"
+	return "fail:no-success-signal"
 end verifyPasswordChangeSuccess
+
+on signInWithCredentials(riotUser, passText, batchMode)
+	-- Assumes session was cleared. Signs in and waits for account email field.
+	-- Returns "ok:…" or "fail:…" (does not throw on bad credentials).
+	logLine("signInWithCredentials: opening login…")
+	safariGoTo("https://account.riotgames.com/")
+	humanDelay(1.5, 2.5)
+	if not sessionLooksLoggedOut() then
+		safariGoTo("https://authenticate.riotgames.com/")
+		humanDelay(1.2, 2.0)
+	end if
+	set formReady to waitForLoginForm(40)
+	logLine("signInWithCredentials form: " & formReady)
+	if formReady is not "ready" then
+		forceLogoutSession("signin_form_missing")
+		safariGoTo("https://authenticate.riotgames.com/")
+		humanDelay(1.5, 2.5)
+		set formReady to waitForLoginForm(35)
+		logLine("signInWithCredentials form (retry): " & formReady)
+	end if
+	if formReady is not "ready" then return "fail:no-login-form"
+
+	set fillResult to safariJS(jsFillLogin(riotUser, passText))
+	logLine("signInWithCredentials fill: " & fillResult)
+	if fillResult contains "account-page" then
+		try
+			if safariJS(jsProbeEmailField()) is "ready" then return "ok:already-account"
+		end try
+	end if
+	humanDelay(0.5, 1.0)
+	safariJS(jsClickSignIn())
+	set phaseNow to waitForPostLogin(50)
+	logLine("signInWithCredentials phase: " & phaseNow)
+	if phaseNow is "bad_creds" then return "fail:bad_creds"
+	if phaseNow is "cloudflare" then
+		set phaseNow to waitForCloudflareClear(45)
+		logLine("signInWithCredentials after CF: " & phaseNow)
+	end if
+	if phaseNow is "captcha" then
+		if batchMode then return "fail:captcha"
+		display dialog "hCaptcha during password verify login. Solve it in Safari, then click OK." buttons {"OK"} default button 1
+		set phaseNow to waitForPostLogin(60)
+	end if
+	if phaseNow is "mfa" then
+		set mfaCode to fetchImapCode("IMAP")
+		if mfaCode is "" then
+			if batchMode then return "fail:mfa"
+			set mfaCode to text returned of (display dialog "Enter Riot MFA code (password verify):" default answer "")
+		end if
+		if mfaCode is not "" then
+			safariJS(jsSubmitCode(mfaCode, "mfa"))
+			humanDelay(2.0, 3.0)
+			set phaseNow to waitForPostLogin(45)
+			logLine("signInWithCredentials after MFA: " & phaseNow)
+		end if
+	end if
+	if phaseNow is "bad_creds" then return "fail:bad_creds"
+
+	set emailWait to waitForEmailField(35)
+	logLine("signInWithCredentials email field: " & emailWait)
+	if emailWait is "ready" then return "ok:account"
+	try
+		if safariJS(jsProbeEmailField()) is "ready" then return "ok:account"
+	end try
+	safariGoTo("https://account.riotgames.com/")
+	humanDelay(1.5, 2.5)
+	set emailWait to waitForEmailField(25)
+	if emailWait is "ready" then return "ok:account-retry"
+	if safariJS(jsProbeLoginForm()) is "ready" then
+		set phaseRetry to safariJS(jsProbePhase()) as text
+		if phaseRetry is "bad_creds" then return "fail:bad_creds"
+		return "fail:still-login-form"
+	end if
+	return "fail:no-account-after-login"
+end signInWithCredentials
 
 on jsClickLogoutEverywhere()
 	-- Exact Riot control:
@@ -2019,9 +2135,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-12d" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-12e" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-12d" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-12e" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -2042,7 +2158,7 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-12d" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-12e" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "To hard-stop later: double-click STOP_BATCH.command" buttons {"Cancel", "Run all"} default button "Run all"
 
 	logLine("Launching batch for " & rowCount & " account(s) from " & csvPath)
 	logLine("Using toolkit scripts: " & dir)
