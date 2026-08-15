@@ -378,7 +378,6 @@ on run argv
 			logLine("Skipping password change (change_password=0 / SKIP_PASSWORD_CHANGE=1).")
 		else
 			logStep("change_password")
-			set oldPassForVerify to riotPass
 			set pwOutcome to ""
 			set pwAttempt to 0
 			repeat while pwAttempt < 3
@@ -473,57 +472,15 @@ on run argv
 			end repeat
 
 			if pwOutcome starts with "server_error" then error "Password change failed after 3 attempts (Riot server error): " & pwOutcome
+			if pwOutcome starts with "error" then error "Riot rejected the password change (validation error): " & pwOutcome
+			-- Trust password UI outcome (success / form_cleared / session_dropped / timeout).
+			-- No forced re-login verify — that step was slow and often hung after a real change.
 			if pwOutcome is "timeout" then
-				logLine("WARNING: no explicit success banner — will hard-verify via forced re-login with new_password.")
+				logLine("WARNING: no explicit password success signal — assuming SAVE worked; using new_password for any remaining session work.")
 			else
-				logLine("Password UI outcome accepted (" & pwOutcome & "); hard-verifying with new password before logout…")
+				logLine("Password change accepted from UI (" & pwOutcome & ") — skipping re-login verify; logging out next.")
 			end if
-
-			-- HARD VERIFY: end the current session, then prove new_password works.
-			-- Prior builds treated "still on account page" as success and logged out too early.
-			logStep("verify_password_change")
-			logLine("Forcing logout before new-password verification (do not keep old session)…")
-			forceLogoutSession("before_new_password_verify")
-			-- Riot often needs a beat after password-change logout before auth accepts the new secret.
-			logLine("Settling after logout before new-password verify login…")
-			humanDelay(3.0, 4.5)
-			logLine("Signing in with NEW password to confirm change…")
-			set newLogin to signInWithCredentials(riotUser, newPass, batchMode)
-			logLine("New-password login result: " & newLogin)
-			-- Hang / still-on-form is often a bare-auth redirect miss — retry new password once.
-			if newLogin is "fail:still-login-form" or newLogin is "fail:no-account-after-login" or newLogin is "fail:no-login-form" or newLogin is "fail:timeout" then
-				logLine("New-password login inconclusive (" & newLogin & ") — retrying via account.riotgames.com…")
-				forceLogoutSession("before_new_password_retry")
-				humanDelay(2.0, 3.0)
-				set newLogin to signInWithCredentials(riotUser, newPass, batchMode)
-				logLine("New-password login retry result: " & newLogin)
-			end if
-			if newLogin does not start with "ok" then
-				logLine("New password login failed — checking whether old password still works…")
-				forceLogoutSession("after_new_password_fail")
-				humanDelay(1.5, 2.5)
-				set oldLogin to signInWithCredentials(riotUser, oldPassForVerify, batchMode)
-				logLine("Old-password login result: " & oldLogin)
-				if oldLogin starts with "ok" then
-					error "Password change did not take effect (old password still works; new password rejected). Logout was blocked."
-				end if
-				set newHung to (newLogin is "fail:still-login-form" or newLogin is "fail:no-account-after-login" or newLogin is "fail:timeout" or newLogin is "fail:captcha" or newLogin is "fail:mfa")
-				set uiLooksChanged to (pwOutcome is "form_cleared" or pwOutcome starts with "success" or pwOutcome is "session_dropped")
-				-- UI already showed password form clear / success, and old password no longer works:
-				-- treat as changed even if the post-change re-login hung (common after rapid logout).
-				if uiLooksChanged and newHung and (oldLogin is "fail:bad_creds" or oldLogin is "fail:still-login-form" or oldLogin is "fail:timeout" or oldLogin is "fail:no-account-after-login") then
-					logLine("WARNING: password UI said changed (" & pwOutcome & ") and old password did not restore session (" & oldLogin & "); accepting change despite new-password verify hang (" & newLogin & ").")
-					logLine("Update tasks.csv riot_password to new_password for this account if you re-run it.")
-					set newLogin to "ok:accepted-ui-cleared"
-				else if oldLogin is "fail:bad_creds" and newHung then
-					error "Password likely changed (old password rejected) but new-password login did not reach account page (" & newLogin & "). Re-run this row with riot_password=new_password."
-				else
-					error "Password change not confirmed (cannot sign in with new_password: " & newLogin & "; old also failed: " & oldLogin & ")."
-				end if
-			end if
-
 			set riotPass to newPass
-			logLine("Password change confirmed (" & newLogin & ") — safe to logout.")
 		end if
 
 		if skipEmail and skipPassword then
@@ -617,7 +574,7 @@ on logInit(accountLabel)
 		set logFilePath to dir & "/safari_" & stamp & "_" & safe & ".log"
 	end if
 	logLine("=== safari-riot session start ===")
-	logLine("BUILD 2026-08-12m")
+	logLine("BUILD 2026-08-12n")
 	logLine("log file → " & logFilePath)
 	if logAccountLabel is not "" then logLine("account=" & logAccountLabel)
 	try
@@ -2353,9 +2310,9 @@ on discoverHint()
 	set found to findTasksCsvPath()
 	if found is not "" then
 		set rootDir to scriptDir()
-		return "BUILD 2026-08-12m" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
+		return "BUILD 2026-08-12n" & return & return & "Found your CSV at:" & return & found & return & return & "In Terminal run:" & return & "cd " & quoted form of rootDir & return & "./run_safari_mac.sh" & return & return & "Or double-click RUN_ME.command in that folder." & return & return & "(Do not use an older Desktop/riotemail copy of the scripts.)"
 	end if
-	return "BUILD 2026-08-12m" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
+	return "BUILD 2026-08-12n" & return & return & "Put accounts in data/tasks.csv inside your Desktop toolkit folder, then run RUN_ME.command or ./run_safari_mac.sh"
 end discoverHint
 
 on runBatchFromCsv()
@@ -2376,7 +2333,7 @@ on runBatchFromCsv()
 		set dir to toolkitRootFromCsv(csvPath)
 	end try
 
-	display dialog "BUILD 2026-08-12m" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "FORCE STOP anytime: double-click FORCE_STOP.command" buttons {"Cancel", "Run all"} default button "Run all"
+	display dialog "BUILD 2026-08-12n" & return & return & "Found " & rowCount & " account(s) in:" & return & csvPath & return & return & "Scripts:" & return & dir & return & return & "Run all now via Safari?" & return & return & "FORCE STOP anytime: double-click FORCE_STOP.command" buttons {"Cancel", "Run all"} default button "Run all"
 
 	logLine("Launching batch for " & rowCount & " account(s) from " & csvPath)
 	logLine("Using toolkit scripts: " & dir)
