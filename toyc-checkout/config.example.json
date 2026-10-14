@@ -30,5 +30,7 @@
   "joinMembership": false,
   "marketing": false,
   "submitOrder": false,
-  "headless": true
+  "headless": true,
+  "retries": 3,
+  "retryDelayMs": 300
 }
