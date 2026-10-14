@@ -19,6 +19,8 @@ const CSV_FIELDS = {
   submitorder: "submitOrder",
   agreeterms: "agreeTerms",
   headless: "headless",
+  retries: "retries",
+  retrydelayms: "retryDelayMs",
 };
 
 function setPath(target, path, value) {
@@ -71,7 +73,7 @@ function parseCsv(text) {
     header.forEach((path, index) => {
       const raw = values[index] === undefined ? "" : String(values[index]).trim();
       if (!raw) return;
-      if (path === "quantity") setPath(order, path, Number(raw));
+      if (path === "quantity" || path === "retries" || path === "retryDelayMs") setPath(order, path, Number(raw));
       else if (path === "submitOrder" || path === "agreeTerms" || path === "headless") {
         setPath(order, path, /^(1|true|yes)$/i.test(raw));
       } else setPath(order, path, raw);

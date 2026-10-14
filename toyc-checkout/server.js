@@ -19,6 +19,7 @@ const shots = new Set([
   "03-customer.png",
   "04-payment.png",
   "05-terms.png",
+  "04-after-submit.png",
   "error.png",
 ]);
 

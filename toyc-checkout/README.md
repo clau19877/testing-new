@@ -16,6 +16,10 @@ Open http://127.0.0.1:8787. The first visit creates the operator account. After 
 
 **Start** begins that order. The same button becomes **Stop** while Chrome is working and closes the browser immediately.
 
+The run moves on as soon as the next field is ready, instead of waiting for the rest of the page to finish loading. A step that times out or bounces back to the cart is tried again, up to `retries` (default 3). Sold-out items, a wrong shop password, a member-login wall, and a rejected card are not retried. Once the store accepts the order request, the submit button is not clicked again.
+
+The cart currently redirects to member sign-in before delivery can be chosen. Put `account.email` and `account.password` in the order file and the run signs in, then continues. Without those fields it stops as soon as the sign-in page appears.
+
 ## Command line
 
 ```bash
