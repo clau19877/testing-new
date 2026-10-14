@@ -21,6 +21,10 @@
     "gender": "不透露",
     "remarks": ""
   },
+  "account": {
+    "email": "",
+    "password": ""
+  },
   "recipientSameAsCustomer": true,
   "agreeTerms": true,
   "joinMembership": false,

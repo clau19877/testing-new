@@ -1,10 +1,22 @@
 # TOYC checkout
 
-Guest checkout for [toyc.com.hk](https://www.toyc.com.hk/). The script uses the public storefront: product page, cart, then the customer form. It stops before **提交訂單** unless `submitOrder` is true.
+Checkout desk for [toyc.com.hk](https://www.toyc.com.hk/). The panel imports order details, signs in to a shop account when the file includes one, and starts or stops the run with one button. It uses the public storefront and stops before **提交訂單** unless `submitOrder` is true.
 
 A paid order cannot be cancelled. Card values stay in environment variables and are sent only when you submit.
 
-## Run
+## Panel
+
+```bash
+cd toyc-checkout
+npm install
+npm start
+```
+
+Open http://127.0.0.1:8787. The first visit creates the operator account. After sign-in, use **Import order details** with a JSON or CSV file. `public/sample-order.json` is a guest order. Add `account.email` and `account.password` to sign in at the shop before adding the item.
+
+**Start** begins that order. The same button becomes **Stop** while Chrome is working and closes the browser immediately.
+
+## Command line
 
 ```bash
 cd toyc-checkout

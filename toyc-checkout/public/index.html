@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TOYC checkout</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main id="gate" class="gate" hidden>
+      <section class="card gate-card">
+        <p class="eyebrow">TOYC checkout</p>
+        <h1 id="gate-title">Sign in</h1>
+        <p id="gate-copy" class="muted">Use the operator account for this panel.</p>
+        <form id="gate-form">
+          <label>
+            Username
+            <input id="username" name="username" autocomplete="username" required minlength="3" />
+          </label>
+          <label>
+            Password
+            <input id="password" name="password" type="password" autocomplete="current-password" required minlength="8" />
+          </label>
+          <p id="gate-error" class="error" role="alert"></p>
+          <button id="gate-submit" type="submit">Sign in</button>
+        </form>
+      </section>
+    </main>
+
+    <div id="app" class="app" hidden>
+      <header class="top">
+        <div>
+          <p class="eyebrow">TOYC checkout</p>
+          <h1>Order desk</h1>
+        </div>
+        <div class="who">
+          <span id="who"></span>
+          <button id="logout" type="button" class="ghost">Log out</button>
+        </div>
+      </header>
+
+      <section class="layout">
+        <section class="card">
+          <div class="row">
+            <h2>Imported orders</h2>
+            <label class="file">
+              Import order details
+              <input id="file" type="file" accept=".json,.csv,application/json,text/csv" />
+            </label>
+          </div>
+          <p class="muted">JSON or CSV. A shop email and password in the file signs in before checkout. Passwords are kept on this machine and are not shown again.</p>
+          <p><a href="/sample-order.json" download>Download a sample JSON file</a></p>
+          <p id="import-error" class="error" role="alert"></p>
+          <ul id="orders" class="orders"></ul>
+        </section>
+
+        <section class="card desk">
+          <div class="row">
+            <h2 id="order-title">No order selected</h2>
+            <span id="status" class="pill">Idle</span>
+          </div>
+          <dl id="summary" class="summary"></dl>
+          <button id="toggle" type="button" class="start" disabled>Start</button>
+          <ol id="log" class="log"></ol>
+          <img id="screen" alt="" hidden />
+        </section>
+      </section>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>

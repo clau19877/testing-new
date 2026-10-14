@@ -23,12 +23,33 @@ const CHROME =
   process.env.PUPPETEER_EXECUTABLE_PATH ||
   "/usr/local/bin/google-chrome";
 
+class CheckoutStopped extends Error {
+  constructor() {
+    super("Checkout stopped");
+    this.name = "CheckoutStopped";
+    this.stopped = true;
+  }
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function requireConfig(file) {
-  const config = JSON.parse(fs.readFileSync(file, "utf8"));
+function checkpoint(signal) {
+  if (signal?.aborted) throw new CheckoutStopped();
+}
+
+function normalizeOrder(config) {
+  const accountEmail = config.account?.email?.trim?.() || config.account?.email || "";
+  const accountPassword = config.account?.password || "";
+  if ((accountEmail && !accountPassword) || (!accountEmail && accountPassword)) {
+    throw new Error("account.email and account.password must both be set to sign in");
+  }
+  if (accountEmail) {
+    config.account = { email: accountEmail, password: accountPassword };
+  } else {
+    delete config.account;
+  }
   if (!config.productUrl) throw new Error("config.productUrl is required");
   if (!config.customer?.name || !config.customer?.email || !config.customer?.phone) {
     throw new Error("config.customer.name, email, and phone are required");
@@ -44,6 +65,10 @@ function requireConfig(file) {
     throw new Error("quantity must be an integer from 1 to 20");
   }
   return config;
+}
+
+function requireConfig(file) {
+  return normalizeOrder(JSON.parse(fs.readFileSync(file, "utf8")));
 }
 
 async function shot(page, dir, name) {
@@ -290,25 +315,84 @@ async function fillCard(page, card) {
   return filled;
 }
 
-async function run(config, screenshotDir) {
-  const browser = await puppeteer.launch({
+async function loginToStore(page, account) {
+  await page.goto("https://www.toyc.com.hk/users/sign_in", {
+    waitUntil: "networkidle2",
+    timeout: 60000,
+  });
+  const email = await page.waitForSelector('[data-e2e-id="login-email_input"]', { timeout: 20000 });
+  await email.click({ clickCount: 3 });
+  await email.type(account.email, { delay: 12 });
+  const password = await page.waitForSelector('[data-e2e-id="login-password_input"]', { timeout: 20000 });
+  await password.click({ clickCount: 3 });
+  await password.type(account.password, { delay: 12 });
+  const responsePromise = page.waitForResponse(
+    (response) =>
+      response.url().includes("/api/users/sign_in") && response.request().method() === "POST",
+    { timeout: 20000 }
+  );
+  const clicked = await page.evaluate(() => {
+    const button = document.querySelector('[data-e2e-id="login-submit_button"]');
+    if (!button) return false;
+    button.click();
+    return true;
+  });
+  if (!clicked) throw new Error("Shop sign-in button was not found");
+  const response = await responsePromise;
+  const body = await response.text();
+  let payload = null;
+  try {
+    payload = body ? JSON.parse(body) : null;
+  } catch {
+    payload = null;
+  }
+  if (!payload || response.status() < 200 || response.status() >= 300) {
+    throw new Error("Shop login failed. Check the account email and password.");
+  }
+  await page.waitForFunction(() => !location.href.includes("/users/sign_in"), { timeout: 15000 });
+  return { email: account.email, url: page.url() };
+}
+
+async function run(config, screenshotDir, options = {}) {
+  const signal = options.signal;
+  const onStatus = typeof options.onStatus === "function" ? options.onStatus : () => {};
+  checkpoint(signal);
+  let browser;
+  const closeBrowser = () => browser?.close().catch(() => {});
+  if (signal) signal.addEventListener("abort", closeBrowser, { once: true });
+  browser = await puppeteer.launch({
     executablePath: CHROME,
     headless: config.headless !== false ? "new" : false,
     args: ["--no-sandbox", "--disable-dev-shm-usage", "--window-size=1440,1200"],
   });
+  if (signal?.aborted) {
+    await closeBrowser();
+    throw new CheckoutStopped();
+  }
   const page = await browser.newPage();
   await page.setViewport({ width: 1440, height: 1200 });
-  const result = { submitted: false };
+  const result = { submitted: false, stopped: false };
 
   try {
+    if (config.account?.email) {
+      checkpoint(signal);
+      onStatus("Signing in to the shop account");
+      result.accountEmail = (await loginToStore(page, config.account)).email;
+    }
+    checkpoint(signal);
+    onStatus("Opening the product page");
     await page.goto(config.productUrl, { waitUntil: "networkidle2", timeout: 60000 });
     const product = await clickAddToCart(page, config.variation);
     result.productTitle = product.title;
     await setQuantity(page, config.quantity);
+    checkpoint(signal);
+    onStatus("Adding the item to the cart");
     await page.click("#btn-add-to-cart");
     await sleep(2000);
     await shot(page, screenshotDir, "01-product.png");
 
+    checkpoint(signal);
+    onStatus("Choosing delivery and payment");
     await page.goto("https://www.toyc.com.hk/cart", { waitUntil: "networkidle2", timeout: 60000 });
     await page.waitForSelector("#order-delivery-method", { timeout: 20000 });
     const cartText = await page.evaluate(() => document.body.innerText);
@@ -358,6 +442,8 @@ async function run(config, screenshotDir) {
       return link ? link.href : null;
     });
     if (!checkoutHref) throw new Error("cart page has no 前往結帳 link");
+    checkpoint(signal);
+    onStatus("Filling customer details");
     await page.goto(checkoutHref, { waitUntil: "networkidle2", timeout: 60000 });
     await page.waitForSelector("#order-customer-name", { timeout: 20000 });
     if (!page.url().includes("/checkout")) {
@@ -439,6 +525,8 @@ async function run(config, screenshotDir) {
     result.screenshots = [customerShot, paymentShot, termsShot];
 
     if (!config.submitOrder) {
+      checkpoint(signal);
+      onStatus("Ready for review. Payment was not submitted.");
       result.stoppedBeforeSubmit = true;
       return result;
     }
@@ -477,6 +565,12 @@ async function run(config, screenshotDir) {
     result.screenshots.push(await shot(page, screenshotDir, "04-after-submit.png"));
     return result;
   } catch (error) {
+    if (signal?.aborted || error.stopped) {
+      result.stopped = true;
+      result.error = "Stopped";
+      onStatus("Stopped");
+      return result;
+    }
     result.error = error.message;
     try {
       result.screenshots = result.screenshots || [];
@@ -486,7 +580,8 @@ async function run(config, screenshotDir) {
     }
     throw Object.assign(error, { result });
   } finally {
-    await browser.close();
+    signal?.removeEventListener("abort", closeBrowser);
+    await closeBrowser();
   }
 }
 
@@ -510,4 +605,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { run, requireConfig };
+module.exports = { run, requireConfig, normalizeOrder, loginToStore, CheckoutStopped };
