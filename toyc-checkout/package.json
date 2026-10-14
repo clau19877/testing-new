@@ -1,0 +1,11 @@
+{
+  "name": "toyc-checkout",
+  "private": true,
+  "description": "Drive a guest checkout on toyc.com.hk up to the payment step.",
+  "scripts": {
+    "checkout": "node checkout.js"
+  },
+  "dependencies": {
+    "puppeteer-core": "^24.15.0"
+  }
+}
