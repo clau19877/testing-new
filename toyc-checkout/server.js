@@ -33,6 +33,16 @@ const runState = {
   controller: null,
 };
 
+function sendAttachment(res, body, filename, type) {
+  res.writeHead(200, {
+    "content-type": type,
+    "content-disposition": `attachment; filename="${filename}"`,
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+  });
+  res.end(body);
+}
+
 function send(res, status, body, type = "application/json; charset=utf-8") {
   const payload = typeof body === "string" ? body : JSON.stringify(body);
   res.writeHead(status, {
@@ -265,6 +275,28 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  const orderFileMatch = url.pathname.match(/^\/api\/orders\/([a-f0-9]{16})\/order\.json$/);
+  if (req.method === "GET" && orderFileMatch) {
+    const record = listOrders().find((order) => order.id === orderFileMatch[1]);
+    if (!record) {
+      send(res, 404, { error: "Order not found" });
+      return;
+    }
+    sendAttachment(
+      res,
+      JSON.stringify(record.config, null, 2),
+      `order-${record.id}.json`,
+      "application/json; charset=utf-8"
+    );
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/run/log.txt") {
+    const text = runState.log.map((entry) => `${entry.at} ${entry.message}`).join("\n");
+    sendAttachment(res, text ? `${text}\n` : "", "run-log.txt", "text/plain; charset=utf-8");
+    return;
+  }
+
   const shotMatch = url.pathname.match(/^\/api\/run\/screen\/([a-z0-9-]+\.png)$/);
   if (req.method === "GET" && shotMatch && shots.has(shotMatch[1]) && runState.runDir) {
     const file = path.join(runState.runDir, shotMatch[1]);
@@ -272,7 +304,11 @@ async function handleApi(req, res, url) {
       send(res, 404, { error: "Screenshot not ready" });
       return;
     }
-    res.writeHead(200, { "content-type": "image/png", "cache-control": "no-store" });
+    const headers = { "content-type": "image/png", "cache-control": "no-store" };
+    if (url.searchParams.get("download") === "1") {
+      headers["content-disposition"] = `attachment; filename="${shotMatch[1]}"`;
+    }
+    res.writeHead(200, headers);
     fs.createReadStream(file).pipe(res);
     return;
   }

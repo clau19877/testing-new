@@ -46,6 +46,14 @@ test("json and csv imports become checkout orders without exposing passwords", (
   assert.equal(csv[0].account, undefined);
 });
 
+test("the sample download files import", () => {
+  const json = fs.readFileSync(path.join(__dirname, "../public/sample-order.json"), "utf8");
+  const csv = fs.readFileSync(path.join(__dirname, "../public/sample-orders.csv"), "utf8");
+  assert.equal(ordersFromText(json, "sample-order.json")[0].customer.name, "測試 用戶");
+  assert.equal(ordersFromText(csv, "sample-orders.csv")[0].quantity, 1);
+  assert.equal(ordersFromText(csv, "sample-orders.csv")[0].account, undefined);
+});
+
 test("an account email without a password is rejected", () => {
   assert.throws(
     () =>

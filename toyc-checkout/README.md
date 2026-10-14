@@ -12,7 +12,7 @@ npm install
 npm start
 ```
 
-Open http://127.0.0.1:8787. The first visit creates the operator account. After sign-in, use **Import order details** with a JSON or CSV file. `public/sample-order.json` is a guest order. Add `account.email` and `account.password` to sign in at the shop before adding the item.
+Open http://127.0.0.1:8787. The first visit creates the operator account. After sign-in, the Downloads list has the sample JSON, the sample CSV, the selected order file, the run log, and any checkout screenshots. Add `account.email` and `account.password` to an imported file to sign in at the shop before adding the item.
 
 **Start** begins that order. The same button becomes **Stop** while Chrome is working and closes the browser immediately.
 

@@ -13,6 +13,7 @@ const statusEl = document.querySelector("#status");
 const logEl = document.querySelector("#log");
 const screen = document.querySelector("#screen");
 const importError = document.querySelector("#import-error");
+const downloadsEl = document.querySelector("#downloads");
 
 let needsSetup = false;
 let orders = [];
@@ -71,6 +72,25 @@ function renderOrders() {
     item.append(button);
     ordersEl.append(item);
   }
+}
+
+function addDownload(label, href) {
+  const item = document.createElement("li");
+  const link = document.createElement("a");
+  link.href = href;
+  link.textContent = label;
+  link.setAttribute("download", "");
+  item.append(link);
+  downloadsEl.append(item);
+}
+
+function renderDownloads() {
+  downloadsEl.innerHTML = "";
+  addDownload("Sample order JSON", "/sample-order.json");
+  addDownload("Sample orders CSV", "/sample-orders.csv");
+  if (selectedId) addDownload("Selected order JSON", `/api/orders/${selectedId}/order.json`);
+  if ((run.log || []).length) addDownload("Run log", "/api/run/log.txt");
+  for (const name of run.screens || []) addDownload(name, `/api/run/screen/${name}?download=1`);
 }
 
 function renderDesk() {
@@ -143,6 +163,7 @@ async function refresh() {
   if (!selectedId && orders[0]) selectedId = orders[0].id;
   run = await api("/api/run");
   renderOrders();
+  renderDownloads();
   renderDesk();
 }
 
