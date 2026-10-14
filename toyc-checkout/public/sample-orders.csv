@@ -1,0 +1,2 @@
+productUrl,quantity,variation,deliveryMethod,district,storeContains,paymentMethod,customerName,customerEmail,customerPhone,dialCode,gender,remarks,accountEmail,accountPassword,submitOrder,agreeTerms,headless
+https://www.toyc.com.hk/products/dragon-ball-z-blood-of-saiyans-super-saiyan-vegeta,1,,順豐站取件,香港--中西區--中環,環球大廈,信用卡,測試 用戶,dry-run@example.com,51234567,852,不透露,dry run,,,false,true,true
